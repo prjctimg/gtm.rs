@@ -1,0 +1,24 @@
+# [package]
+# name = "gtm-rs"
+# version = "0.1.0"
+# edition = "2024"
+#
+# [dependencies]
+# ratatui = "0.30.2"
+#
+#
+#
+
+[package]
+name = "chart"
+publish = false
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+color-eyre.workspace = true
+crossterm.workspace = true
+ratatui.workspace = true
+
+[lints]
+workspace = true
