@@ -1,24 +1,15 @@
-# [package]
-# name = "gtm-rs"
-# version = "0.1.0"
-# edition = "2024"
-#
-# [dependencies]
-# ratatui = "0.30.2"
-#
-#
-#
+[workspace]
+resolver = "2"
+members = [
+    "gtm-core",
+    "gtm-audio",
+    "gtmd",
+    "gtm-tui",
+    "gtm-cli",
+    "gtm-mpris",
+]
 
-[package]
-name = "chart"
-publish = false
-license.workspace = true
-rust-version.workspace = true
-
-[dependencies]
-color-eyre.workspace = true
-crossterm.workspace = true
-ratatui.workspace = true
-
-[lints]
-workspace = true
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-only"
