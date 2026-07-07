@@ -54,6 +54,14 @@ jobs:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install system dependencies (Linux)
+        if: startsWith(matrix.os, 'ubuntu')
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+
+      - name: Install system dependencies (macOS)
+        if: startsWith(matrix.os, 'macos')
+        run: brew install pkg-config
+
       - name: Build release binaries
         run: cargo build --release
 
@@ -77,10 +85,15 @@ jobs:
           done
           echo "platform=${platform}" >> "$GITHUB_ENV"
 
+      - name: Install cargo-binstall
+        run: curl -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
+
+      - name: Install cargo-deb via binstall
+        run: cargo binstall -y cargo-deb
+
       - name: Build Debian packages (Linux only)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
-          cargo install cargo-deb
           cargo deb --package gtmd --package gtm-cli --package gtm-tui
           # Rename deb to include arch
           arch="$(uname -m)"
