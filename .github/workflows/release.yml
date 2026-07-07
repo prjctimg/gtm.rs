@@ -85,21 +85,30 @@ jobs:
           done
           echo "platform=${platform}" >> "$GITHUB_ENV"
 
-      - name: Install cargo-binstall
-        run: curl -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-
-      - name: Install cargo-deb via binstall
-        run: cargo binstall -y cargo-deb
-
-      - name: Build Debian packages (Linux only)
+      - name: Install cargo-deb and build Debian packages (Linux only)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
-          cargo deb --package gtmd --package gtm-cli --package gtm-tui
-          # Rename deb to include arch
+          cargo install cargo-deb
+          # Copy generated assets into each package's deb-assets/ directory
+          # (cargo deb does not support ../ in asset paths)
+          for pkg in gtmd gtm-cli gtm-tui; do
+            mkdir -p "$pkg/deb-assets/man" "$pkg/deb-assets/completions"
+            cp -r artifacts/man/* "$pkg/deb-assets/man/"
+            cp -r artifacts/completions/* "$pkg/deb-assets/completions/"
+          done
+          cp dist/gtmd.service gtmd/deb-assets/
+          for pkg in gtmd gtm-cli gtm-tui; do
+            cargo deb --package "$pkg"
+          done
+          # Rename debs to include arch
           arch="$(uname -m)"
           for deb in target/debian/*.deb; do
             base="$(basename "$deb" .deb)"
             mv "$deb" "target/debian/${base}_${arch}.deb"
+          done
+          # Clean up deb-assets dirs
+          for pkg in gtmd gtm-cli gtm-tui; do
+            rm -rf "$pkg/deb-assets"
           done
 
       - uses: actions/upload-artifact@v4
