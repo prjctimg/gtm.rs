@@ -1,0 +1,109 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.set-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive tag
+        id: set-tag
+        run: |
+          hash=$(git rev-parse --short=7 HEAD)
+          echo "tag=debug+${hash}" >> "$GITHUB_OUTPUT"
+
+      - name: Delete and recreate tag
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          tag="${{ steps.set-tag.outputs.tag }}"
+          git tag -d "${tag}" 2>/dev/null || true
+          git push origin ":refs/tags/${tag}" 2>/dev/null || true
+          git tag "${tag}"
+          git push origin "${tag}" --force
+
+  build:
+    needs: tag
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            suffix: x86_64-linux
+          - os: macos-latest
+            suffix: x86_64-darwin
+          - os: windows-latest
+            suffix: x86_64-windows.exe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo build --release
+
+      - name: Package binaries
+        shell: bash
+        run: |
+          cd target/release
+          for bin in gtmd gtm-cli gtm-tui; do
+            cp "${bin}${{ matrix.os == 'windows-latest' && '.exe' || '' }}" \
+               "${bin}-${{ matrix.suffix }}"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.suffix }}
+          path: target/release/*-${{ matrix.suffix }}
+
+  release:
+    needs: [tag, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Generate release body
+        id: body
+        run: |
+          prev=$(git tag --list 'debug+*' --sort=-creatordate | head -2 | tail -1)
+          if [ -z "${prev}" ]; then
+            echo "changelog=Initial release" >> "$GITHUB_OUTPUT"
+          else
+            log=$(git log --oneline "${prev}..${{ needs.tag.outputs.tag }}" 2>/dev/null | cat)
+            if [ -z "${log}" ]; then
+              log="No changes since previous release"
+            fi
+            echo "changelog<<EOF" >> "$GITHUB_OUTPUT"
+            echo "${log}" >> "$GITHUB_OUTPUT"
+            echo "EOF" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: binaries-*
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.tag.outputs.tag }}
+          name: ${{ needs.tag.outputs.tag }}
+          body: ${{ steps.body.outputs.changelog }}
+          files: |
+            *-x86_64-linux
+            *-x86_64-darwin
+            *-x86_64-windows.exe
+          fail_on_unmatched_files: false

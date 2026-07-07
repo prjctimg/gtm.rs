@@ -9,6 +9,27 @@ use rodio::{Decoder, DeviceSinkBuilder, Player, Source};
 use crate::backend::{AudioError, AudioEvent, AudioResult};
 use crate::symphonia::SymphoniaSource;
 
+/// Trait abstracting over audio mixer implementations (real or null).
+pub trait Mixer: Send + Sync {
+    fn load_active(&mut self, path: &str, start_pos: f64) -> AudioResult<()>;
+    fn load_standby(&mut self, path: &str) -> AudioResult<()>;
+    fn standby_is_loaded(&self) -> bool;
+    fn play(&mut self) -> AudioResult<()>;
+    fn pause(&mut self) -> AudioResult<()>;
+    fn stop(&mut self) -> AudioResult<()>;
+    fn seek(&mut self, position_secs: f64) -> AudioResult<()>;
+    fn set_volume(&mut self, volume: u8) -> AudioResult<()>;
+    fn volume(&self) -> u8;
+    fn is_playing(&self) -> bool;
+    fn current_position(&self) -> f64;
+    fn duration(&self) -> f64;
+    fn active_remaining(&self) -> f64;
+    fn start_crossfade(&mut self, duration_secs: f64);
+    fn is_crossfading(&self) -> bool;
+    fn force_complete_crossfade(&mut self);
+    fn poll(&mut self) -> AudioResult<Option<AudioEvent>>;
+}
+
 /// Dual-player audio mixer with crossfade support.
 ///
 /// Two `rodio::Player`s feed the same hardware mixer.  During normal playback
@@ -31,6 +52,60 @@ pub struct AudioMixer {
 }
 
 struct MixerDeviceSink(rodio::MixerDeviceSink);
+
+impl Mixer for AudioMixer {
+    fn load_active(&mut self, path: &str, start_pos: f64) -> AudioResult<()> {
+        self.load_active(path, start_pos)
+    }
+    fn load_standby(&mut self, path: &str) -> AudioResult<()> {
+        self.load_standby(path)
+    }
+    fn standby_is_loaded(&self) -> bool {
+        self.standby_is_loaded()
+    }
+    fn play(&mut self) -> AudioResult<()> {
+        self.play()
+    }
+    fn pause(&mut self) -> AudioResult<()> {
+        self.pause()
+    }
+    fn stop(&mut self) -> AudioResult<()> {
+        self.stop()
+    }
+    fn seek(&mut self, position_secs: f64) -> AudioResult<()> {
+        self.seek(position_secs)
+    }
+    fn set_volume(&mut self, volume: u8) -> AudioResult<()> {
+        self.set_volume(volume)
+    }
+    fn volume(&self) -> u8 {
+        self.volume()
+    }
+    fn is_playing(&self) -> bool {
+        self.is_playing()
+    }
+    fn current_position(&self) -> f64 {
+        self.current_position()
+    }
+    fn duration(&self) -> f64 {
+        self.duration()
+    }
+    fn active_remaining(&self) -> f64 {
+        self.active_remaining()
+    }
+    fn start_crossfade(&mut self, duration_secs: f64) {
+        self.start_crossfade(duration_secs)
+    }
+    fn is_crossfading(&self) -> bool {
+        self.is_crossfading()
+    }
+    fn force_complete_crossfade(&mut self) {
+        self.force_complete_crossfade()
+    }
+    fn poll(&mut self) -> AudioResult<Option<AudioEvent>> {
+        self.poll()
+    }
+}
 
 impl AudioMixer {
     pub fn new() -> AudioResult<Self> {
@@ -147,8 +222,6 @@ impl AudioMixer {
     pub fn stop(&mut self) -> AudioResult<()> {
         self.player_a.stop();
         self.player_b.stop();
-        self.player_b.set_volume(0.0);
-        // self.player_b.pause();
         *self.position.lock().unwrap() = 0.0;
         self.playing.store(false, Ordering::SeqCst);
         *self.start_time.lock().unwrap() = None;

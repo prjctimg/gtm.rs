@@ -61,6 +61,18 @@ pub enum RepeatMode {
     All,
 }
 
+impl std::str::FromStr for RepeatMode {
+    type Err = String;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "off" => Ok(Self::Off),
+            "one" => Ok(Self::One),
+            "all" => Ok(Self::All),
+            _ => Err(format!("invalid repeat mode: {s}, expected off|one|all")),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 pub enum YTFilter {
     Song,
@@ -82,7 +94,7 @@ pub enum ThemeMode {
     Light,
 }
 
-/// It gets this data from parsed metadata in images either from ffmpeg or API call
+/// Image data parsed from metadata or API call
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub data: Vec<u8>,

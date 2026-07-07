@@ -119,6 +119,7 @@ pub enum DaemonReq {
     // ─── Playback ───
     Play {
         path: String,
+        start_pos: f64,
     },
     PlayPause,
     Pause,

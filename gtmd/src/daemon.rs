@@ -6,7 +6,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{broadcast, mpsc, RwLock};
 use tracing::{error, info, warn};
 
-use gtm_audio::{AudioEvent, AudioMixer, AudioResult};
+use gtm_audio::{AudioEvent, AudioMixer, AudioResult, Mixer, NullMixer};
 use gtm_core::ipc::{DaemonEvent, DaemonReq, DaemonRes, QueueAction};
 use gtm_core::state::{DaemonState, PlaybackStatus};
 use gtm_core::wire;
@@ -20,7 +20,7 @@ type ReplyTx = mpsc::UnboundedSender<DaemonRes>;
 
 pub struct Daemon {
     pub state: Arc<RwLock<DaemonState>>,
-    pub mixer: AudioMixer,
+    pub mixer: Box<dyn Mixer>,
     pub listener: UnixListener,
     pub config: DaemonConfig,
     pub event_tx: broadcast::Sender<DaemonEvent>,
@@ -34,8 +34,14 @@ impl Daemon {
     pub fn new(config: DaemonConfig) -> Result<Self, CoreError> {
         let state = Arc::new(RwLock::new(DaemonState::new()));
 
-        let mixer = AudioMixer::new()
-            .map_err(|e| CoreError::Daemon(format!("audio mixer init: {e}")))?;
+        let mixer: Box<dyn Mixer> = if config.test_mode {
+            Box::new(NullMixer::new())
+        } else {
+            Box::new(
+                AudioMixer::new()
+                    .map_err(|e| CoreError::Daemon(format!("audio mixer init: {e}")))?,
+            )
+        };
 
         let socket_path = Path::new(&config.socket_path);
         if socket_path.exists() {
@@ -190,7 +196,7 @@ impl Daemon {
 
     async fn handle_request(&mut self, req: &DaemonReq) -> Result<DaemonRes, CoreError> {
         match req {
-            DaemonReq::Play { path } => self.cmd_play(path, 0.0).await,
+            DaemonReq::Play { path, start_pos } => self.cmd_play(path, *start_pos).await,
             DaemonReq::PlayPause => self.cmd_playpause().await,
             DaemonReq::Pause => self.cmd_pause().await,
             DaemonReq::Stop => self.cmd_stop().await,
@@ -622,46 +628,78 @@ impl Daemon {
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Add { path, position } => {
-                let mut state = self.state.write().await;
-                queue::queue_add(&mut state, path, *position);
-                let version = state.version as u32;
-                let queue = state.queue.clone();
-                let cursor = state.queue_cursor;
-                drop(state);
-                self.push_event(DaemonEvent::QueueChanged {
-                    queue,
-                    cursor,
-                })
-                .await;
+                let was_empty;
+                {
+                    let mut state = self.state.write().await;
+                    was_empty = state.queue.is_empty() && state.status == PlaybackStatus::Stopped;
+                    queue::queue_add(&mut state, path, *position);
+                    let queue = state.queue.clone();
+                    let cursor = state.queue_cursor;
+                    drop(state);
+                    self.push_event(DaemonEvent::QueueChanged {
+                        queue,
+                        cursor,
+                    })
+                    .await;
+                    if was_empty {
+                        return self.cmd_play(path, 0.0).await;
+                    }
+                }
+                let version = self.state.read().await.version as u32;
                 Ok(DaemonRes::Ok { version })
             }
             QueueAction::AddMany { paths } => {
-                let mut state = self.state.write().await;
-                queue::queue_add_many(&mut state, paths);
-                let version = state.version as u32;
-                let queue = state.queue.clone();
-                let cursor = state.queue_cursor;
-                drop(state);
-                self.push_event(DaemonEvent::QueueChanged {
-                    queue,
-                    cursor,
-                })
-                .await;
+                let was_empty;
+                let first_path;
+                {
+                    let mut state = self.state.write().await;
+                    was_empty = state.queue.is_empty() && state.status == PlaybackStatus::Stopped;
+                    queue::queue_add_many(&mut state, paths);
+                    first_path = paths[0].clone();
+                    let queue = state.queue.clone();
+                    let cursor = state.queue_cursor;
+                    drop(state);
+                    self.push_event(DaemonEvent::QueueChanged {
+                        queue,
+                        cursor,
+                    })
+                    .await;
+                    if was_empty {
+                        return self.cmd_play(&first_path, 0.0).await;
+                    }
+                }
+                let version = self.state.read().await.version as u32;
                 Ok(DaemonRes::Ok { version })
             }
             QueueAction::AddFolder { path } => {
                 let paths = queue::scan_audio_files(path);
-                let mut state = self.state.write().await;
-                queue::queue_add_many(&mut state, &paths);
-                let version = state.version as u32;
-                let queue = state.queue.clone();
-                let cursor = state.queue_cursor;
-                drop(state);
-                self.push_event(DaemonEvent::QueueChanged {
-                    queue,
-                    cursor,
-                })
-                .await;
+                if paths.is_empty() {
+                    return Ok(DaemonRes::Error {
+                        version: self.state.read().await.version as u32,
+                        message: "no audio files found in folder".into(),
+                    });
+                }
+                let was_empty;
+                let first_path;
+                {
+                    let mut state = self.state.write().await;
+                    was_empty = state.queue.is_empty() && state.status == PlaybackStatus::Stopped;
+                    queue::queue_add_many(&mut state, &paths);
+                    first_path = paths[0].clone();
+                    let queue = state.queue.clone();
+                    let cursor = state.queue_cursor;
+                    drop(state);
+                    self.push_event(DaemonEvent::QueueChanged {
+                        queue,
+                        cursor,
+                    })
+                    .await;
+                    // If queue was empty and stopped, auto-play the first track
+                    if was_empty {
+                        return self.cmd_play(&first_path, 0.0).await;
+                    }
+                }
+                let version = self.state.read().await.version as u32;
                 Ok(DaemonRes::Ok { version })
             }
             QueueAction::Set { paths, start_idx } => {

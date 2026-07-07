@@ -4,6 +4,7 @@
 //
 // This is free software released under the GPL-3.0 license.
 
+pub mod client;
 pub mod ipc;
 pub mod state;
 pub mod state_machine;

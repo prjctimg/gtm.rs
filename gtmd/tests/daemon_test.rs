@@ -29,7 +29,7 @@ fn test_config() -> DaemonConfig {
         config: None,
         verbose: false,
         test_mode: true,
-        backend: Some("ffmpeg".into()),
+        backend: None,
     };
     let config = DaemonConfig::load(&args);
     let _ = std::fs::remove_file(&config.socket_path);

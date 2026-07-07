@@ -27,7 +27,7 @@ Open another terminal. Use `socat` to connect to the socket:
 socat - UNIX-CONNECT:/run/user/1000/gtmd.socket
 ```
 
-{"Queue":{"AddFolder":{"path":"/home/prjctimg/.local/share/gtm/audio/"}}}
+{"Queue":{"action":{"AddFolder":{"path":"/home/prjctimg/.local/share/gtm/audio/"}}}}
 Type a JSON request line and press Enter:
 
 ### Ping (expect `{"Pong":null}` back)
@@ -59,7 +59,7 @@ Manage the playback queue — list, add files, add folders, remove, reorder.
 #### List queue
 
 ```json
-{"Queue":{"List":null}}
+{"Queue":{"action":{"List":null}}}
 ```
 
 Response: `{"QueueState":{"version":2,"tracks":[...],"cursor":0}}`
@@ -67,13 +67,13 @@ Response: `{"QueueState":{"version":2,"tracks":[...],"cursor":0}}`
 #### Add a single file to queue
 
 ```json
-{"Queue":{"Add":{"path":"/home/prjctimg/.local/share/gtm/audio/track1.opus","position":null}}}
+{"Queue":{"action":{"Add":{"path":"/home/prjctimg/.local/share/gtm/audio/track1.opus","position":null}}}}
 ```
 
 #### Add multiple files to queue
 
 ```json
-{"Queue":{"AddMany":{"paths":["/path/to/track1.opus","/path/to/track2.mp3"]}}}
+{"Queue":{"action":{"AddMany":{"paths":["/path/to/track1.opus","/path/to/track2.mp3"]}}}}
 ```
 
 #### Add an entire folder (recursive scan)
@@ -81,31 +81,31 @@ Response: `{"QueueState":{"version":2,"tracks":[...],"cursor":0}}`
 Scans recursively for audio files (`mp3`, `flac`, `ogg`, `wav`, `m4a`, `aac`, `opus`, `wma`):
 
 ```json
-{"Queue":{"AddFolder":{"path":"/home/prjctimg/Music/Album"}}}
+{"Queue":{"action":{"AddFolder":{"path":"/home/prjctimg/Music/Album"}}}}
 ```
 
 #### Clear queue
 
 ```json
-{"Queue":{"Clear":null}}
+{"Queue":{"action":{"Clear":null}}}
 ```
 
 #### Remove at index
 
 ```json
-{"Queue":{"Remove":{"index":0}}}
+{"Queue":{"action":{"Remove":{"index":0}}}}
 ```
 
 #### Move track
 
 ```json
-{"Queue":{"Move":{"from":0,"to":2}}}
+{"Queue":{"action":{"Move":{"from":0,"to":2}}}}
 ```
 
 ### Set queue (replace entire queue with given tracks)
 
 ```json
-{"Queue":{"Set":{"paths":["/path/to/a.opus","/path/to/b.flac"],"start_idx":0}}}
+{"Queue":{"action":{"Set":{"paths":["/path/to/a.opus","/path/to/b.flac"],"start_idx":0}}}}
 
 ### Pause
 

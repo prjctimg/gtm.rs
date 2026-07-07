@@ -147,7 +147,8 @@ enum_roundtrip!(
     DaemonReq,
     "Play",
     DaemonReq::Play {
-        path: "/m/s.mp3".into()
+        path: "/m/s.mp3".into(),
+        start_pos: 0.0,
     }
 );
 enum_roundtrip!(daemon_req_pause, DaemonReq, "Pause", DaemonReq::Pause);
