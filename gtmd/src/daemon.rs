@@ -438,12 +438,10 @@ impl Daemon {
     }
 
     async fn cmd_stop(&mut self) -> Result<DaemonRes, CoreError> {
-        let is_active =
-            self.mixer.is_playing() || self.state.read().await.status != PlaybackStatus::Stopped;
         self.mixer.stop()?;
         self.crossfade_loaded_for = None;
         let mut state = self.state.write().await;
-        if is_active {
+        if state.status != PlaybackStatus::Stopped {
             state.stop()?;
         }
         let version = state.version as u32;
@@ -496,12 +494,20 @@ impl Daemon {
     }
 
     async fn cmd_seek(&mut self, pos: f64) -> Result<DaemonRes, CoreError> {
+        let state = self.state.read().await;
+        if state.status == PlaybackStatus::Stopped {
+            return Err(CoreError::Daemon(
+                "cannot seek while stopped".into(),
+            ));
+        }
+        drop(state);
         self.mixer.seek(pos)?;
+        let actual = self.mixer.current_position();
         let mut state = self.state.write().await;
-        state.seek(self.mixer.current_position())?;
+        state.seek(actual)?;
         let version = state.version as u32;
         drop(state);
-        self.push_event(DaemonEvent::PositionChanged { time_pos: pos })
+        self.push_event(DaemonEvent::PositionChanged { time_pos: actual })
             .await;
         Ok(DaemonRes::Ok { version })
     }
