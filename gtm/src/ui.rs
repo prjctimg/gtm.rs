@@ -1,3 +1,24 @@
+//! TUI rendering with ratatui — 3-row layout with tabs, content, and footer.
+//!
+//! ```text
+//!  ┌───────────────────────────────────────────┐
+//!  │  Tab bar: [1]NowPlaying [2]Library ...    │  ← render_tabs()
+//!  │  Status: ▶ Vol: 80%                       │
+//!  ├───────────────────────────────────────────┤
+//!  │                                           │
+//!  │  Content area (per-tab):                  │  ← render_content()
+//!  │  • NowPlaying: metadata, progress, vol    │
+//!  │  • Library/Queue: filterable track list   │
+//!  │  • YouTube: search results                │
+//!  │  • Settings: volume/repeat/shuffle/etc    │
+//!  │  • Help: keyboard reference               │
+//!  │                                           │
+//!  ├───────────────────────────────────────────┤
+//!  │  Footer: key hints / search input / cmd   │  ← render_footer()
+//!  │  Error bar (overlaid, red background)     │
+//!  └───────────────────────────────────────────┘
+//! ```
+
 use std::path::PathBuf;
 
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};

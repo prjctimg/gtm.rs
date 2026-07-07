@@ -1,3 +1,24 @@
+//! CLI mode: dispatches subcommands to the daemon via IPC.
+//!
+//! ```text
+//!  gtm play <path>
+//!  gtm next
+//!  gtm queue
+//!  gtm status
+//!       │
+//!       ▼
+//!  ┌────────────────────────┐
+//!  │  DaemonClient::connect │  → Unix socket → gtmd
+//!  │  serde_json over pipe  │
+//!  └────────┬───────────────┘
+//!           │ IPC request
+//!           ▼
+//!  ┌────────────────────────┐
+//!  │  command match arms    │  Each CliCommand → client.method()
+//!  │  Print result (or JSON)│
+//!  └────────────────────────┘
+//! ```
+
 use std::path::PathBuf;
 
 use gtm_core::client::DaemonClient;

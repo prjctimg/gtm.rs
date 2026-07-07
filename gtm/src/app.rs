@@ -1,3 +1,24 @@
+//! TUI application state, event loop, and key handling.
+//!
+//! ```text
+//!  ┌──────────────────────────────────────────────────────┐
+//!  │  TUI Event Loop (run)                                │
+//!  │                                                      │
+//!  │  ┌──────────┐    ┌──────────────┐    ┌───────────┐  │
+//!  │  │ Drain    │───→│ Render       │───→│ Poll      │  │
+//!  │  │ cmd_rx   │    │ (ratatui)    │    │ crossterm │  │
+//!  │  │ queue    │    │              │    │ key event │  │
+//!  │  └────┬─────┘    └──────────────┘    └─────┬─────┘  │
+//!  │       │                                    │        │
+//!  │       ▼                                    ▼        │
+//!  │  handle_command()                     handle_key()  │
+//!  │  ─── via DaemonClient IPC             ─── dispatch  │
+//!  │       to gtmd                          keybinding  │
+//!  │                                                    │
+//!  │  Auto-refresh timer sends Refresh every 250ms      │
+//!  └──────────────────────────────────────────────────────┘
+//! ```
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -22,22 +43,36 @@ pub struct App {
     pub state: DaemonState,
     pub current_tab: Tab,
     pub input_mode: InputMode,
+
+    // Text input for filter ('/') and command (':') modes
     pub search_query: String,
+
+    // Scrolling state for list views (queue, library, YT)
     pub scroll_offset: usize,
+
+    // Cached data for each tab (fetched lazily from daemon)
     pub tracks_cache: Vec<TrackInfo>,
     pub queue_cache: Vec<TrackInfo>,
     pub queue_cursor: usize,
     pub yt_results_cache: Vec<gtm_core::track::YTSearchResult>,
     pub volume_input: String,
     pub playlist_cache: Vec<gtm_core::track::Playlist>,
+
+    // Status bar messages
     pub error_message: Option<String>,
     pub status_message: Option<String>,
     pub crossfade_duration: u8,
+
+    // Command channel — background timer and key handlers send TuiCommands
+    // through cmd_tx, handle_command processes them from cmd_rx.
     pub cmd_rx: mpsc::Receiver<TuiCommand>,
     cmd_tx: mpsc::Sender<TuiCommand>,
     keybindings: crate::keymap::Keybindings,
 }
 
+/// Commands sent from key handlers or the auto-refresh timer to the
+/// main event loop.  Each variant maps 1:1 to a DaemonClient IPC call
+/// or a local cache refresh.
 pub enum TuiCommand {
     Play(String),
     PlayPause,
@@ -98,13 +133,23 @@ impl App {
         self.cmd_tx.clone()
     }
 
+    /// Main TUI event loop:
+    ///
+    ///   1. Drain any queued TuiCommands → call IPC on daemon
+    ///   2. Render current state to screen via ratatui
+    ///   3. Poll crossterm for key events → dispatch through keybindings
+    ///
+    /// A background tokio task sends a Refresh command every 250 ms,
+    /// which reads broadcast events from the daemon and updates local state.
     pub async fn run(
         mut self,
         terminal: &mut Terminal<ratatui::backend::CrosstermBackend<std::io::Stdout>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // Initial state fetch from daemon
         self.fetch_state().await;
         self.fetch_queue().await;
 
+        // Background timer: refresh state every 250 ms
         let cmd_tx = self.cmd_tx();
         tokio::spawn(async move {
             loop {
@@ -114,12 +159,15 @@ impl App {
         });
 
         loop {
+            // 1. Process all queued commands (IPC calls + cache refreshes)
             while let Ok(cmd) = self.cmd_rx.try_recv() {
                 self.handle_command(cmd).await;
             }
 
+            // 2. Render the UI
             terminal.draw(|f| ui::render(f, &mut self))?;
 
+            // 3. Handle keyboard input
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
@@ -218,6 +266,13 @@ impl App {
         }
     }
 
+    /// Dispatch a key event based on current InputMode:
+    ///
+    ///   Normal     → keybindings.dispatch() → KeyboardAction
+    ///   Searching  → type query, Enter to search, Esc to cancel
+    ///   Command    → type command, Enter to execute, Esc to cancel
+    ///
+    /// Returns false when the app should quit.
     async fn handle_key(&mut self, key: event::KeyEvent) -> bool {
         match self.input_mode {
             InputMode::Searching => match key.code {
@@ -304,6 +359,10 @@ impl App {
                         self.current_tab = tab;
                         self.refresh_tab().await;
                     }
+                    // PlayPause toggles based on current state:
+                    //   Playing  → Pause
+                    //   Paused   → Play (resume current track)
+                    //   Stopped  → Play from queue (first item at cursor)
                     Some(KeyboardAction::PlayPause) => {
                         let tx = self.cmd_tx();
                         match self.state.status {

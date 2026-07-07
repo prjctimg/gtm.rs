@@ -1,3 +1,19 @@
+//! GTM music player — single binary, TUI + CLI modes.
+//!
+//! ```text
+//! ┌──────────────────────────────────────────────────────────┐
+//! │                     gtm (this binary)                     │
+//! │                                                          │
+//! │  gtm              → TUI mode (ratatui + crossterm)       │
+//! │  gtm -c           → CLI mode (prints help)               │
+//! │  gtm play <path>  → CLI mode (direct subcommand)         │
+//! │  gtm --version    → prints version                       │
+//! │                                                          │
+//! │  Both modes communicate with gtmd via Unix socket IPC    │
+//! │  over JSON lines (DaemonClient in gtm-core).             │
+//! └──────────────────────────────────────────────────────────┘
+//! ```
+
 mod app;
 mod cli;
 mod keymap;
@@ -68,16 +84,27 @@ enum CliCommand {
     Quit,
 }
 
+// Dispatch logic:
+//
+//   ┌──────────┐     subcommand? ─yes──→ cli::run()  ──→ DaemonClient IPC
+//   │  args    │
+//   │  parse   │     --cli flag? ──yes──→ print help
+//   │          │
+//   └──────────┘     no args ───────────→ ui::run_tui() → TUI event loop
+//
 fn main() {
     let args = Args::parse();
 
     if let Some(ref cmd) = args.command {
+        // A subcommand was given → run in CLI mode, dispatch directly
         cli::run(args.socket, args.json, cmd);
     } else if args.cli {
+        // --cli flag with no subcommand → print CLI help
         let mut cmd = Args::command();
         cmd.print_help().unwrap();
         println!();
     } else {
+        // No subcommand, no --cli → launch the TUI
         let res = ui::run_tui(args.socket);
         if let Err(e) = res {
             eprintln!("Error: {e}");

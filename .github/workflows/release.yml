@@ -1,3 +1,24 @@
+# Release pipeline — builds gtm + gtmd for Linux (x86_64, ARM) and macOS.
+#
+# Pipeline:
+#
+#   tag job         → derive version, ensure tag exists
+#     │
+#     ▼
+#   build job       → for each OS/arch:
+#     │                1. cargo build --release
+#     │                2. Generate manpages (pandoc) + completions (release-gen)
+#     │                3. Package archives:
+#     │                   gtm-full-{platform}.tar.gz  (gtm + gtmd + man + completions)
+#     │                   gtmd-{platform}.tar.gz      (gtmd + daemon manpages + service)
+#     │                4. Build .deb packages:
+#     │                   gtm-full_{version}_{arch}.deb (gtm + gtmd + service)
+#     │                   gtmd_{version}_{arch}.deb
+#     │                5. Upload build artifacts
+#     │
+#     ▼
+#   release job     → create GitHub Release with all archives + debs + manpages
+#
 name: Release
 
 on:
@@ -88,6 +109,19 @@ jobs:
           done
           echo "platform=${platform}" >> "$GITHUB_ENV"
 
+      # Archive layout:
+      #
+      #   gtm-full-{platform}.tar.gz
+      #   ├── gtm-{platform}           # combined TUI+CLI binary
+      #   ├── gtmd-{platform}          # daemon binary
+      #   ├── man/                     # all manpages (gtm.1, gtmd.1, gtmd-ipc.1)
+      #   └── completions/             # shell completions for both binaries
+      #
+      #   gtmd-{platform}.tar.gz
+      #   ├── gtmd-{platform}          # daemon binary (only)
+      #   ├── man/                     # daemon manpages
+      #   └── dist/gtmd.service        # systemd service unit
+      #
       - name: Create component archives
         shell: bash
         run: |
@@ -117,25 +151,34 @@ jobs:
             ../../artifacts/man/gtmd-ipc.1 \
             ../../dist/gtmd.service
 
+      # Debian package layout:
+      #
+      #   gtm-full_{version}_{arch}.deb      ← renamed from gtm crate
+      #   ├── usr/bin/gtm                    # combined TUI+CLI binary
+      #   ├── usr/bin/gtmd                   # daemon binary (extra asset)
+      #   ├── usr/lib/systemd/user/          # systemd service
+      #   ├── usr/share/man/                 # all manpages
+      #   └── usr/share/completions/         # shell completions
+      #
+      #   gtmd_{version}_{arch}.deb
+      #   ├── usr/bin/gtmd                   # daemon binary (only)
+      #   ├── usr/lib/systemd/user/          # systemd service
+      #   └── usr/share/man/                 # daemon manpages
+      #
       - name: Install cargo-deb and build Debian packages (Linux only)
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           cargo install cargo-deb
-          # Copy generated assets into each crate's deb-assets/ directory
           for pkg in gtmd gtm; do
             mkdir -p "$pkg/deb-assets/man" "$pkg/deb-assets/completions"
             cp -r artifacts/man/* "$pkg/deb-assets/man/"
             cp -r artifacts/completions/* "$pkg/deb-assets/completions/"
           done
-          # gtm-full deb gets gtmd binary + systemd service as assets
           cp target/release/gtmd gtm/deb-assets/gtmd
           cp dist/gtmd.service gtm/deb-assets/
-          # gtmd deb gets systemd service
           cp dist/gtmd.service gtmd/deb-assets/
-          # Build debs: only gtm (-> gtm-full) and gtmd
           cargo deb --package gtm
           cargo deb --package gtmd
-          # Rename gtm deb to gtm-full with arch suffix
           arch="$(uname -m)"
           version="${{ needs.tag.outputs.tag }}"
           version="${version#v}"
@@ -146,11 +189,11 @@ jobs:
             base="$(basename "$deb" .deb)"
             mv "$deb" "target/debian/${base}_${arch}.deb"
           done
-          # Clean up deb-assets dirs
           for pkg in gtmd gtm; do
             rm -rf "$pkg/deb-assets"
           done
 
+      # Upload per-OS build artifacts so the release job can collect them
       - uses: actions/upload-artifact@v4
         with:
           name: artifacts-${{ matrix.os }}
@@ -160,6 +203,8 @@ jobs:
             artifacts/
             target/debian/*.deb
 
+  # Collects all platform artifacts and creates a single GitHub Release
+  # with platform-specific binaries, archives, debs, manpages, and completions.
   release:
     needs: [tag, build]
     runs-on: ubuntu-latest

@@ -1,3 +1,27 @@
+//! Keybinding dispatch system with context-aware matching.
+//!
+//! ```text
+//!  Key press
+//!      │
+//!      ▼
+//!  ┌──────────────────────┐
+//!  │ key_matches()        │  Scan binding list for matching KeyEvent
+//!  │ && context matches   │  AND current KeyContext (Normal, Filter, etc.)
+//!  └──────────┬───────────┘
+//!             │ hit
+//!             ▼
+//!  ┌──────────────────────┐
+//!  │ KeyboardAction enum  │  → e.g. PlayPause, NextTab, Quit, VolumeUp
+//!  └──────────────────────┘
+//!
+//!  Contexts:
+//!    Global  — active everywhere (q, space, ?)
+//!    Normal  — main view mode (tab, cursor, volume)
+//!    List    — when a list widget has focus (j/k, enter)
+//!    Filter  — typing a search query
+//!    Overlay — modal overlay is open
+//! ```
+
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gtm_core::state::Tab;
 
@@ -74,6 +98,8 @@ pub struct Keybindings {
 }
 
 impl Keybindings {
+    /// Find the first binding whose KeyEvent matches and whose contexts
+    /// include the current `context`.  Returns `None` if no binding matches.
     pub fn dispatch(&self, key: KeyEvent, context: KeyContext) -> Option<KeyboardAction> {
         for (binding_key, cmd) in &self.bindings {
             if key_matches(&key, binding_key) && cmd.contexts.contains(&context) {
@@ -88,6 +114,8 @@ fn key_matches(event: &KeyEvent, binding: &KeyEvent) -> bool {
     event.code == binding.code && event.modifiers == binding.modifiers
 }
 
+/// Parse a key name string into a KeyEvent.  Used for configurability
+/// (e.g. from a config file) though currently only called from tests.
 pub fn parse_keycode(name: &str) -> KeyEvent {
     match name {
         "tab" | "Tab" => KeyCode::Tab.into(),
@@ -126,10 +154,17 @@ pub fn parse_keycode(name: &str) -> KeyEvent {
     }
 }
 
+/// Build the default set of key bindings.  Layered by context:
+///
+///   Global  — q (quit), ? (help), space (play/pause)
+///   Normal  — tab switching, cursor, volume, filters, playback control
+///   List    — j/k, enter, delete
+///
+/// Bindings are scanned in order; the first match wins.
 pub fn default_keybindings() -> Keybindings {
     Keybindings {
         bindings: vec![
-            // Global - Quit
+            // Global — Quit
             (
                 KeyCode::Char('q').into(),
                 BoundCommand {
@@ -138,7 +173,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Quit",
                 },
             ),
-            // Global - ToggleHelp
+            // Global — ToggleHelp
             (
                 KeyCode::Char('?').into(),
                 BoundCommand {
@@ -147,7 +182,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Toggle help",
                 },
             ),
-            // Command palette
+            // Command palette (:)
             (
                 KeyCode::Char(':').into(),
                 BoundCommand {
@@ -156,7 +191,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Open command palette",
                 },
             ),
-            // Tab switching
+            // Tab switching — Tab / Shift-Tab
             (
                 KeyCode::Tab.into(),
                 BoundCommand {
@@ -173,7 +208,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Previous tab",
                 },
             ),
-            // Cursor - arrow keys
+            // Cursor — arrow keys
             (
                 KeyCode::Up.into(),
                 BoundCommand {
@@ -190,7 +225,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Move down",
                 },
             ),
-            // Cursor - vim keys
+            // Cursor — vim-style j/k
             (
                 KeyCode::Char('k').into(),
                 BoundCommand {
@@ -207,7 +242,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Move down",
                 },
             ),
-            // Playback
+            // Playback — space, n, p
             (
                 KeyCode::Char(' ').into(),
                 BoundCommand {
@@ -232,7 +267,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Previous track",
                 },
             ),
-            // Volume
+            // Volume — +, =, -
             (
                 KeyCode::Char('+').into(),
                 BoundCommand {
@@ -257,7 +292,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Volume down",
                 },
             ),
-            // Mute
+            // Mute — m
             (
                 KeyCode::Char('m').into(),
                 BoundCommand {
@@ -266,7 +301,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Toggle mute",
                 },
             ),
-            // Repeat
+            // Repeat — r
             (
                 KeyCode::Char('r').into(),
                 BoundCommand {
@@ -275,7 +310,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Cycle repeat",
                 },
             ),
-            // Shuffle
+            // Shuffle — s
             (
                 KeyCode::Char('s').into(),
                 BoundCommand {
@@ -284,7 +319,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Toggle shuffle",
                 },
             ),
-            // Seek forward/backward
+            // Seek — left/right arrows
             (
                 KeyCode::Right.into(),
                 BoundCommand {
@@ -301,7 +336,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Seek backward",
                 },
             ),
-            // Filter
+            // Filter mode — /
             (
                 KeyCode::Char('/').into(),
                 BoundCommand {
@@ -310,7 +345,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Enter filter mode",
                 },
             ),
-            // Select
+            // Select — Enter
             (
                 KeyCode::Enter.into(),
                 BoundCommand {
@@ -319,7 +354,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Select item",
                 },
             ),
-            // Delete
+            // Delete — Del / d
             (
                 KeyCode::Delete.into(),
                 BoundCommand {
@@ -336,7 +371,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Delete item",
                 },
             ),
-            // Tab switching by number
+            // Direct tab switching by number — 1 through 6
             (
                 KeyCode::Char('1').into(),
                 BoundCommand {
