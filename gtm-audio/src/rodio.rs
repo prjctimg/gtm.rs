@@ -7,7 +7,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use rodio::{Decoder, DeviceSinkBuilder, Player, Source};
 
-use crate::backend::{AudioBackend, AudioEvent, AudioError, AudioResult};
+use crate::backend::{AudioBackend, AudioError, AudioEvent, AudioResult};
 
 pub struct RodioBackend {
     _sink: Arc<MixerDeviceSinkWrapper>,
@@ -45,11 +45,9 @@ impl RodioBackend {
 #[async_trait]
 impl AudioBackend for RodioBackend {
     async fn load(&mut self, path: &str, start_pos: f64) -> AudioResult<()> {
-        let file = File::open(path)
-            .map_err(|e| AudioError::OpenFailed(e.to_string()))?;
+        let file = File::open(path).map_err(|e| AudioError::OpenFailed(e.to_string()))?;
         let reader = BufReader::new(file);
-        let source = Decoder::new(reader)
-            .map_err(|e| AudioError::DecodeError(e.to_string()))?;
+        let source = Decoder::new(reader).map_err(|e| AudioError::DecodeError(e.to_string()))?;
 
         let total = source
             .total_duration()

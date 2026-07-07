@@ -169,9 +169,7 @@ async fn test_queue_add_and_list() {
     )
     .await;
     match res {
-        DaemonRes::QueueState {
-            tracks, cursor, ..
-        } => {
+        DaemonRes::QueueState { tracks, cursor, .. } => {
             assert_eq!(tracks.len(), 1, "expected 1 track in queue");
             assert_eq!(tracks[0].path, "/tmp/test.opus");
             assert_eq!(cursor, 0);
@@ -215,9 +213,7 @@ async fn test_queue_add_multiple() {
     )
     .await;
     match res {
-        DaemonRes::QueueState {
-            tracks, cursor, ..
-        } => {
+        DaemonRes::QueueState { tracks, cursor, .. } => {
             assert_eq!(tracks.len(), 3);
             assert_eq!(tracks[0].path, "/tmp/a.opus");
             assert_eq!(tracks[1].path, "/tmp/b.opus");
@@ -328,9 +324,7 @@ async fn test_queue_clear() {
     )
     .await;
     match res {
-        DaemonRes::QueueState {
-            tracks, cursor, ..
-        } => {
+        DaemonRes::QueueState { tracks, cursor, .. } => {
             assert_eq!(tracks.len(), 0);
             assert_eq!(cursor, 0);
         }

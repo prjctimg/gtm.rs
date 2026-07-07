@@ -142,10 +142,7 @@ impl App {
 
     async fn fetch_queue(&mut self) {
         if let Ok(res) = self.client.queue_list().await {
-            if let gtm_core::ipc::DaemonRes::QueueState {
-                tracks, cursor, ..
-            } = res
-            {
+            if let gtm_core::ipc::DaemonRes::QueueState { tracks, cursor, .. } = res {
                 self.queue_cache = tracks;
                 self.queue_cursor = cursor as usize;
             }
@@ -373,9 +370,7 @@ impl App {
                         let idx = self.queue_cursor + self.scroll_offset;
                         if idx < self.queue_cache.len() {
                             let tx = self.cmd_tx();
-                            let _ = tx
-                                .send(TuiCommand::QueueRemove(idx as u128))
-                                .await;
+                            let _ = tx.send(TuiCommand::QueueRemove(idx as u128)).await;
                         }
                     }
                 }
@@ -385,9 +380,7 @@ impl App {
                         if idx < self.queue_cache.len() {
                             let tx = self.cmd_tx();
                             let _ = tx
-                                .send(TuiCommand::Play(
-                                    self.queue_cache[idx].path.clone(),
-                                ))
+                                .send(TuiCommand::Play(self.queue_cache[idx].path.clone()))
                                 .await;
                         }
                     }

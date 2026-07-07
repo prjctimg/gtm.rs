@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use rodio::source::SeekError;
 use rodio::Source;
-use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::codecs::audio::{AudioDecoder, AudioDecoderOptions};
+use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::codecs::CodecParameters;
 use symphonia::core::formats::probe::{Hint, Probe};
 use symphonia::core::formats::{FormatOptions, FormatReader, TrackType};
@@ -47,7 +47,10 @@ pub struct SymphoniaSource {
 }
 
 impl SymphoniaSource {
-    pub fn from_file(path: &str, start_pos: f64) -> AudioResult<Box<dyn Source<Item = f32> + Send>> {
+    pub fn from_file(
+        path: &str,
+        start_pos: f64,
+    ) -> AudioResult<Box<dyn Source<Item = f32> + Send>> {
         let file = File::open(path).map_err(|e| AudioError::OpenFailed(e.to_string()))?;
         let mss = MediaSourceStream::new(Box::new(file), MediaSourceStreamOptions::default());
         let probe = build_probe();
@@ -84,14 +87,26 @@ impl SymphoniaSource {
 
         let seek_skip = if start_pos > 0.0 {
             let sample_rate = codec_params.sample_rate.unwrap_or(44100);
-            let ch = codec_params.channels.as_ref().map(|c| c.count() as u64).unwrap_or(2);
+            let ch = codec_params
+                .channels
+                .as_ref()
+                .map(|c| c.count() as u64)
+                .unwrap_or(2);
             (start_pos * sample_rate as f64 * ch as f64) as u64
         } else {
             0
         };
 
-        Self::new(reader, track_id, codec_params, opts, duration, path, seek_skip)
-            .map(|s| Box::new(s) as Box<dyn Source<Item = f32> + Send>)
+        Self::new(
+            reader,
+            track_id,
+            codec_params,
+            opts,
+            duration,
+            path,
+            seek_skip,
+        )
+        .map(|s| Box::new(s) as Box<dyn Source<Item = f32> + Send>)
     }
 
     fn new(
@@ -192,10 +207,9 @@ impl Iterator for SymphoniaSource {
                                         CodecParameters::Audio(a) => {
                                             self.codec_params = a.clone();
                                             let registry = build_codec_registry();
-                                            match registry.make_audio_decoder(
-                                                &a.clone(),
-                                                &self.opts,
-                                            ) {
+                                            match registry
+                                                .make_audio_decoder(&a.clone(), &self.opts)
+                                            {
                                                 Ok(d) => {
                                                     self.decoder = d;
                                                     Some(())
@@ -267,16 +281,18 @@ impl Source for SymphoniaSource {
         let hint = Hint::new();
         let fmt_opts = FormatOptions::default();
         let meta_opts = MetadataOptions::default();
-        let reader = probe.probe(&hint, mss, fmt_opts, meta_opts).map_err(|_| {
-            SeekError::NotSupported {
-                underlying_source: std::any::type_name::<Self>(),
-            }
-        })?;
-        let track = reader.default_track(TrackType::Audio).ok_or_else(|| {
-            SeekError::NotSupported {
-                underlying_source: std::any::type_name::<Self>(),
-            }
-        })?;
+        let reader =
+            probe
+                .probe(&hint, mss, fmt_opts, meta_opts)
+                .map_err(|_| SeekError::NotSupported {
+                    underlying_source: std::any::type_name::<Self>(),
+                })?;
+        let track =
+            reader
+                .default_track(TrackType::Audio)
+                .ok_or_else(|| SeekError::NotSupported {
+                    underlying_source: std::any::type_name::<Self>(),
+                })?;
         let codec_params = match track.codec_params.as_ref() {
             Some(CodecParameters::Audio(a)) => a.clone(),
             _ => {
@@ -287,11 +303,11 @@ impl Source for SymphoniaSource {
         };
         let track_id = track.id;
         let registry = build_codec_registry();
-        let decoder = registry.make_audio_decoder(&codec_params, &self.opts).map_err(|_| {
-            SeekError::NotSupported {
+        let decoder = registry
+            .make_audio_decoder(&codec_params, &self.opts)
+            .map_err(|_| SeekError::NotSupported {
                 underlying_source: std::any::type_name::<Self>(),
-            }
-        })?;
+            })?;
 
         let target_samples =
             (target_secs * self.sample_rate.get() as f64 * self.channels.get() as f64) as u64;

@@ -60,7 +60,9 @@ pub fn queue_remove(state: &mut DaemonState, index: u128) -> Option<TrackInfo> {
     if state.queue_cursor > index && state.queue_cursor > 0 {
         state.queue_cursor -= 1;
     }
-    state.queue_cursor = state.queue_cursor.min(state.queue.len().saturating_sub(1) as u128);
+    state.queue_cursor = state
+        .queue_cursor
+        .min(state.queue.len().saturating_sub(1) as u128);
     Some(removed)
 }
 
@@ -104,7 +106,11 @@ pub fn scan_audio_files(path: &str) -> Vec<String> {
     let dir = std::path::Path::new(path);
     if !dir.is_dir() {
         if dir.is_file() {
-            if let Some(ext) = dir.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) {
+            if let Some(ext) = dir
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.to_lowercase())
+            {
                 if AUDIO_EXTENSIONS.contains(&ext.as_str()) {
                     paths.push(path.to_string());
                 }
@@ -120,7 +126,12 @@ pub fn scan_audio_files(path: &str) -> Vec<String> {
         if !entry.file_type().is_file() {
             continue;
         }
-        if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()) {
+        if let Some(ext) = entry
+            .path()
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+        {
             if AUDIO_EXTENSIONS.contains(&ext.as_str()) {
                 paths.push(entry.path().to_string_lossy().to_string());
             }

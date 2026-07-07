@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Swatinem/rust-cache@v2
+      - run: rustup component add rustfmt
       - run: cargo fmt --all -- --check
 
   clippy:
@@ -36,4 +36,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: Swatinem/rust-cache@v2
+      - run: rustup component add clippy
       - run: cargo clippy --workspace

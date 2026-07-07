@@ -3,7 +3,7 @@ pub mod null_mixer;
 pub mod rodio;
 pub mod symphonia;
 
-pub use backend::{AudioBackend, AudioEvent, AudioError, AudioResult};
+pub use backend::{AudioBackend, AudioError, AudioEvent, AudioResult};
 pub use mixer::{AudioMixer, Mixer};
 pub use null_mixer::NullMixer;
 

@@ -152,7 +152,10 @@ fn test_mixer_poll_detects_finished() {
     mixer.stop().unwrap();
     std::thread::sleep(Duration::from_millis(100));
     let ev = mixer.poll().unwrap();
-    assert!(ev.is_none(), "poll should return None after stop, got: {ev:?}");
+    assert!(
+        ev.is_none(),
+        "poll should return None after stop, got: {ev:?}"
+    );
 
     std::fs::remove_file(&wav_path).ok();
 }

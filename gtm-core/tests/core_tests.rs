@@ -4,9 +4,7 @@
 //
 // This is free software released under the GPL-3.0 license.
 
-use gtm_core::ipc::{
-    DaemonEvent, DaemonReq, DaemonRes, LibraryAction, QueueAction,
-};
+use gtm_core::ipc::{DaemonEvent, DaemonReq, DaemonRes, LibraryAction, QueueAction};
 use gtm_core::state::{
     CrossfadeConfig, DaemonState, Image, PlaybackStatus, RepeatMode, ThemeMode, UIMode, YTFilter,
 };
@@ -75,51 +73,79 @@ macro_rules! roundtrip {
 }
 
 roundtrip!(track_info_roundtrip, TrackInfo, sample_track());
-roundtrip!(playlist_roundtrip, Playlist, Playlist {
-    id: 1,
-    name: "Favourites".into(),
-    created_at: "2024-01-01T00:00:00Z".into(),
-    track_count: 10,
-});
-roundtrip!(lrc_line_roundtrip, LrcLine, LrcLine {
-    timestamp: 12.5,
-    text: "hello".into(),
-});
-roundtrip!(lrc_data_roundtrip, LrcData, LrcData {
-    title: Some("Song".into()),
-    artist: Some("Artist".into()),
-    album: Some("Album".into()),
-    lines: vec![LrcLine {
-        timestamp: 0.0,
-        text: "intro".into(),
-    }],
-});
-roundtrip!(yt_result_roundtrip, YTSearchResult, YTSearchResult {
-    id: "abc".into(),
-    title: "Test Vid".into(),
-    url: "https://youtube.com/watch?v=abc".into(),
-    channel: "TestChannel".into(),
-    duration: 120.0,
-    views: 1000,
-    thumbnail: Some("https://img.youtube.com/vi/abc/default.jpg".into()),
-});
-roundtrip!(stream_info_roundtrip, StreamInfo, StreamInfo {
-    url: "https://example.com/stream".into(),
-    title: "Stream".into(),
-    ext: "mp3".into(),
-    duration: 300.0,
-});
-roundtrip!(crossfade_config_roundtrip, CrossfadeConfig, CrossfadeConfig {
-    enabled: true,
-    duration_secs: 8,
-});
+roundtrip!(
+    playlist_roundtrip,
+    Playlist,
+    Playlist {
+        id: 1,
+        name: "Favourites".into(),
+        created_at: "2024-01-01T00:00:00Z".into(),
+        track_count: 10,
+    }
+);
+roundtrip!(
+    lrc_line_roundtrip,
+    LrcLine,
+    LrcLine {
+        timestamp: 12.5,
+        text: "hello".into(),
+    }
+);
+roundtrip!(
+    lrc_data_roundtrip,
+    LrcData,
+    LrcData {
+        title: Some("Song".into()),
+        artist: Some("Artist".into()),
+        album: Some("Album".into()),
+        lines: vec![LrcLine {
+            timestamp: 0.0,
+            text: "intro".into(),
+        }],
+    }
+);
+roundtrip!(
+    yt_result_roundtrip,
+    YTSearchResult,
+    YTSearchResult {
+        id: "abc".into(),
+        title: "Test Vid".into(),
+        url: "https://youtube.com/watch?v=abc".into(),
+        channel: "TestChannel".into(),
+        duration: 120.0,
+        views: 1000,
+        thumbnail: Some("https://img.youtube.com/vi/abc/default.jpg".into()),
+    }
+);
+roundtrip!(
+    stream_info_roundtrip,
+    StreamInfo,
+    StreamInfo {
+        url: "https://example.com/stream".into(),
+        title: "Stream".into(),
+        ext: "mp3".into(),
+        duration: 300.0,
+    }
+);
+roundtrip!(
+    crossfade_config_roundtrip,
+    CrossfadeConfig,
+    CrossfadeConfig {
+        enabled: true,
+        duration_secs: 8,
+    }
+);
 roundtrip!(daemon_state_roundtrip, DaemonState, sample_state());
-roundtrip!(image_roundtrip, Image, Image {
-    data: vec![0, 1, 2],
-    mime: "image/jpeg".into(),
-    width: 100,
-    height: 100,
-});
+roundtrip!(
+    image_roundtrip,
+    Image,
+    Image {
+        data: vec![0, 1, 2],
+        mime: "image/jpeg".into(),
+        width: 100,
+        height: 100,
+    }
+);
 
 // ---------------------------------------------------------------------------
 // IPC enum round-trips
@@ -202,12 +228,7 @@ enum_roundtrip!(
     DaemonEvent::TrackEnded
 );
 
-enum_roundtrip!(
-    queue_action_list,
-    QueueAction,
-    "List",
-    QueueAction::List
-);
+enum_roundtrip!(queue_action_list, QueueAction, "List", QueueAction::List);
 enum_roundtrip!(
     queue_action_add,
     QueueAction,
@@ -626,8 +647,7 @@ fn primitives_derive_traits() {
 
 #[test]
 fn malformed_json_returns_error() {
-    let result: Result<TrackInfo> =
-        serde_json::from_str("not valid json").map_err(Into::into);
+    let result: Result<TrackInfo> = serde_json::from_str("not valid json").map_err(Into::into);
     assert!(result.is_err());
 }
 

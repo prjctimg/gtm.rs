@@ -216,9 +216,7 @@ impl Daemon {
             DaemonReq::Search { query } => self.cmd_search(query).await,
             DaemonReq::GetFavourites => self.cmd_get_favourites().await,
             DaemonReq::AddFavourite { track_id } => self.cmd_add_favourite(*track_id).await,
-            DaemonReq::RemoveFavourite { track_id } => {
-                self.cmd_remove_favourite(*track_id).await
-            }
+            DaemonReq::RemoveFavourite { track_id } => self.cmd_remove_favourite(*track_id).await,
             DaemonReq::YtSearch { query, filter } => self.cmd_yt_search(query, *filter).await,
             DaemonReq::YtSearchPoll => self.cmd_yt_search_poll().await,
             DaemonReq::YtSearchCancel => self.cmd_yt_search_cancel().await,
@@ -249,12 +247,10 @@ impl Daemon {
             }
             Err(e) => {
                 warn!("backend error: {e}");
-                let _ = self
-                    .event_tx
-                    .send(DaemonEvent::Custom {
-                        name: "backend_error".into(),
-                        data: [("error".into(), e.to_string())].into(),
-                    });
+                let _ = self.event_tx.send(DaemonEvent::Custom {
+                    name: "backend_error".into(),
+                    data: [("error".into(), e.to_string())].into(),
+                });
                 return;
             }
         };
@@ -282,7 +278,9 @@ impl Daemon {
                             let s = self.state.read().await;
                             if s.queue_cursor + 1 < s.queue.len() as u128 {
                                 Some(s.queue[s.queue_cursor as usize + 1].path.clone())
-                            } else if matches!(s.repeat, gtm_core::state::RepeatMode::All) && !s.queue.is_empty() {
+                            } else if matches!(s.repeat, gtm_core::state::RepeatMode::All)
+                                && !s.queue.is_empty()
+                            {
                                 Some(s.queue[0].path.clone())
                             } else {
                                 None
@@ -297,7 +295,8 @@ impl Daemon {
                                     let _ = s.advance_queue(1);
                                     let idx = s.queue_cursor;
                                     drop(s);
-                                    self.push_event(DaemonEvent::QueueIndexChanged { index: idx }).await;
+                                    self.push_event(DaemonEvent::QueueIndexChanged { index: idx })
+                                        .await;
                                 }
                             }
                         }
@@ -439,8 +438,8 @@ impl Daemon {
     }
 
     async fn cmd_stop(&mut self) -> Result<DaemonRes, CoreError> {
-        let is_active = self.mixer.is_playing()
-            || self.state.read().await.status != PlaybackStatus::Stopped;
+        let is_active =
+            self.mixer.is_playing() || self.state.read().await.status != PlaybackStatus::Stopped;
         self.mixer.stop()?;
         self.crossfade_loaded_for = None;
         let mut state = self.state.write().await;
@@ -502,10 +501,8 @@ impl Daemon {
         state.seek(self.mixer.current_position())?;
         let version = state.version as u32;
         drop(state);
-        self.push_event(DaemonEvent::PositionChanged {
-            time_pos: pos,
-        })
-        .await;
+        self.push_event(DaemonEvent::PositionChanged { time_pos: pos })
+            .await;
         Ok(DaemonRes::Ok { version })
     }
 
@@ -530,7 +527,10 @@ impl Daemon {
         Ok(DaemonRes::Ok { version })
     }
 
-    async fn cmd_cycle_repeat(&mut self, mode: gtm_core::state::RepeatMode) -> Result<DaemonRes, CoreError> {
+    async fn cmd_cycle_repeat(
+        &mut self,
+        mode: gtm_core::state::RepeatMode,
+    ) -> Result<DaemonRes, CoreError> {
         let mut state = self.state.write().await;
         state.cycle_repeat(mode)?;
         let m = state.repeat;
@@ -568,10 +568,7 @@ impl Daemon {
         Ok(DaemonRes::Ok { version })
     }
 
-    async fn cmd_queue(
-        &mut self,
-        action: &QueueAction,
-    ) -> Result<DaemonRes, CoreError> {
+    async fn cmd_queue(&mut self, action: &QueueAction) -> Result<DaemonRes, CoreError> {
         match action {
             QueueAction::List => {
                 let state = self.state.read().await;
@@ -592,11 +589,8 @@ impl Daemon {
                 let queue = state.queue.clone();
                 let cursor = state.queue_cursor;
                 drop(state);
-                self.push_event(DaemonEvent::QueueChanged {
-                    queue,
-                    cursor,
-                })
-                .await;
+                self.push_event(DaemonEvent::QueueChanged { queue, cursor })
+                    .await;
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Remove { index } => {
@@ -606,11 +600,8 @@ impl Daemon {
                 let queue = state.queue.clone();
                 let cursor = state.queue_cursor;
                 drop(state);
-                self.push_event(DaemonEvent::QueueChanged {
-                    queue,
-                    cursor,
-                })
-                .await;
+                self.push_event(DaemonEvent::QueueChanged { queue, cursor })
+                    .await;
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Move { from, to } => {
@@ -620,11 +611,8 @@ impl Daemon {
                 let queue = state.queue.clone();
                 let cursor = state.queue_cursor;
                 drop(state);
-                self.push_event(DaemonEvent::QueueChanged {
-                    queue,
-                    cursor,
-                })
-                .await;
+                self.push_event(DaemonEvent::QueueChanged { queue, cursor })
+                    .await;
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Add { path, position } => {
@@ -636,11 +624,8 @@ impl Daemon {
                     let queue = state.queue.clone();
                     let cursor = state.queue_cursor;
                     drop(state);
-                    self.push_event(DaemonEvent::QueueChanged {
-                        queue,
-                        cursor,
-                    })
-                    .await;
+                    self.push_event(DaemonEvent::QueueChanged { queue, cursor })
+                        .await;
                     if was_empty {
                         return self.cmd_play(path, 0.0).await;
                     }
@@ -659,11 +644,8 @@ impl Daemon {
                     let queue = state.queue.clone();
                     let cursor = state.queue_cursor;
                     drop(state);
-                    self.push_event(DaemonEvent::QueueChanged {
-                        queue,
-                        cursor,
-                    })
-                    .await;
+                    self.push_event(DaemonEvent::QueueChanged { queue, cursor })
+                        .await;
                     if was_empty {
                         return self.cmd_play(&first_path, 0.0).await;
                     }
@@ -689,11 +671,8 @@ impl Daemon {
                     let queue = state.queue.clone();
                     let cursor = state.queue_cursor;
                     drop(state);
-                    self.push_event(DaemonEvent::QueueChanged {
-                        queue,
-                        cursor,
-                    })
-                    .await;
+                    self.push_event(DaemonEvent::QueueChanged { queue, cursor })
+                        .await;
                     // If queue was empty and stopped, auto-play the first track
                     if was_empty {
                         return self.cmd_play(&first_path, 0.0).await;
@@ -709,11 +688,8 @@ impl Daemon {
                 let queue = state.queue.clone();
                 let cursor = state.queue_cursor;
                 drop(state);
-                self.push_event(DaemonEvent::QueueChanged {
-                    queue,
-                    cursor,
-                })
-                .await;
+                self.push_event(DaemonEvent::QueueChanged { queue, cursor })
+                    .await;
                 Ok(DaemonRes::Ok { version })
             }
         }

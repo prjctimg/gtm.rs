@@ -2,9 +2,7 @@ use gtm_core::state::{PlaybackStatus, RepeatMode, Tab};
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{
-    Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Tabs,
-};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Tabs};
 use ratatui::Frame;
 
 use crate::app::{App, InputMode};
@@ -75,13 +73,14 @@ fn render_tabs(f: &mut Frame, area: Rect, app: &App) {
 
     let shuffle_icon = if app.state.shuffle { " \u{1F500}" } else { "" };
 
-    let status_line = format!(
-        " {status_icon} Vol:{vol}{repeat_icon}{shuffle_icon} "
-    );
+    let status_line = format!(" {status_icon} Vol:{vol}{repeat_icon}{shuffle_icon} ");
 
     let title_chunks = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(status_line.len() as u16)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(status_line.len() as u16),
+        ])
         .split(area);
 
     let tabs = Tabs::new(titles)
@@ -141,7 +140,12 @@ fn render_now_playing(f: &mut Frame, area: Rect, app: &App) {
 
     let title = Line::from(vec![
         Span::styled("Title:  ", Style::default().fg(Color::Gray)),
-        Span::styled(&track.title, Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            &track.title,
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
     ]);
     let artist = Line::from(vec![
         Span::styled("Artist: ", Style::default().fg(Color::Gray)),
@@ -227,7 +231,13 @@ fn render_now_playing(f: &mut Frame, area: Rect, app: &App) {
     f.render_widget(controls, chunks[3]);
 }
 
-fn render_list(f: &mut Frame, area: Rect, app: &App, title: &str, items: &[gtm_core::track::TrackInfo]) {
+fn render_list(
+    f: &mut Frame,
+    area: Rect,
+    app: &App,
+    title: &str,
+    items: &[gtm_core::track::TrackInfo],
+) {
     let filtered: Vec<&gtm_core::track::TrackInfo> = if app.search_query.is_empty() {
         items.iter().collect()
     } else {
@@ -250,10 +260,7 @@ fn render_list(f: &mut Frame, area: Rect, app: &App, title: &str, items: &[gtm_c
         .map(|(i, track)| {
             let prefix = if i == sel { " \u{25B6} " } else { "   " };
             let dur = format_duration(track.duration as u64);
-            let content = format!(
-                "{prefix}{} - {} [{}]",
-                track.artist, track.title, dur
-            );
+            let content = format!("{prefix}{} - {} [{}]", track.artist, track.title, dur);
             let style = if i == sel {
                 Style::default().fg(Color::Black).bg(Color::Cyan)
             } else {
@@ -275,18 +282,14 @@ fn render_list(f: &mut Frame, area: Rect, app: &App, title: &str, items: &[gtm_c
 
 fn render_queue(f: &mut Frame, area: Rect, app: &mut App) {
     let filtered: Vec<(usize, &gtm_core::track::TrackInfo)> = if app.search_query.is_empty() {
-        app.queue_cache
-            .iter()
-            .enumerate()
-            .collect()
+        app.queue_cache.iter().enumerate().collect()
     } else {
         let q = app.search_query.to_lowercase();
         app.queue_cache
             .iter()
             .enumerate()
             .filter(|(_, t)| {
-                t.title.to_lowercase().contains(&q)
-                    || t.artist.to_lowercase().contains(&q)
+                t.title.to_lowercase().contains(&q) || t.artist.to_lowercase().contains(&q)
             })
             .collect()
     };
@@ -295,13 +298,12 @@ fn render_queue(f: &mut Frame, area: Rect, app: &mut App) {
         .iter()
         .map(|(idx, track)| {
             let is_current = *idx == app.queue_cursor;
-            let prefix = if is_current {
-                " \u{25B6} "
-            } else {
-                "   "
-            };
+            let prefix = if is_current { " \u{25B6} " } else { "   " };
             let dur = format_duration(track.duration as u64);
-            let content = format!("{prefix}#{} {} - {} [{}]", idx, track.artist, track.title, dur);
+            let content = format!(
+                "{prefix}#{} {} - {} [{}]",
+                idx, track.artist, track.title, dur
+            );
             let style = if is_current {
                 Style::default().fg(Color::Black).bg(Color::Cyan)
             } else {
@@ -363,11 +365,20 @@ fn render_settings(f: &mut Frame, area: Rect, app: &App) {
             if app.state.mute { "(MUTED)" } else { "" }
         ),
         format!("Repeat:    {:?}", app.state.repeat),
-        format!("Shuffle:   {}", if app.state.shuffle { "ON" } else { "OFF" }),
+        format!(
+            "Shuffle:   {}",
+            if app.state.shuffle { "ON" } else { "OFF" }
+        ),
         format!("Mute:      {}", if app.state.mute { "ON" } else { "OFF" }),
         format!(
             "Crossfade: {} ({}s)",
-            if app.state.crossfade.as_ref().map(|c| c.enabled).unwrap_or(false) {
+            if app
+                .state
+                .crossfade
+                .as_ref()
+                .map(|c| c.enabled)
+                .unwrap_or(false)
+            {
                 "ON"
             } else {
                 "OFF"
@@ -378,20 +389,11 @@ fn render_settings(f: &mut Frame, area: Rect, app: &App) {
                 .map(|c| c.duration_secs)
                 .unwrap_or(0)
         ),
-        format!(
-            "Status:    {:?}",
-            app.state.status
-        ),
-        format!(
-            "Queue:     {} tracks",
-            app.state.queue.len()
-        ),
+        format!("Status:    {:?}", app.state.status),
+        format!("Queue:     {} tracks", app.state.queue.len()),
     ];
 
-    let settings_items: Vec<ListItem> = items
-        .into_iter()
-        .map(|s| ListItem::new(s))
-        .collect();
+    let settings_items: Vec<ListItem> = items.into_iter().map(|s| ListItem::new(s)).collect();
 
     let list = List::new(settings_items).block(
         Block::default()
@@ -405,7 +407,10 @@ fn render_settings(f: &mut Frame, area: Rect, app: &App) {
 
 fn render_help(f: &mut Frame, area: Rect) {
     let help_text = vec![
-        Line::from(Span::styled("Keyboard Shortcuts", Style::default().add_modifier(Modifier::BOLD))),
+        Line::from(Span::styled(
+            "Keyboard Shortcuts",
+            Style::default().add_modifier(Modifier::BOLD),
+        )),
         Line::from(""),
         Line::from(vec![
             Span::styled("1-6    ", Style::default().fg(Color::Cyan)),

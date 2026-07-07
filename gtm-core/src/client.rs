@@ -218,10 +218,7 @@ impl DaemonClient {
 
     pub async fn queue_set(&mut self, paths: Vec<String>, start_idx: u128) -> Result<u32> {
         self.send_ok(&DaemonReq::Queue {
-            action: QueueAction::Set {
-                paths,
-                start_idx,
-            },
+            action: QueueAction::Set { paths, start_idx },
         })
         .await
     }
@@ -255,9 +252,7 @@ impl DaemonClient {
 
     pub async fn library_create_playlist(&mut self, name: &str) -> Result<u32> {
         self.send_ok(&DaemonReq::Library {
-            action: LibraryAction::CreatePlaylist {
-                name: name.into(),
-            },
+            action: LibraryAction::CreatePlaylist { name: name.into() },
         })
         .await
     }
@@ -269,7 +264,11 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn library_add_to_playlist(&mut self, playlist_id: i64, track_ids: Vec<i64>) -> Result<u32> {
+    pub async fn library_add_to_playlist(
+        &mut self,
+        playlist_id: i64,
+        track_ids: Vec<i64>,
+    ) -> Result<u32> {
         self.send_ok(&DaemonReq::Library {
             action: LibraryAction::AddToPlaylist {
                 playlist_id,
@@ -316,11 +315,7 @@ impl DaemonClient {
 
     // ─── YouTube ───
 
-    pub async fn yt_search(
-        &mut self,
-        query: &str,
-        filter: Option<YTFilter>,
-    ) -> Result<DaemonRes> {
+    pub async fn yt_search(&mut self, query: &str, filter: Option<YTFilter>) -> Result<DaemonRes> {
         self.send_raw(&DaemonReq::YtSearch {
             query: query.into(),
             filter,
@@ -337,10 +332,8 @@ impl DaemonClient {
     }
 
     pub async fn yt_resolve_stream(&mut self, url: &str) -> Result<DaemonRes> {
-        self.send_raw(&DaemonReq::YtResolveStream {
-            url: url.into(),
-        })
-        .await
+        self.send_raw(&DaemonReq::YtResolveStream { url: url.into() })
+            .await
     }
 
     // ─── System ───

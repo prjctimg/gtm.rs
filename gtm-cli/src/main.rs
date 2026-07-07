@@ -7,7 +7,11 @@ use gtm_core::state::RepeatMode;
 #[derive(Parser)]
 #[command(name = "gtm", about = "GTM CLI client")]
 struct Cli {
-    #[arg(long, default_value = "/run/user/1000/gtmd.socket", help = "Daemon socket path")]
+    #[arg(
+        long,
+        default_value = "/run/user/1000/gtmd.socket",
+        help = "Daemon socket path"
+    )]
     socket: PathBuf,
 
     #[command(subcommand)]
@@ -17,52 +21,106 @@ struct Cli {
 #[derive(Subcommand)]
 enum Command {
     // ─── Playback ───
-    Play { path: String, start_pos: Option<f64> },
+    Play {
+        path: String,
+        start_pos: Option<f64>,
+    },
     PlayPause,
     Pause,
     Stop,
     Next,
     Prev,
-    Seek { position_secs: f64 },
-    Volume { volume: u8 },
+    Seek {
+        position_secs: f64,
+    },
+    Volume {
+        volume: u8,
+    },
     Shuffle,
-    Repeat { mode: RepeatMode },
+    Repeat {
+        mode: RepeatMode,
+    },
     Mute,
-    Crossfade { enabled: bool, duration_secs: Option<u8> },
+    Crossfade {
+        enabled: bool,
+        duration_secs: Option<u8>,
+    },
 
     // ─── Queue ───
     Queue,
-    QueueAdd { path: String, position: Option<u128> },
-    QueueAddMany { paths: Vec<String> },
-    QueueAddFolder { path: String },
-    QueueRemove { index: u128 },
-    QueueMove { from: u128, to: u128 },
+    QueueAdd {
+        path: String,
+        position: Option<u128>,
+    },
+    QueueAddMany {
+        paths: Vec<String>,
+    },
+    QueueAddFolder {
+        path: String,
+    },
+    QueueRemove {
+        index: u128,
+    },
+    QueueMove {
+        from: u128,
+        to: u128,
+    },
     QueueClear,
-    QueueSet { paths: Vec<String>, start_idx: u128 },
+    QueueSet {
+        paths: Vec<String>,
+        start_idx: u128,
+    },
 
     // ─── Library ───
-    Scan { path: String },
-    Tracks { filter: Option<String>, sort: Option<String> },
+    Scan {
+        path: String,
+    },
+    Tracks {
+        filter: Option<String>,
+        sort: Option<String>,
+    },
     Playlists,
-    CreatePlaylist { name: String },
-    DeletePlaylist { id: i64 },
-    AddToPlaylist { playlist_id: i64, track_ids: Vec<i64> },
-    ImportM3u { path: String },
-    Recent { count: u128 },
+    CreatePlaylist {
+        name: String,
+    },
+    DeletePlaylist {
+        id: i64,
+    },
+    AddToPlaylist {
+        playlist_id: i64,
+        track_ids: Vec<i64>,
+    },
+    ImportM3u {
+        path: String,
+    },
+    Recent {
+        count: u128,
+    },
 
     // ─── Favourites ───
     Favourites,
-    FavouriteAdd { track_id: i64 },
-    FavouriteRemove { track_id: i64 },
+    FavouriteAdd {
+        track_id: i64,
+    },
+    FavouriteRemove {
+        track_id: i64,
+    },
 
     // ─── YouTube ───
-    YtSearch { query: String, filter: Option<String> },
+    YtSearch {
+        query: String,
+        filter: Option<String>,
+    },
     YtPoll,
     YtCancel,
-    YtResolve { url: String },
+    YtResolve {
+        url: String,
+    },
 
     // ─── Search ───
-    Search { query: String },
+    Search {
+        query: String,
+    },
 
     // ─── System ───
     Status,
@@ -157,10 +215,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let v = client.queue_clear().await?;
             println!("ok version={v}");
         }
-        Command::QueueSet {
-            paths,
-            start_idx,
-        } => {
+        Command::QueueSet { paths, start_idx } => {
             let v = client.queue_set(paths.clone(), *start_idx).await?;
             println!("ok version={v}");
         }
@@ -169,7 +224,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("ok version={v}");
         }
         Command::Tracks { filter, sort } => {
-            let res = client.library_get_tracks(filter.clone(), sort.clone()).await?;
+            let res = client
+                .library_get_tracks(filter.clone(), sort.clone())
+                .await?;
             println!("{}", serde_json::to_string_pretty(&res)?);
         }
         Command::Playlists => {

@@ -5,9 +5,7 @@
 // This is free software released under the GPL-3.0 license.
 
 use crate::state::{self, DaemonState, RepeatMode};
-use crate::track::{
-    LrcData, Playlist, StreamInfo, TrackInfo, YTSearchResult,
-};
+use crate::track::{LrcData, Playlist, StreamInfo, TrackInfo, YTSearchResult};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
