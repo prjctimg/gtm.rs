@@ -34,20 +34,16 @@ fn default_socket() -> PathBuf {
 
 pub fn run(socket: Option<String>, json: bool, cmd: &CliCommand) {
     let rt = tokio::runtime::Runtime::new().unwrap();
-    rt.block_on(async {
+    let result: Result<String, String> = rt.block_on(async {
         let socket_path = socket
             .map(PathBuf::from)
             .unwrap_or_else(default_socket);
 
-        let mut client = match DaemonClient::connect(&socket_path).await {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("Failed to connect to daemon at {socket_path:?}: {e}");
-                std::process::exit(1);
-            }
-        };
+        let mut client = DaemonClient::connect(&socket_path).await.map_err(|e| {
+            format!("Failed to connect to daemon at {socket_path:?}: {e}")
+        })?;
 
-        let result: Result<String, String> = match cmd {
+        match cmd {
             CliCommand::Play { path, start_pos } => {
                 let pos = start_pos.unwrap_or(0.0);
                 client.play(path, pos).await.map(|v| format!("ok version={v}")).map_err(|e| e.to_string())
@@ -222,14 +218,14 @@ pub fn run(socket: Option<String>, json: bool, cmd: &CliCommand) {
             CliCommand::Quit => {
                 client.quit().await.map(|v| format!("ok version={v}")).map_err(|e| e.to_string())
             }
-        };
-
-        match result {
-            Ok(msg) => println!("{msg}"),
-            Err(e) => {
-                eprintln!("error: {e}");
-                std::process::exit(1);
-            }
         }
     });
+
+    match result {
+        Ok(msg) => println!("{msg}"),
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    }
 }
