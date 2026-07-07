@@ -1,5 +1,8 @@
 pub mod backend;
+pub mod rodio;
 pub mod symphonia;
 
-#[cfg(feature = "ffmpeg")]
-pub mod ffmpeg;
+pub use backend::{AudioBackend, AudioEvent, AudioError, AudioResult};
+pub use mixer::AudioMixer;
+
+pub mod mixer;
