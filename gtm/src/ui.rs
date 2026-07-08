@@ -28,8 +28,6 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Gauge, List, ListItem, Paragraph, Tabs};
 use ratatui::Terminal;
-use tokio::io;
-
 use crate::app::{App, InputMode};
 use gtm_core::state::{PlaybackStatus, RepeatMode, Tab};
 
@@ -43,14 +41,14 @@ pub fn run_tui(socket: Option<String>) -> Result<(), Box<dyn std::error::Error>>
         color_eyre::install()?;
 
         enable_raw_mode()?;
-        let mut stdout = io::stdout();
+        let mut stdout = std::io::stdout();
         crossterm::execute!(stdout, EnterAlternateScreen)?;
         let mut terminal = Terminal::new(CrosstermBackend::new(stdout))?;
 
         let panic_hook = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |panic| {
             let _ = disable_raw_mode();
-            let mut stdout = io::stdout();
+            let mut stdout = std::io::stdout();
             let _ = crossterm::execute!(stdout, LeaveAlternateScreen);
             panic_hook(panic);
         }));
@@ -58,7 +56,7 @@ pub fn run_tui(socket: Option<String>) -> Result<(), Box<dyn std::error::Error>>
         let res = App::new(&socket_path).await?.run(&mut terminal).await;
 
         let _ = disable_raw_mode();
-        let mut stdout = io::stdout();
+        let mut stdout = std::io::stdout();
         let _ = crossterm::execute!(stdout, LeaveAlternateScreen);
 
         res

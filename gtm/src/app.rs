@@ -29,7 +29,7 @@ use gtm_core::track::TrackInfo;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
-use crate::keymap::{default_keybindings, BoundCommand, KeyContext, KeyboardAction};
+use crate::keymap::{default_keybindings, KeyContext, KeyboardAction};
 use crate::ui;
 
 pub enum InputMode {

@@ -19,7 +19,7 @@ mod cli;
 mod keymap;
 mod ui;
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Parser)]
 #[command(
