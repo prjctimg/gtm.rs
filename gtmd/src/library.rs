@@ -239,6 +239,21 @@ impl Library {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("rows: {e}"))
     }
 
+    pub fn get_recent(&self, count: u128) -> Result<Vec<TrackInfo>, String> {
+        let limit = if count > 0 { count as i64 } else { 50 };
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, path, title, artist, album, duration, track_number, genre, year, bitrate, samplerate, hash, cover_path, favourite
+                 FROM tracks ORDER BY id DESC LIMIT ?1",
+            )
+            .map_err(|e| format!("prepare: {e}"))?;
+        let rows = stmt
+            .query_map(params![limit], Self::row_to_track)
+            .map_err(|e| format!("query: {e}"))?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("rows: {e}"))
+    }
+
     pub fn get_playlist(&self, id: i64) -> Result<Option<Playlist>, String> {
         let mut stmt = self
             .conn

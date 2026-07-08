@@ -60,6 +60,7 @@ use gtm_core::wire;
 use gtm_core::CoreError;
 
 use crate::config::DaemonConfig;
+use crate::library::Library;
 use crate::queue;
 
 type ClientId = u64;
@@ -71,6 +72,7 @@ pub struct Daemon {
     pub listener: UnixListener,
     pub config: DaemonConfig,
     pub event_tx: broadcast::Sender<DaemonEvent>,
+    pub library: Option<Library>,
     req_tx: mpsc::UnboundedSender<(ClientId, DaemonReq, ReplyTx)>,
     req_rx: mpsc::UnboundedReceiver<(ClientId, DaemonReq, ReplyTx)>,
     next_client_id: ClientId,
@@ -102,6 +104,12 @@ impl Daemon {
         let (event_tx, _) = broadcast::channel(256);
         let (req_tx, req_rx) = mpsc::unbounded_channel();
 
+        let library = if !config.test_mode {
+            Library::new(config.data_dir.to_str().unwrap_or("")).ok()
+        } else {
+            None
+        };
+
         Ok(Self {
             state,
             mixer,
@@ -112,6 +120,7 @@ impl Daemon {
             req_rx,
             next_client_id: 0,
             crossfade_loaded_for: None,
+            library,
         })
     }
 
@@ -121,6 +130,9 @@ impl Daemon {
     ///   2. **IPC requests**     — dispatch() → handle_request() → cmd_*()
     ///   3. **audio events**     — handle_audio_event() updates state, pushes events
     pub async fn run(&mut self) -> Result<(), CoreError> {
+        // Auto-scan music directory before accepting connections
+        self.auto_scan_audio().await;
+
         info!("daemon started on {}", self.config.socket_path.display());
 
         loop {
@@ -415,6 +427,58 @@ impl Daemon {
                 })
                 .await;
             }
+        }
+    }
+
+    /// Auto-scan `~/.local/share/gtm/audio` on startup.
+    /// Finds audio files, adds them to the library, populates the queue,
+    /// and auto-plays the first track if the queue was empty.
+    async fn auto_scan_audio(&mut self) {
+        let audio_dir = self.config.data_dir.join("audio");
+        if !audio_dir.exists() {
+            info!("audio dir {:?} does not exist — skipping auto-scan", audio_dir);
+            return;
+        }
+        if self.library.is_none() {
+            return;
+        }
+
+        let data_dir = self.config.data_dir.clone();
+        let audio_dir_str = audio_dir.to_string_lossy().to_string();
+
+        let result = tokio::task::spawn_blocking(move || {
+            let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+            lib.scan_directory(&audio_dir_str, true)
+        })
+        .await;
+
+        let tracks = match result {
+            Ok(Ok(t)) => t,
+            Ok(Err(e)) => {
+                warn!("auto-scan audio dir failed: {e}");
+                return;
+            }
+            Err(e) => {
+                warn!("auto-scan task panicked: {e}");
+                return;
+            }
+        };
+
+        if tracks.is_empty() {
+            info!("auto-scan found no new tracks in {:?}", audio_dir);
+            return;
+        }
+
+        info!("auto-scanned {} track(s) from {:?}", tracks.len(), audio_dir);
+
+        let mut state = self.state.write().await;
+        for track in &tracks {
+            state.queue.push(track.clone());
+        }
+        if state.queue_cursor == 0 && !tracks.is_empty() {
+            let first_path = tracks[0].path.clone();
+            drop(state);
+            let _ = self.cmd_play(&first_path, 0.0).await;
         }
     }
 
@@ -824,30 +888,193 @@ impl Daemon {
 
     async fn cmd_library(
         &mut self,
-        _action: &gtm_core::ipc::LibraryAction,
+        action: &gtm_core::ipc::LibraryAction,
     ) -> Result<DaemonRes, CoreError> {
         let version = self.state.read().await.version as u32;
-        Ok(DaemonRes::Ok { version })
+        let res = match action {
+            gtm_core::ipc::LibraryAction::Scan { path } => {
+                let audio_dir = path.clone();
+                let data_dir = self.config.data_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+                    lib.scan_directory(&audio_dir, true)
+                })
+                .await
+                .map_err(|e| CoreError::Daemon(e.to_string()))?;
+                match result {
+                    Ok(tracks) => DaemonRes::Tracks { version, tracks },
+                    Err(e) => DaemonRes::Error { version, message: e },
+                }
+            }
+            gtm_core::ipc::LibraryAction::GetTracks { filter: _, sort: _ } => {
+                let data_dir = self.config.data_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+                    lib.list_tracks()
+                })
+                .await
+                .map_err(|e| CoreError::Daemon(e.to_string()))?;
+                match result {
+                    Ok(tracks) => DaemonRes::Tracks { version, tracks },
+                    Err(e) => DaemonRes::Error { version, message: e },
+                }
+            }
+            gtm_core::ipc::LibraryAction::GetPlaylists => {
+                let data_dir = self.config.data_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+                    lib.get_playlists()
+                })
+                .await
+                .map_err(|e| CoreError::Daemon(e.to_string()))?;
+                match result {
+                    Ok(playlists) => DaemonRes::Playlists { version, playlists },
+                    Err(e) => DaemonRes::Error { version, message: e },
+                }
+            }
+            gtm_core::ipc::LibraryAction::CreatePlaylist { name } => {
+                let name = name.clone();
+                let data_dir = self.config.data_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+                    lib.create_playlist(&name)
+                })
+                .await
+                .map_err(|e| CoreError::Daemon(e.to_string()))?;
+                match result {
+                    Ok(playlist) => {
+                        let playlists = vec![playlist];
+                        DaemonRes::Playlists { version, playlists }
+                    }
+                    Err(e) => DaemonRes::Error { version, message: e },
+                }
+            }
+            gtm_core::ipc::LibraryAction::DeletePlaylist { id } => {
+                let id = *id;
+                let data_dir = self.config.data_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+                    lib.delete_playlist(id)
+                })
+                .await
+                .map_err(|e| CoreError::Daemon(e.to_string()))?;
+                match result {
+                    Ok(_) => DaemonRes::Ok { version },
+                    Err(e) => DaemonRes::Error { version, message: e },
+                }
+            }
+            gtm_core::ipc::LibraryAction::AddToPlaylist { playlist_id, track_ids } => {
+                let playlist_id = *playlist_id;
+                let track_ids = track_ids.clone();
+                let data_dir = self.config.data_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+                    for tid in &track_ids {
+                        lib.add_to_playlist(playlist_id, *tid)?;
+                    }
+                    Ok::<_, String>(())
+                })
+                .await
+                .map_err(|e| CoreError::Daemon(e.to_string()))?;
+                match result {
+                    Ok(_) => DaemonRes::Ok { version },
+                    Err(e) => DaemonRes::Error { version, message: e },
+                }
+            }
+            gtm_core::ipc::LibraryAction::ImportM3u { path } => {
+                let path = path.clone();
+                let data_dir = self.config.data_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+                    lib.import_m3u(&path)
+                })
+                .await
+                .map_err(|e| CoreError::Daemon(e.to_string()))?;
+                match result {
+                    Ok(playlist) => {
+                        let playlists = vec![playlist];
+                        DaemonRes::Playlists { version, playlists }
+                    }
+                    Err(e) => DaemonRes::Error { version, message: e },
+                }
+            }
+            gtm_core::ipc::LibraryAction::GetRecent { count } => {
+                let count = *count;
+                let data_dir = self.config.data_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+                    lib.get_recent(count)
+                })
+                .await
+                .map_err(|e| CoreError::Daemon(e.to_string()))?;
+                match result {
+                    Ok(tracks) => DaemonRes::Tracks { version, tracks },
+                    Err(e) => DaemonRes::Error { version, message: e },
+                }
+            }
+        };
+        Ok(res)
     }
 
-    async fn cmd_search(&mut self, _query: &str) -> Result<DaemonRes, CoreError> {
+    async fn cmd_search(&mut self, query: &str) -> Result<DaemonRes, CoreError> {
         let version = self.state.read().await.version as u32;
-        Ok(DaemonRes::Ok { version })
+        let query = query.to_string();
+        let data_dir = self.config.data_dir.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+            lib.search_tracks(&query)
+        })
+        .await
+        .map_err(|e| CoreError::Daemon(e.to_string()))?;
+        match result {
+            Ok(tracks) => Ok(DaemonRes::Tracks { version, tracks }),
+            Err(e) => Ok(DaemonRes::Error { version, message: e }),
+        }
     }
 
     async fn cmd_get_favourites(&mut self) -> Result<DaemonRes, CoreError> {
         let version = self.state.read().await.version as u32;
-        Ok(DaemonRes::Ok { version })
+        let data_dir = self.config.data_dir.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+            lib.get_favourites()
+        })
+        .await
+        .map_err(|e| CoreError::Daemon(e.to_string()))?;
+        match result {
+            Ok(tracks) => Ok(DaemonRes::Tracks { version, tracks }),
+            Err(e) => Ok(DaemonRes::Error { version, message: e }),
+        }
     }
 
-    async fn cmd_add_favourite(&mut self, _track_id: i64) -> Result<DaemonRes, CoreError> {
+    async fn cmd_add_favourite(&mut self, track_id: i64) -> Result<DaemonRes, CoreError> {
         let version = self.state.read().await.version as u32;
-        Ok(DaemonRes::Ok { version })
+        let data_dir = self.config.data_dir.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+            lib.toggle_favourite(track_id)
+        })
+        .await
+        .map_err(|e| CoreError::Daemon(e.to_string()))?;
+        match result {
+            Ok(_) => Ok(DaemonRes::Ok { version }),
+            Err(e) => Ok(DaemonRes::Error { version, message: e }),
+        }
     }
 
-    async fn cmd_remove_favourite(&mut self, _track_id: i64) -> Result<DaemonRes, CoreError> {
+    async fn cmd_remove_favourite(&mut self, track_id: i64) -> Result<DaemonRes, CoreError> {
         let version = self.state.read().await.version as u32;
-        Ok(DaemonRes::Ok { version })
+        let data_dir = self.config.data_dir.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+            lib.toggle_favourite(track_id)
+        })
+        .await
+        .map_err(|e| CoreError::Daemon(e.to_string()))?;
+        match result {
+            Ok(_) => Ok(DaemonRes::Ok { version }),
+            Err(e) => Ok(DaemonRes::Error { version, message: e }),
+        }
     }
 
     async fn cmd_yt_search(

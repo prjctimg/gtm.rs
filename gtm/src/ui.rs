@@ -20,6 +20,7 @@
 //! ```
 
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
@@ -35,6 +36,8 @@ pub fn run_tui(socket: Option<String>) -> Result<(), Box<dyn std::error::Error>>
     let socket_path = socket
         .map(PathBuf::from)
         .unwrap_or_else(default_socket);
+
+    ensure_daemon_running(&socket_path)?;
 
     let rt = tokio::runtime::Runtime::new()?;
     rt.block_on(async {
@@ -67,6 +70,81 @@ fn default_socket() -> PathBuf {
     let runtime =
         std::env::var("XDG_RUNTIME_DIR").unwrap_or_else(|_| "/run/user/1000".into());
     PathBuf::from(runtime).join("gtmd.socket")
+}
+
+fn ensure_daemon_running(socket_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Write;
+    use std::os::unix::net::UnixStream;
+
+    // Check if daemon is already running by trying to connect + ping
+    if let Ok(mut stream) = UnixStream::connect(socket_path) {
+        let _ = stream.write_all(b"{\"Ping\":null}\n");
+        return Ok(());
+    }
+
+    let gtmd_path = find_gtmd_binary()?;
+    let socket_arg = format!("--socket={}", socket_path.display());
+
+    let mut child = std::process::Command::new(&gtmd_path)
+        .arg(&socket_arg)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .map_err(|e| format!("Failed to start gtmd at {gtmd_path:?}: {e}"))?;
+
+    // Detach — spawn a thread to wait on the child (prevents zombies)
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+
+    // Wait for the socket file to appear (up to 5 seconds)
+    for _ in 0..50 {
+        if socket_path.exists() {
+            std::thread::sleep(Duration::from_millis(100));
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+
+    Err(format!(
+        "Daemon failed to start within 5 seconds — checked {socket_path:?}"
+    )
+    .into())
+}
+
+fn find_gtmd_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+    // Same directory as the gtm binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("gtmd");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+            // Also check for gtmd with the same platform suffix used in dev builds
+            let candidate2 = parent.join("gtmd");
+            if candidate2.exists() {
+                return Ok(candidate2);
+            }
+        }
+    }
+
+    // Search PATH
+    if let Ok(paths) = std::env::var("PATH") {
+        for dir in std::env::split_paths(&paths) {
+            let candidate = dir.join("gtmd");
+            if candidate.exists() {
+                return Ok(candidate);
+            }
+        }
+    }
+
+    // Standard install location
+    let candidate = std::path::PathBuf::from("/usr/bin/gtmd");
+    if candidate.exists() {
+        return Ok(candidate);
+    }
+
+    Err("gtmd binary not found — ensure it is installed and on PATH".into())
 }
 
 pub fn render(f: &mut ratatui::Frame, app: &mut App) {
