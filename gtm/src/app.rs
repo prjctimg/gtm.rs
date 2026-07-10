@@ -55,6 +55,7 @@ pub struct App {
     pub theme: AppTheme,
     pub client: DaemonClient,
     pub state: DaemonState,
+    pub display_position: f64,
     pub current_tab: Tab,
     pub input_mode: InputMode,
     pub search_query: String,
@@ -123,6 +124,7 @@ impl App {
             theme: AppTheme::default(),
             client,
             state,
+            display_position: 0.0,
             current_tab: Tab::NowPlaying,
             input_mode: InputMode::Normal,
             search_query: String::new(),
@@ -203,6 +205,8 @@ impl App {
             // Expire stale notifications
             let now = std::time::Instant::now();
             self.notifications.retain(|n| n.expires_at > now);
+
+            self.display_position = self.client.estimated_position().await;
 
             terminal.draw(|f| ui::render(f, &mut self))?;
 

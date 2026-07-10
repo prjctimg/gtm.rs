@@ -271,7 +271,7 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(info_para, info_chunks[1]);
 
     let dur = track.duration;
-    let pos = app.state.time_pos;
+    let pos = app.display_position;
     let ratio = if dur > 0.0 { (pos / dur) as f64 } else { 0.0 };
     let pos_str = format_duration(pos as u64);
     let dur_str = format_duration(dur as u64);
@@ -794,7 +794,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
             let status_section = format!(" {status_icon} Vol:{vol_str}{repeat_str}{shuffle_str} ");
 
             let progress_section = if let Some(ref track) = app.state.current_track {
-                let pos = app.state.time_pos as u64;
+                let pos = app.display_position as u64;
                 let dur = track.duration as u64;
                 let ratio = if dur > 0 { pos as f64 / dur as f64 } else { 0.0 };
                 let bar = render_progress_line(ratio, 20);
