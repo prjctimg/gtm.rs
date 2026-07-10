@@ -7,7 +7,7 @@ use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragraph, Tabs};
 use ratatui::Terminal;
-use crate::app::{App, InputMode};
+use crate::app::{App, InputMode, LIBRARY_CATEGORIES};
 use crate::overlay::OverlayId;
 use gtm_core::state::{EqPreset, PlaybackStatus, RepeatMode, Tab};
 
@@ -210,7 +210,7 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
 fn render_content(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     match app.current_tab {
         Tab::NowPlaying => render_now_playing(f, area, app),
-        Tab::Library => render_list(f, area, app, "Library", &app.tracks_cache.clone()),
+        Tab::Library => render_library(f, area, app),
         Tab::Settings => render_settings(f, area, app),
     }
 }
@@ -318,18 +318,66 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(controls, chunks[3]);
 }
 
-fn render_list(
-    f: &mut ratatui::Frame,
-    area: Rect,
-    app: &App,
-    title: &str,
-    items: &[gtm_core::track::TrackInfo],
-) {
+fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    // Reserve 1 line at bottom for stats
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
+
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(28), Constraint::Min(0)])
+        .split(chunks[0]);
+
+    let stats_area = chunks[1];
+    let left_focus = app.library_pane_focus;
+
+    // ── Left pane: categories ──
+    let left_items: Vec<ListItem> = LIBRARY_CATEGORIES
+        .iter()
+        .enumerate()
+        .map(|(i, cat)| {
+            let count = match *cat {
+                "All Tracks" => app.tracks_cache.len(),
+                _ => 0, // TODO: compute per-category counts
+            };
+            let label = if count > 0 {
+                format!(" {:<20} {:>4}", cat, count)
+            } else {
+                format!(" {}", cat)
+            };
+            let style = if i == app.library_category {
+                if left_focus {
+                    Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+                } else {
+                    Style::default().fg(app.theme.accent)
+                }
+            } else {
+                Style::default()
+            };
+            ListItem::new(label).style(style)
+        })
+        .collect();
+
+    let left_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Library ")
+        .border_type(BorderType::Rounded)
+        .border_style(if left_focus {
+            Style::default().fg(app.theme.border_active)
+        } else {
+            Style::default().fg(app.theme.border)
+        });
+
+    f.render_widget(List::new(left_items).block(left_block), panes[0]);
+
+    // ── Right pane: category contents ──
     let filtered: Vec<&gtm_core::track::TrackInfo> = if app.search_query.is_empty() {
-        items.iter().collect()
+        app.tracks_cache.iter().collect()
     } else {
         let q = app.search_query.to_lowercase();
-        items
+        app.tracks_cache
             .iter()
             .filter(|t| {
                 t.title.to_lowercase().contains(&q)
@@ -339,16 +387,27 @@ fn render_list(
             .collect()
     };
 
+    let category_label = LIBRARY_CATEGORIES.get(app.library_category).unwrap_or(&"All Tracks");
+    let total_dur: u64 = filtered.iter().map(|t| t.duration as u64).sum();
+    let hours = total_dur / 3600;
+    let mins = (total_dur % 3600) / 60;
+    let stats_line = format!(
+        " {} tracks \u{2022} {}h {}m of playback ",
+        filtered.len(),
+        hours,
+        mins,
+    );
+
     let sel = app.scroll_offset.min(filtered.len().saturating_sub(1));
 
-    let list_items: Vec<ListItem> = filtered
+    let right_items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
         .map(|(i, track)| {
             let prefix = if i == sel { " \u{25B6} " } else { "   " };
             let dur = format_duration(track.duration as u64);
             let content = format!("{prefix}{} - {} [{}]", track.artist, track.title, dur);
-            let style = if i == sel {
+            let style = if i == sel && !left_focus {
                 Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
             } else {
                 Style::default()
@@ -357,70 +416,130 @@ fn render_list(
         })
         .collect();
 
-    let list = List::new(list_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(format!(" {title} "))
-            .border_type(BorderType::Rounded),
-    );
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", category_label))
+        .border_type(BorderType::Rounded)
+        .border_style(if !left_focus {
+            Style::default().fg(app.theme.border_active)
+        } else {
+            Style::default().fg(app.theme.border)
+        });
 
-    f.render_widget(list, area);
+    f.render_widget(List::new(right_items).block(right_block), panes[1]);
+
+    // ── Stats bar ──
+    let stats = Paragraph::new(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(stats_line, Style::default().fg(app.theme.fg_dim)),
+    ]));
+    f.render_widget(stats, stats_area);
 }
 
+const SETTINGS_CATEGORIES: &[&str] = &["Audio", "General", "Playback", "Appearance", "Spotify"];
+
+const SETTINGS_HELP: &[&[&str]] = &[
+    // Audio
+    &["Volume: Adjust playback volume", "Mute: Toggle mute"],
+    // General
+    &["Status: Daemon connection status", "Queue: Number of queued tracks"],
+    // Playback
+    &["Repeat: Cycle repeat mode (Off/All/One)", "Shuffle: Toggle shuffle", "Crossfade: Toggle and set crossfade duration"],
+    // Appearance
+    &["Theme: Select color scheme", "Notifications: Toggle toast notifications"],
+    // Spotify
+    &["Spotify: Connect/disconnect Spotify integration"],
+];
+
 fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let crossfade_on = app.state
-        .crossfade
-        .as_ref()
-        .map(|c| c.enabled)
-        .unwrap_or(false);
-    let crossfade_dur = app.state
-        .crossfade
-        .as_ref()
-        .map(|c| c.duration_secs)
-        .unwrap_or(0);
-    let crossfade_label = if crossfade_on {
-        format!("Crossfade: ON  [c]toggle [C]dur: {}s", crossfade_dur)
-    } else {
-        "Crossfade: OFF  [c]toggle".to_string()
-    };
+    // Reserve 1 line at bottom for help
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .split(area);
 
-    let items = vec![
-        format!(
-            "Volume:    {}% {}",
-            app.state.volume,
-            if app.state.mute { "(MUTED)" } else { "" }
-        ),
-        format!("Repeat:    {:?}", app.state.repeat),
-        format!("Shuffle:   {}", if app.state.shuffle { "ON" } else { "OFF" }),
-        format!("Mute:      {}", if app.state.mute { "ON" } else { "OFF" }),
-        crossfade_label,
-        format!("Status:    {:?}", app.state.status),
-        format!("Queue:     {} tracks", app.state.queue.len()),
-    ];
+    let panes = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(22), Constraint::Min(0)])
+        .split(chunks[0]);
 
-    let settings_items: Vec<ListItem> = items.into_iter().enumerate()
-        .map(|(i, s)| {
-            let style = if i == 4 {
-                if crossfade_on {
-                    Style::default().fg(app.theme.success)
-                } else {
-                    Style::default().fg(app.theme.fg_dim)
-                }
+    let help_area = chunks[1];
+
+    // ── Left pane: categories ──
+    let left_items: Vec<ListItem> = SETTINGS_CATEGORIES
+        .iter()
+        .enumerate()
+        .map(|(i, cat)| {
+            let style = if i == app.settings_category {
+                Style::default().fg(app.theme.accent)
             } else {
                 Style::default()
             };
-            ListItem::new(s).style(style)
+            ListItem::new(format!(" {}", cat)).style(style)
         })
         .collect();
 
-    let list = List::new(settings_items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Settings ")
-            .border_type(BorderType::Rounded),
-    );
+    let left_block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Categories ")
+        .border_type(BorderType::Rounded);
 
-    f.render_widget(list, area);
+    f.render_widget(List::new(left_items).block(left_block), panes[0]);
+
+    // ── Right pane: options for selected category ──
+    let help_items = SETTINGS_HELP.get(app.settings_category).copied().unwrap_or(&[]);
+    let items: Vec<String> = match app.settings_category {
+        0 => vec![
+            format!("Volume: {}% {}", app.state.volume, if app.state.mute { "(MUTED)" } else { "" }),
+            format!("Mute: {}", if app.state.mute { "ON" } else { "OFF" }),
+        ],
+        1 => vec![
+            format!("Status: {:?}", app.state.status),
+            format!("Queue: {} tracks", app.state.queue.len()),
+        ],
+        2 => {
+            let crossfade_on = app.state.crossfade.as_ref().map(|c| c.enabled).unwrap_or(false);
+            let crossfade_dur = app.state.crossfade.as_ref().map(|c| c.duration_secs).unwrap_or(0);
+            vec![
+                format!("Repeat: {:?}", app.state.repeat),
+                format!("Shuffle: {}", if app.state.shuffle { "ON" } else { "OFF" }),
+                if crossfade_on {
+                    format!("Crossfade: ON {}s", crossfade_dur)
+                } else {
+                    "Crossfade: OFF".to_string()
+                },
+            ]
+        }
+        3 => vec![
+            "Theme: Catppuccin Mocha".to_string(),
+            "Notifications: ON".to_string(),
+        ],
+        4 => vec!["Spotify: Disconnected".to_string()],
+        _ => vec![],
+    };
+
+    let right_items: Vec<ListItem> = items.iter().enumerate()
+        .map(|(_, s)| {
+            let style = Style::default();
+            ListItem::new(s.as_str()).style(style)
+        })
+        .collect();
+
+    let category_label = SETTINGS_CATEGORIES.get(app.settings_category).unwrap_or(&"");
+    let right_block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!(" {} ", category_label))
+        .border_type(BorderType::Rounded);
+
+    f.render_widget(List::new(right_items).block(right_block), panes[1]);
+
+    // ── Help bar at bottom ──
+    if !help_items.is_empty() {
+        let help_text = help_items.join("  |  ");
+        let help = Paragraph::new(help_text)
+            .style(Style::default().fg(app.theme.fg_dim));
+        f.render_widget(help, help_area);
+    }
 }
 
 // ─── Overlay Rendering ───

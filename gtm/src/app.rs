@@ -14,6 +14,19 @@ use crate::overlay::{OverlayCtx, OverlayId, OverlayManager};
 use crate::theme::AppTheme;
 use crate::ui;
 
+pub const NUM_SETTINGS_CATEGORIES: usize = 5;
+pub const LIBRARY_CATEGORIES: &[&str] = &[
+    "All Tracks",
+    "Albums",
+    "Artists",
+    "Playlists",
+    "Recently Added",
+    "Most Played",
+    "Least Played",
+    "Spotify",
+    "Downloads",
+];
+
 pub enum InputMode {
     Normal,
     Searching,
@@ -29,6 +42,10 @@ pub struct App {
     pub input_mode: InputMode,
     pub search_query: String,
     pub scroll_offset: usize,
+    pub library_category: usize,
+    pub library_pane_focus: bool,
+    pub settings_category: usize,
+    pub settings_option_scroll: usize,
     pub tracks_cache: Vec<TrackInfo>,
     pub queue_cache: Vec<TrackInfo>,
     pub queue_cursor: usize,
@@ -90,6 +107,10 @@ impl App {
             input_mode: InputMode::Normal,
             search_query: String::new(),
             scroll_offset: 0,
+            library_category: 0,
+            library_pane_focus: false,
+            settings_category: 0,
+            settings_option_scroll: 0,
             tracks_cache: Vec::new(),
             queue_cache: Vec::new(),
             queue_cursor: 0,
@@ -398,20 +419,36 @@ impl App {
                 match self.keybindings.dispatch(key, KeyContext::Normal) {
                     Some(KeyboardAction::Quit) => return false,
                     Some(KeyboardAction::NextTab) => {
-                        self.current_tab = match self.current_tab {
-                            Tab::NowPlaying => Tab::Library,
-                            Tab::Library => Tab::Settings,
-                            Tab::Settings => Tab::NowPlaying,
-                        };
-                        self.refresh_tab().await;
+                        // In Library/Settings tabs, Tab toggles pane focus first
+                        match self.current_tab {
+                            Tab::Library => {
+                                self.library_pane_focus = !self.library_pane_focus;
+                            }
+                            Tab::Settings => {
+                                self.settings_category = (self.settings_category + 1) % NUM_SETTINGS_CATEGORIES;
+                            }
+                            _ => {
+                                self.current_tab = match self.current_tab {
+                                    Tab::NowPlaying => Tab::Library,
+                                    _ => Tab::NowPlaying,
+                                };
+                                self.refresh_tab().await;
+                            }
+                        }
                     }
                     Some(KeyboardAction::PrevTab) => {
-                        self.current_tab = match self.current_tab {
-                            Tab::NowPlaying => Tab::Settings,
-                            Tab::Library => Tab::NowPlaying,
-                            Tab::Settings => Tab::Library,
-                        };
-                        self.refresh_tab().await;
+                        match self.current_tab {
+                            Tab::Library => {
+                                self.library_pane_focus = !self.library_pane_focus;
+                            }
+                            Tab::Settings => {
+                                self.settings_category = self.settings_category.saturating_sub(1);
+                            }
+                            _ => {
+                                self.current_tab = Tab::Settings;
+                                self.refresh_tab().await;
+                            }
+                        }
                     }
                     Some(KeyboardAction::SwitchTab(tab)) => {
                         self.current_tab = tab;
@@ -490,12 +527,25 @@ impl App {
                         self.input_mode = InputMode::Command;
                     }
                     Some(KeyboardAction::MoveUp) => {
-                        self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                        if self.current_tab == Tab::Library && self.library_pane_focus {
+                            self.library_category = self.library_category.saturating_sub(1);
+                        } else {
+                            self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                        }
                     }
                     Some(KeyboardAction::MoveDown) => {
-                        self.scroll_offset += 1;
+                        if self.current_tab == Tab::Library && self.library_pane_focus {
+                            self.library_category = (self.library_category + 1).min(LIBRARY_CATEGORIES.len() - 1);
+                        } else {
+                            self.scroll_offset += 1;
+                        }
                     }
-                    Some(KeyboardAction::Select) => {}
+                    Some(KeyboardAction::Select) => {
+                        // In Library left pane, Enter moves focus to right pane
+                        if self.current_tab == Tab::Library && self.library_pane_focus {
+                            self.library_pane_focus = false;
+                        }
+                    }
                     Some(KeyboardAction::Delete) => {}
                     None => {
                         match key.code {
