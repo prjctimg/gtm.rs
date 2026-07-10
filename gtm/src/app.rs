@@ -38,8 +38,10 @@ pub enum InputMode {
 #[derive(Debug, Clone)]
 pub enum NotificationKind {
     Info,
+    #[allow(dead_code)]
     Success,
     Warning,
+    #[allow(dead_code)]
     Error,
 }
 
