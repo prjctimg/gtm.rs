@@ -1,7 +1,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use gtm_core::client::DaemonClient;
 use gtm_core::ipc::DaemonRes;
 use gtm_core::state::{DaemonState, PlaybackStatus, RepeatMode, Tab};
@@ -70,6 +70,7 @@ pub struct App {
     pub tracks_cache: Vec<TrackInfo>,
     pub queue_cache: Vec<TrackInfo>,
     pub queue_cursor: usize,
+    pub browse_detail: Option<String>,
     pub yt_results_cache: Vec<gtm_core::track::YTSearchResult>,
     pub volume_input: String,
     pub playlist_cache: Vec<gtm_core::track::Playlist>,
@@ -106,6 +107,7 @@ pub enum TuiCommand {
     Crossfade(bool, u8),
     QueueAdd(String),
     QueueRemove(u128),
+    QueueMove(u128, u128),
     QueueClear,
     YtSearch(String),
     YtResolve(String),
@@ -142,6 +144,7 @@ impl App {
             tracks_cache: Vec::new(),
             queue_cache: Vec::new(),
             queue_cursor: 0,
+            browse_detail: None,
             yt_results_cache: Vec::new(),
             volume_input: String::new(),
             playlist_cache: Vec::new(),
@@ -238,6 +241,48 @@ impl App {
             kind,
             expires_at,
         });
+    }
+
+    /// Filtered tracks for the current library view, respecting search query and browse_detail.
+    pub fn filtered_tracks(&self) -> Vec<&TrackInfo> {
+        let mut tracks: Vec<&TrackInfo> = self.tracks_cache.iter().collect();
+        if !self.search_query.is_empty() {
+            let q = self.search_query.to_lowercase();
+            tracks.retain(|t| {
+                t.title.to_lowercase().contains(&q)
+                    || t.artist.to_lowercase().contains(&q)
+                    || t.album.to_lowercase().contains(&q)
+            });
+        }
+        if let Some(ref detail) = self.browse_detail {
+            let detail_lower = detail.to_lowercase();
+            tracks.retain(|t| {
+                t.album.to_lowercase().contains(&detail_lower)
+                    || t.artist.to_lowercase().contains(&detail_lower)
+                    || t.title.to_lowercase().contains(&detail_lower)
+            });
+        }
+        tracks
+    }
+
+    /// Unique album names with track counts, sorted by album.
+    pub fn unique_albums(&self) -> Vec<(String, usize)> {
+        let mut albums: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for t in &self.tracks_cache {
+            let key = if t.album.is_empty() { "Unknown Album".into() } else { t.album.clone() };
+            *albums.entry(key).or_insert(0) += 1;
+        }
+        albums.into_iter().collect()
+    }
+
+    /// Unique artist names with track counts, sorted by artist.
+    pub fn unique_artists(&self) -> Vec<(String, usize)> {
+        let mut artists: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
+        for t in &self.tracks_cache {
+            let key = if t.artist.is_empty() { "Unknown Artist".into() } else { t.artist.clone() };
+            *artists.entry(key).or_insert(0) += 1;
+        }
+        artists.into_iter().collect()
     }
 
     async fn fetch_state(&mut self) {
@@ -342,6 +387,11 @@ impl App {
                     self.error_message = Some(e.to_string());
                 }
             }
+            TuiCommand::QueueMove(from, to) => {
+                if let Err(e) = self.client.queue_move(from, to).await {
+                    self.error_message = Some(e.to_string());
+                }
+            }
             TuiCommand::QueueClear => {
                 if let Err(e) = self.client.queue_clear().await {
                     self.error_message = Some(e.to_string());
@@ -378,6 +428,13 @@ impl App {
                 }
                 self.fetch_state().await;
             }
+            TuiCommand::RefreshPlaylists => {
+                if let Ok(DaemonRes::Playlists { playlists, .. }) =
+                    self.client.library_get_playlists().await
+                {
+                    self.playlist_cache = playlists;
+                }
+            }
             TuiCommand::RefreshLibrary => {
                 if let Ok(DaemonRes::Tracks { tracks, .. }) =
                     self.client.library_get_tracks(None, None).await
@@ -387,13 +444,6 @@ impl App {
             }
             TuiCommand::RefreshQueue => {
                 self.fetch_queue().await;
-            }
-            TuiCommand::RefreshPlaylists => {
-                if let Ok(DaemonRes::Playlists { playlists, .. }) =
-                    self.client.library_get_playlists().await
-                {
-                    self.playlist_cache = playlists;
-                }
             }
             TuiCommand::RefreshYt => {
                 if let Ok(DaemonRes::YtSearchResults { results, .. }) =
@@ -670,19 +720,46 @@ impl App {
                     Some(KeyboardAction::Select) => {
                         if self.current_tab == Tab::Library {
                             if self.library_pane_focus {
-                                // Left pane: move focus to right pane
                                 self.library_pane_focus = false;
-                            } else {
-                                // Right pane: set queue context then play
-                                if self.scroll_offset < self.tracks_cache.len() {
+                            } else if self.browse_detail.is_some() {
+                                // In detail view: play the selected track
+                                let filtered = self.filtered_tracks();
+                                if self.scroll_offset < filtered.len() {
                                     let idx = self.scroll_offset;
-                                    let paths: Vec<String> = self.tracks_cache
-                                        .iter()
-                                        .map(|t| t.path.clone())
-                                        .collect();
+                                    let paths: Vec<String> = filtered.iter().map(|t| t.path.clone()).collect();
                                     let path = paths[idx].clone();
                                     let tx = self.cmd_tx();
-                                    // Set queue to library tracks for next/prev navigation
+                                    let _ = self.client.queue_set(paths, idx as u128).await;
+                                    let _ = tx.send(TuiCommand::Play(path)).await;
+                                }
+                            } else if self.library_category == 1 {
+                                // Albums: select album → show its tracks
+                                let albums = self.unique_albums();
+                                if self.scroll_offset < albums.len() {
+                                    self.browse_detail = Some(albums[self.scroll_offset].0.clone());
+                                    self.scroll_offset = 0;
+                                }
+                            } else if self.library_category == 2 {
+                                // Artists: select artist → show its tracks
+                                let artists = self.unique_artists();
+                                if self.scroll_offset < artists.len() {
+                                    self.browse_detail = Some(artists[self.scroll_offset].0.clone());
+                                    self.scroll_offset = 0;
+                                }
+                            } else if self.library_category == 3 {
+                                // Playlists: select playlist → show its tracks
+                                if self.scroll_offset < self.playlist_cache.len() {
+                                    self.browse_detail = Some(self.playlist_cache[self.scroll_offset].name.clone());
+                                    self.scroll_offset = 0;
+                                }
+                            } else {
+                                // Default: play track from flat list
+                                let filtered = self.filtered_tracks();
+                                if self.scroll_offset < filtered.len() {
+                                    let idx = self.scroll_offset;
+                                    let paths: Vec<String> = filtered.iter().map(|t| t.path.clone()).collect();
+                                    let path = paths[idx].clone();
+                                    let tx = self.cmd_tx();
                                     let _ = self.client.queue_set(paths, idx as u128).await;
                                     let _ = tx.send(TuiCommand::Play(path)).await;
                                 }
@@ -695,6 +772,9 @@ impl App {
                             KeyCode::Char('q') | KeyCode::Esc => {
                                 if self.show_tag_popup {
                                     self.show_tag_popup = false;
+                                } else if self.browse_detail.is_some() {
+                                    self.browse_detail = None;
+                                    self.scroll_offset = 0;
                                 } else {
                                     return false;
                                 }
@@ -756,6 +836,29 @@ impl App {
                 }
                 self.pending_volume = None;
                 self.overlays.close_top();
+            }
+            // Queue move up/down (Ctrl+K/J) must come before plain k/j
+            KeyCode::Char('k') if key.modifiers == KeyModifiers::CONTROL => {
+                if let Some(top) = self.overlays.top() {
+                    if top.id == OverlayId::Queue && !self.queue_cache.is_empty() {
+                        let idx = top.selected.min(self.queue_cache.len() - 1);
+                        if idx > 0 {
+                            let _ = tx.send(TuiCommand::QueueMove(idx as u128, idx.saturating_sub(1) as u128)).await;
+                            self.fetch_queue().await;
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => {
+                if let Some(top) = self.overlays.top() {
+                    if top.id == OverlayId::Queue && !self.queue_cache.is_empty() {
+                        let idx = top.selected.min(self.queue_cache.len() - 1);
+                        if idx < self.queue_cache.len() - 1 {
+                            let _ = tx.send(TuiCommand::QueueMove(idx as u128, (idx + 1) as u128)).await;
+                            self.fetch_queue().await;
+                        }
+                    }
+                }
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(top) = self.overlays.top_mut() {
@@ -857,6 +960,7 @@ impl App {
         let tx = self.cmd_tx();
         if self.current_tab == Tab::Library {
             let _ = tx.send(TuiCommand::RefreshLibrary).await;
+            let _ = tx.send(TuiCommand::RefreshPlaylists).await;
         }
     }
 }

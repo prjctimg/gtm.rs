@@ -404,6 +404,9 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
             let icon = lib_icons.get(i).unwrap_or(&" ");
             let count = match *cat {
                 "All Tracks" => app.tracks_cache.len(),
+                "Albums" => app.unique_albums().len(),
+                "Artists" => app.unique_artists().len(),
+                "Playlists" => app.playlist_cache.len(),
                 _ => 0,
             };
             let num = i + 1;
@@ -448,94 +451,174 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
         }
     }
 
-    // ── Right pane: track table ──
-    let filtered: Vec<&gtm_core::track::TrackInfo> = if app.search_query.is_empty() {
-        app.tracks_cache.iter().collect()
-    } else {
-        let q = app.search_query.to_lowercase();
-        app.tracks_cache
-            .iter()
-            .filter(|t| {
-                t.title.to_lowercase().contains(&q)
-                    || t.artist.to_lowercase().contains(&q)
-                    || t.album.to_lowercase().contains(&q)
-            })
-            .collect()
-    };
-
+    // ── Right pane: browse list or track table ──
     let category_label = LIBRARY_CATEGORIES.get(app.library_category).unwrap_or(&"All Tracks");
-    let total_dur: u64 = filtered.iter().map(|t| t.duration as u64).sum();
-    let hours = total_dur / 3600;
-    let mins = (total_dur % 3600) / 60;
-    let stats_line = format!(
-        " {} tracks | {}h {}m ",
-        filtered.len(),
-        hours,
-        mins,
-    );
 
-    let sel = app.scroll_offset.min(filtered.len().saturating_sub(1));
-
-    // Up Next header
-    let current_id = app.state.current_track.as_ref().map(|t| t.id);
-    let up_next = if let (Some(t), Some(_)) = (app.state.current_track.as_ref(), current_id.and_then(|id| filtered.iter().position(|ft| ft.id == id))) {
-        format!(" Up Next: {} - {}    {}", t.artist, t.title, stats_line)
-    } else if !filtered.is_empty() {
-        format!(" {} · {} tracks", category_label, filtered.len())
-    } else {
-        format!(" {} · 0 tracks", category_label)
-    };
-
-    // Column widths
-    let pane_w = panes[1].width as usize;
-    let num_w = 4;   // "#  "
-    let dur_w = 9;   // " 00:00:00" or " 99:99"
-    let br_w = 8;    // " 320kbps"
-    let title_w = pane_w.saturating_sub(num_w + dur_w + br_w + 4).max(10);
-
-    let header_fmt = format!(
-        "{:>w1$}│ {:<w2$} │ {:>w3$} │ {:>w4$}",
-        "#", "Title / Artist / Album", "Duration", "Bitrate",
-        w1 = num_w - 1, w2 = title_w, w3 = dur_w - 1, w4 = br_w - 1
-    );
-    let sep_line = format!(
-        "{:─>w1$}┼{:─>w2$}┼{:─>w3$}┼{:─>w4$}",
-        "", "", "", "",
-        w1 = num_w + 1, w2 = title_w + 2, w3 = dur_w + 1, w4 = br_w
-    );
-
-    let mut right_lines = vec![
-        Line::from(Span::styled(up_next, Style::default().fg(app.theme.fg_dim))),
-        Line::from(""),
-        Line::from(Span::styled(header_fmt, Style::default().fg(app.theme.fg_dim))),
-        Line::from(Span::styled(sep_line, Style::default().fg(app.theme.fg_dim))),
-    ];
-
-    for (i, track) in filtered.iter().enumerate() {
-        let is_current = app.state.current_track.as_ref().map(|t| t.id) == Some(track.id);
-        let is_sel = i == sel && !left_focus;
-        let prefix = if is_current { ">" } else if is_sel { " " } else { " " };
-        let num_str = format!("{}{:02}", prefix, i + 1);
-        let dur = format_duration_short(track.duration as u64);
-        let br = track.bitrate.map(|b| format!("{}kbps", b)).unwrap_or_default();
-        let title_artist = format!("{} - {}", track.artist, track.title);
-
-        let row = format!(
-            "{:<w1$}│ {:<w2$} │ {:>w3$} │ {:>w4$}",
-            num_str, title_artist, dur, br,
-            w1 = num_w, w2 = title_w, w3 = dur_w, w4 = br_w
-        );
-
-        let style = if is_current {
-            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD)
-        } else if is_sel {
-            Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+    let (right_lines, stats_line) = if app.browse_detail.is_some() {
+        // Detail view: show tracks filtered by album/artist/playlist
+        let filtered = app.filtered_tracks();
+        let total_dur: u64 = filtered.iter().map(|t| t.duration as u64).sum();
+        let hours = total_dur / 3600;
+        let mins = (total_dur % 3600) / 60;
+        let st_line = format!(" {} tracks | {}h {}m ", filtered.len(), hours, mins);
+        let sel = app.scroll_offset.min(filtered.len().saturating_sub(1));
+        let detail_name = app.browse_detail.as_deref().unwrap_or("");
+        let current_id = app.state.current_track.as_ref().map(|t| t.id);
+        let header_text = if let (Some(t), Some(_)) = (app.state.current_track.as_ref(), current_id.and_then(|id| filtered.iter().position(|ft| ft.id == id))) {
+            format!(" Up Next: {} - {}    {}", t.artist, t.title, st_line)
         } else {
-            Style::default()
+            format!(" {} · {} tracks", detail_name, filtered.len())
         };
 
-        right_lines.push(Line::from(Span::styled(row, style)));
-    }
+        let pane_w = panes[1].width as usize;
+        let num_w = 4; let dur_w = 9; let br_w = 8;
+        let title_w = pane_w.saturating_sub(num_w + dur_w + br_w + 4).max(10);
+
+        let header_fmt = format!("{:>w1$}│ {:<w2$} │ {:>w3$} │ {:>w4$}",
+            "#", "Title / Artist / Album", "Duration", "Bitrate",
+            w1 = num_w - 1, w2 = title_w, w3 = dur_w - 1, w4 = br_w - 1);
+        let sep_line = format!("{:─>w1$}┼{:─>w2$}┼{:─>w3$}┼{:─>w4$}",
+            "", "", "", "", w1 = num_w + 1, w2 = title_w + 2, w3 = dur_w + 1, w4 = br_w);
+
+        let mut lines = vec![
+            Line::from(Span::styled(header_text, Style::default().fg(app.theme.fg_dim))),
+            Line::from(""),
+            Line::from(Span::styled(header_fmt, Style::default().fg(app.theme.fg_dim))),
+            Line::from(Span::styled(sep_line, Style::default().fg(app.theme.fg_dim))),
+        ];
+
+        for (i, track) in filtered.iter().enumerate() {
+            let is_current = app.state.current_track.as_ref().map(|t| t.id) == Some(track.id);
+            let is_sel = i == sel && !left_focus;
+            let prefix = if is_current { ">" } else if is_sel { " " } else { " " };
+            let num_str = format!("{}{:02}", prefix, i + 1);
+            let dur = format_duration_short(track.duration as u64);
+            let br = track.bitrate.map(|b| format!("{}kbps", b)).unwrap_or_default();
+            let title_artist = format!("{} - {}", track.artist, track.title);
+            let row = format!("{:<w1$}│ {:<w2$} │ {:>w3$} │ {:>w4$}",
+                num_str, title_artist, dur, br, w1 = num_w, w2 = title_w, w3 = dur_w, w4 = br_w);
+            let style = if is_current {
+                Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD)
+            } else if is_sel {
+                Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(row, style)));
+        }
+        (lines, st_line)
+    } else if app.library_category == 1 {
+        // Albums browse
+        let albums = app.unique_albums();
+        let sel = app.scroll_offset.min(albums.len().saturating_sub(1));
+        let st_line = format!(" {} albums ", albums.len());
+        let mut lines = vec![
+            Line::from(Span::styled(format!(" {} · {} albums", category_label, albums.len()), Style::default().fg(app.theme.fg_dim))),
+            Line::from(""),
+        ];
+        for (i, (name, count)) in albums.iter().enumerate() {
+            let prefix = if i == sel && !left_focus { " >" } else { "  " };
+            let style = if i == sel && !left_focus {
+                Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+            } else {
+                Style::default().fg(app.theme.fg)
+            };
+            lines.push(Line::from(Span::styled(format!("{}{:<40} {:>4} tracks", prefix, name, count), style)));
+        }
+        (lines, st_line)
+    } else if app.library_category == 2 {
+        // Artists browse
+        let artists = app.unique_artists();
+        let sel = app.scroll_offset.min(artists.len().saturating_sub(1));
+        let st_line = format!(" {} artists ", artists.len());
+        let mut lines = vec![
+            Line::from(Span::styled(format!(" {} · {} artists", category_label, artists.len()), Style::default().fg(app.theme.fg_dim))),
+            Line::from(""),
+        ];
+        for (i, (name, count)) in artists.iter().enumerate() {
+            let prefix = if i == sel && !left_focus { " >" } else { "  " };
+            let style = if i == sel && !left_focus {
+                Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+            } else {
+                Style::default().fg(app.theme.fg)
+            };
+            lines.push(Line::from(Span::styled(format!("{}{:<40} {:>4} tracks", prefix, name, count), style)));
+        }
+        (lines, st_line)
+    } else if app.library_category == 3 {
+        // Playlists browse
+        let playlists = &app.playlist_cache;
+        let sel = app.scroll_offset.min(playlists.len().saturating_sub(1));
+        let st_line = format!(" {} playlists ", playlists.len());
+        let mut lines = vec![
+            Line::from(Span::styled(format!(" {} · {} playlists", category_label, playlists.len()), Style::default().fg(app.theme.fg_dim))),
+            Line::from(""),
+        ];
+        for (i, pl) in playlists.iter().enumerate() {
+            let prefix = if i == sel && !left_focus { " >" } else { "  " };
+            let style = if i == sel && !left_focus {
+                Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+            } else {
+                Style::default().fg(app.theme.fg)
+            };
+            lines.push(Line::from(Span::styled(format!("{}{:<40} {:>4} tracks", prefix, pl.name, pl.track_count), style)));
+        }
+        (lines, st_line)
+    } else {
+        // All Tracks or other: flat track table
+        let filtered = app.filtered_tracks();
+        let total_dur: u64 = filtered.iter().map(|t| t.duration as u64).sum();
+        let hours = total_dur / 3600;
+        let mins = (total_dur % 3600) / 60;
+        let st_line = format!(" {} tracks | {}h {}m ", filtered.len(), hours, mins);
+        let sel = app.scroll_offset.min(filtered.len().saturating_sub(1));
+        let current_id = app.state.current_track.as_ref().map(|t| t.id);
+        let header_text = if let (Some(t), Some(_)) = (app.state.current_track.as_ref(), current_id.and_then(|id| filtered.iter().position(|ft| ft.id == id))) {
+            format!(" Up Next: {} - {}    {}", t.artist, t.title, st_line)
+        } else if !filtered.is_empty() {
+            format!(" {} · {} tracks", category_label, filtered.len())
+        } else {
+            format!(" {} · 0 tracks", category_label)
+        };
+
+        let pane_w = panes[1].width as usize;
+        let num_w = 4; let dur_w = 9; let br_w = 8;
+        let title_w = pane_w.saturating_sub(num_w + dur_w + br_w + 4).max(10);
+
+        let header_fmt = format!("{:>w1$}│ {:<w2$} │ {:>w3$} │ {:>w4$}",
+            "#", "Title / Artist / Album", "Duration", "Bitrate",
+            w1 = num_w - 1, w2 = title_w, w3 = dur_w - 1, w4 = br_w - 1);
+        let sep_line = format!("{:─>w1$}┼{:─>w2$}┼{:─>w3$}┼{:─>w4$}",
+            "", "", "", "", w1 = num_w + 1, w2 = title_w + 2, w3 = dur_w + 1, w4 = br_w);
+
+        let mut lines = vec![
+            Line::from(Span::styled(header_text, Style::default().fg(app.theme.fg_dim))),
+            Line::from(""),
+            Line::from(Span::styled(header_fmt, Style::default().fg(app.theme.fg_dim))),
+            Line::from(Span::styled(sep_line, Style::default().fg(app.theme.fg_dim))),
+        ];
+
+        for (i, track) in filtered.iter().enumerate() {
+            let is_current = app.state.current_track.as_ref().map(|t| t.id) == Some(track.id);
+            let is_sel = i == sel && !left_focus;
+            let prefix = if is_current { ">" } else if is_sel { " " } else { " " };
+            let num_str = format!("{}{:02}", prefix, i + 1);
+            let dur = format_duration_short(track.duration as u64);
+            let br = track.bitrate.map(|b| format!("{}kbps", b)).unwrap_or_default();
+            let title_artist = format!("{} - {}", track.artist, track.title);
+            let row = format!("{:<w1$}│ {:<w2$} │ {:>w3$} │ {:>w4$}",
+                num_str, title_artist, dur, br, w1 = num_w, w2 = title_w, w3 = dur_w, w4 = br_w);
+            let style = if is_current {
+                Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD)
+            } else if is_sel {
+                Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+            } else {
+                Style::default()
+            };
+            lines.push(Line::from(Span::styled(row, style)));
+        }
+        (lines, st_line)
+    };
 
     let right_para = Paragraph::new(right_lines);
     let right_block = Block::default()
