@@ -219,7 +219,7 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(4),
+            Constraint::Length(8),
             Constraint::Length(3),
             Constraint::Length(3),
             Constraint::Min(0),
@@ -237,6 +237,25 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
             return;
         }
     };
+
+    // ── Cover Art + Track Info ──
+    let info_chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(10), Constraint::Min(0)])
+        .split(chunks[0]);
+
+    // Render cover art as colored block
+    let cover_area = info_chunks[0];
+    if let Some(ref cover_bytes) = app.current_cover {
+        render_cover_block(f, cover_area, cover_bytes);
+    } else {
+        let placeholder = Block::default()
+            .borders(Borders::ALL)
+            .title(" Cover ")
+            .border_type(BorderType::Rounded)
+            .style(Style::default().fg(app.theme.fg_dim));
+        f.render_widget(placeholder, cover_area);
+    }
 
     let title = Line::from(vec![
         Span::styled("Title:  ", Style::default().fg(app.theme.fg_dim)),
@@ -265,12 +284,8 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
         ]));
     }
 
-    let info_block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Now Playing ")
-        .border_type(BorderType::Rounded);
-    let info_para = Paragraph::new(info_text).block(info_block);
-    f.render_widget(info_para, chunks[0]);
+    let info_para = Paragraph::new(info_text);
+    f.render_widget(info_para, info_chunks[1]);
 
     let dur = track.duration;
     let pos = app.state.time_pos;
@@ -316,6 +331,31 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     .alignment(Alignment::Center)
     .style(Style::default().fg(app.theme.fg_dim));
     f.render_widget(controls, chunks[3]);
+}
+
+fn render_cover_block(f: &mut ratatui::Frame, area: Rect, cover_bytes: &[u8]) {
+    let img = match image::load_from_memory(cover_bytes) {
+        Ok(img) => img.into_rgba8(),
+        Err(_) => return,
+    };
+    let cell_w = (area.width as u32).max(1);
+    let cell_h = (area.height as u32).max(1);
+    let thumb = image::imageops::resize(&img, cell_w, cell_h, image::imageops::FilterType::Nearest);
+    for y in 0..cell_h {
+        for x in 0..cell_w {
+            let px = thumb.get_pixel(x, y);
+            let ratatui_color = ratatui::style::Color::Rgb(px[0], px[1], px[2]);
+            let cell_area = Rect {
+                x: area.x + x as u16,
+                y: area.y + y as u16,
+                width: 1,
+                height: 1,
+            };
+            let block = Block::default()
+                .style(Style::default().bg(ratatui_color));
+            f.render_widget(block, cell_area);
+        }
+    }
 }
 
 fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {

@@ -9,6 +9,8 @@ use gtm_core::track::TrackInfo;
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
+use base64::Engine;
+
 use crate::keymap::{default_keybindings, KeyContext, KeyboardAction};
 use crate::overlay::{OverlayCtx, OverlayId, OverlayManager};
 use crate::theme::AppTheme;
@@ -59,6 +61,8 @@ pub struct App {
     pub overlays: OverlayManager,
     pub sleep_timer_remaining: Option<u64>,
     pub playback_speed: f64,
+    pub current_cover: Option<Vec<u8>>,
+    pub last_cover_track_id: Option<i64>,
     pub cmd_rx: mpsc::Receiver<TuiCommand>,
     cmd_tx: mpsc::Sender<TuiCommand>,
     keybindings: crate::keymap::Keybindings,
@@ -124,6 +128,8 @@ impl App {
             overlays: OverlayManager::new(),
             sleep_timer_remaining: None,
             playback_speed: 1.0,
+            current_cover: None,
+            last_cover_track_id: None,
             cmd_rx,
             cmd_tx,
             keybindings,
@@ -195,6 +201,20 @@ impl App {
     async fn fetch_state(&mut self) {
         if let Ok(state) = self.client.get_status().await {
             self.state = state;
+            // Fetch cover art if current track changed
+            let track_id = self.state.current_track.as_ref().map(|t| t.id);
+            if track_id != self.last_cover_track_id {
+                self.last_cover_track_id = track_id;
+                if let Some(tid) = track_id {
+                    if let Ok(Some(b64)) = self.client.get_cover_art(tid).await {
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+                            self.current_cover = Some(bytes);
+                        }
+                    }
+                } else {
+                    self.current_cover = None;
+                }
+            }
         }
     }
 
