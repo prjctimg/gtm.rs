@@ -203,6 +203,9 @@ fn render_content(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    if app.show_tag_popup {
+        return render_track_info_popup(f, area, app);
+    }
     let track = match &app.state.current_track {
         Some(t) => t,
         None => {
@@ -243,7 +246,6 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
             Constraint::Length(1),  // artist
             Constraint::Length(1),  // format chip
             Constraint::Length(1),  // album
-            Constraint::Length(1),  // time row (pos / dur)
             Constraint::Length(1),  // hashtag progress bar
             Constraint::Min(0),     // controls
         ])
@@ -260,7 +262,9 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(sep, right[1]);
 
     // Track title
+    let fav_prefix = if track.favourite { "\u{2665} " } else { "" };
     let title = Paragraph::new(Line::from(vec![
+        Span::styled(fav_prefix, Style::default().fg(app.theme.error)),
         Span::styled(&track.title, Style::default().fg(app.theme.fg_bright).add_modifier(Modifier::BOLD)),
     ]));
     f.render_widget(title, right[2]);
@@ -299,30 +303,25 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     ]));
     f.render_widget(album, right[5]);
 
-    // Time row (pos / dur)
+    // Hashtag progress bar with timestamps inline
     let dur = track.duration;
     let pos = app.display_position;
     let pos_str = format_duration(pos as u64);
     let dur_str = format_duration(dur as u64);
-    let pad = (right[6].width as usize).saturating_sub(pos_str.len() + dur_str.len() + 3);
-    let time_str = format!(" {pos_str}{}{dur_str}", " ".repeat(pad));
-    let time = Paragraph::new(time_str)
-        .style(Style::default().fg(app.theme.fg));
-    f.render_widget(time, right[6]);
-
-    // Hashtag progress bar
     let ratio = if dur > 0.0 { (pos / dur) as f64 } else { 0.0 };
-    let bar_width = right[7].width.saturating_sub(2) as usize;
+    let ts_str = format!("{} / {}", pos_str, dur_str);
+    let bar_width = right[6].width.saturating_sub(2) as usize;
     let bar = render_progress_line(ratio, bar_width);
-    let bar_para = Paragraph::new(bar)
+    let bar_with_ts = format!("{} {}", bar, ts_str);
+    let bar_para = Paragraph::new(bar_with_ts)
         .style(Style::default().fg(app.theme.accent));
-    f.render_widget(bar_para, right[7]);
+    f.render_widget(bar_para, right[6]);
 
     // Volume bar + controls on same bottom row
     let bottom_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(10), Constraint::Min(0)])
-        .split(right[8]);
+        .split(right[7]);
     let vol_ratio = if app.state.mute { 0.0 } else { app.state.volume as f64 / 100.0 };
     let vol_bar = render_progress_line(vol_ratio, 8);
     let vol_label: String = if app.state.mute { "MUTED".into() } else { format!("{:3}%", app.state.volume) };
@@ -331,7 +330,7 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(vol_text, bottom_chunks[0]);
 
     let controls = Paragraph::new(
-        " [Space]P/P  [n]Next  [p]Prev  [+/-]Vol  [m]Mute  [r]Repeat  [h]Shuffle  [:]Cmd  [q]Quit ",
+        " [Space]P/P  [n/N]Next  [p/P]Prev  [s]Stop  [+/-]Vol  [m]Mute  [r/R]Repeat  [S]Shuffle  [t]Info  [:]Cmd  [q]Quit ",
     )
     .style(Style::default().fg(app.theme.fg_dim));
     f.render_widget(controls, bottom_chunks[1]);
@@ -947,22 +946,24 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 .style(Style::default().fg(status_fg).bg(status_bg));
             f.render_widget(status_para, chunks[0]);
 
-            // Right: progress
+            // Right: progress + clock
             let right_area = chunks[1];
+            let clock_str = local_time_str();
             if let Some(ref track) = app.state.current_track {
                 let pos = app.display_position as u64;
                 let dur = track.duration as u64;
                 let ratio = if dur > 0 { pos as f64 / dur as f64 } else { 0.0 };
                 let time_str = format!(" {} / {} ", format_duration(pos), format_duration(dur));
-                let time_w = time_str.len() as u16;
-                let bar_w = right_area.width.saturating_sub(time_w + 1).max(4) as usize;
+                let clock_w = clock_str.len() as u16;
+                let bar_w = right_area.width.saturating_sub(time_str.len() as u16 + clock_w + 2).max(4) as usize;
                 let bar = render_progress_line(ratio, bar_w);
-                let progress_text = format!(" {} {}", bar, time_str);
+                let progress_text = format!(" {} {} {}", bar, time_str, clock_str);
                 let progress_para = Paragraph::new(progress_text)
                     .style(Style::default().fg(app.theme.fg).bg(app.theme.border));
                 f.render_widget(progress_para, right_area);
             } else {
-                let progress_para = Paragraph::new(" \u{25a0} stopped ")
+                let progress_text = format!(" \u{25a0} stopped  {}", clock_str);
+                let progress_para = Paragraph::new(progress_text)
                     .style(Style::default().fg(app.theme.fg_dim).bg(app.theme.border));
                 f.render_widget(progress_para, right_area);
             }
@@ -1247,6 +1248,97 @@ fn render_theme_picker_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .border_type(BorderType::Plain),
     );
     f.render_widget(list, area);
+}
+
+fn render_track_info_popup(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let Some(ref track) = app.state.current_track else {
+        let p = Paragraph::new("No track playing")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(app.theme.fg_dim));
+        f.render_widget(p, area);
+        return;
+    };
+
+    let fav_symbol = if track.favourite { "\u{2665}" } else { "\u{2661}" };
+    let fmt_parts: Vec<String> = {
+        let mut p = Vec::new();
+        if let Some(b) = track.bitrate { p.push(format!("{}kbps", b)); }
+        if let Some(s) = track.samplerate { p.push(format!("{}kHz", (s as f64 / 1000.0).round() as u32)); }
+        p
+    };
+    let format_str = if fmt_parts.is_empty() { "Unknown".into() } else { fmt_parts.join(" | ") };
+    let genre_str = if track.genre.is_empty() { "Unknown".into() } else { track.genre.clone() };
+    let year_str = track.year.map(|y| y.to_string()).unwrap_or_else(|| "Unknown".into());
+    let track_num = track.track_number.map(|n| n.to_string()).unwrap_or_else(|| "-".into());
+    let pos = format_duration(app.display_position as u64);
+    let dur = format_duration(track.duration as u64);
+
+    let lines = vec![
+        Line::from(Span::styled(" Track Info", Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD))),
+        Line::from(""),
+        Line::from(vec![
+            Span::styled(" Title:   ", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(&track.title, Style::default().fg(app.theme.fg_bright).add_modifier(Modifier::BOLD)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Artist:  ", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(&track.artist, Style::default().fg(app.theme.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Album:   ", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(&track.album, Style::default().fg(app.theme.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Genre:   ", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(genre_str, Style::default().fg(app.theme.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Year:    ", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(year_str, Style::default().fg(app.theme.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Track #: ", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(track_num, Style::default().fg(app.theme.fg)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Format:  ", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(format_str, Style::default().fg(app.theme.accent)),
+        ]),
+        Line::from(vec![
+            Span::styled(" Favourite:", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(format!(" {}", fav_symbol), Style::default().fg(if track.favourite { app.theme.error } else { app.theme.fg_dim })),
+        ]),
+        Line::from(vec![
+            Span::styled(" Progress:", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(format!(" {} / {}", pos, dur), Style::default().fg(app.theme.fg)),
+        ]),
+        Line::from(""),
+        Line::from(Span::styled(" [t] Close  ", Style::default().fg(app.theme.fg_dim))),
+    ];
+
+    let p = Paragraph::new(lines)
+        .alignment(Alignment::Left)
+        .style(Style::default().bg(app.theme.overlay_bg));
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Track Info ")
+        .border_type(BorderType::Plain)
+        .style(Style::default().bg(app.theme.overlay_bg));
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+    f.render_widget(p, inner);
+}
+
+/// Return the local time as " HH:MM " using the system clock.
+fn local_time_str() -> String {
+    let dur = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = dur.as_secs();
+    let total_min = (secs / 60) as i64;
+    let h = (total_min / 60) % 24;
+    let m = total_min % 60;
+    format!(" {:02}:{:02} ", h, m)
 }
 
 fn format_duration(secs: u64) -> String {

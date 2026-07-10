@@ -87,6 +87,7 @@ pub struct App {
     cmd_tx: mpsc::Sender<TuiCommand>,
     keybindings: crate::keymap::Keybindings,
     pub theme_index: usize,
+    pub show_tag_popup: bool,
 }
 
 #[allow(dead_code)]
@@ -158,6 +159,7 @@ impl App {
             cmd_tx,
             keybindings,
             theme_index: 0,
+            show_tag_popup: false,
         })
     }
 
@@ -690,7 +692,16 @@ impl App {
                     Some(KeyboardAction::Delete) => {}
                     None => {
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => return false,
+                            KeyCode::Char('q') | KeyCode::Esc => {
+                                if self.show_tag_popup {
+                                    self.show_tag_popup = false;
+                                } else {
+                                    return false;
+                                }
+                            }
+                            KeyCode::Char('t') => {
+                                self.show_tag_popup = !self.show_tag_popup;
+                            }
                             KeyCode::Char('c') if self.current_tab == Tab::Settings => {
                                 // Toggle crossfade in Settings tab
                                 let enabled = !self.state.crossfade
