@@ -212,12 +212,6 @@ fn render_content(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         Tab::NowPlaying => render_now_playing(f, area, app),
         Tab::Library => render_list(f, area, app, "Library", &app.tracks_cache.clone()),
         Tab::Settings => render_settings(f, area, app),
-        _ => {
-            let p = Paragraph::new("Select a tab with 1-3")
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(Color::Gray));
-            f.render_widget(p, area);
-        }
     }
 }
 

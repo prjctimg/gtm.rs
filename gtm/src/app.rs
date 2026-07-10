@@ -286,9 +286,6 @@ impl App {
                     self.state.apply_event(&ev);
                 }
                 self.fetch_state().await;
-                if self.current_tab == Tab::Queue {
-                    self.fetch_queue().await;
-                }
             }
             TuiCommand::RefreshLibrary => {
                 if let Ok(DaemonRes::Tracks { tracks, .. }) =
@@ -398,7 +395,6 @@ impl App {
                             Tab::NowPlaying => Tab::Library,
                             Tab::Library => Tab::Settings,
                             Tab::Settings => Tab::NowPlaying,
-                            _ => Tab::NowPlaying,
                         };
                         self.refresh_tab().await;
                     }
@@ -407,7 +403,6 @@ impl App {
                             Tab::NowPlaying => Tab::Settings,
                             Tab::Library => Tab::NowPlaying,
                             Tab::Settings => Tab::Library,
-                            _ => Tab::Settings,
                         };
                         self.refresh_tab().await;
                     }
@@ -493,43 +488,11 @@ impl App {
                     Some(KeyboardAction::MoveDown) => {
                         self.scroll_offset += 1;
                     }
-                    Some(KeyboardAction::Select) => match self.current_tab {
-                        Tab::Queue if !self.queue_cache.is_empty() => {
-                            let idx = self.scroll_offset;
-                            if idx < self.queue_cache.len() {
-                                let tx = self.cmd_tx();
-                                let _ = tx
-                                    .send(TuiCommand::Play(
-                                        self.queue_cache[idx].path.clone(),
-                                    ))
-                                    .await;
-                            }
-                        }
-                        _ => {}
-                    },
-                    Some(KeyboardAction::Delete) => {
-                        if self.current_tab == Tab::Queue && !self.queue_cache.is_empty() {
-                            let idx = self.queue_cursor + self.scroll_offset;
-                            if idx < self.queue_cache.len() {
-                                let tx = self.cmd_tx();
-                                let _ =
-                                    tx.send(TuiCommand::QueueRemove(idx as u128)).await;
-                            }
-                        }
-                    }
+                    Some(KeyboardAction::Select) => {}
+                    Some(KeyboardAction::Delete) => {}
                     None => {
                         match key.code {
                             KeyCode::Char('q') | KeyCode::Esc => return false,
-                            KeyCode::Char('1') => {
-                                self.current_tab = Tab::NowPlaying;
-                            }
-                            KeyCode::Char('2') => {
-                                self.current_tab = Tab::Library;
-                                self.refresh_tab().await;
-                            }
-                            KeyCode::Char('3') => {
-                                self.current_tab = Tab::Settings;
-                            }
                             KeyCode::Char('c') if self.current_tab == Tab::Settings => {
                                 // Toggle crossfade in Settings tab
                                 let enabled = !self.state.crossfade
@@ -642,14 +605,8 @@ impl App {
 
     async fn refresh_tab(&mut self) {
         let tx = self.cmd_tx();
-        match self.current_tab {
-            Tab::Library => {
-                let _ = tx.send(TuiCommand::RefreshLibrary).await;
-            }
-            Tab::Queue => {
-                let _ = tx.send(TuiCommand::RefreshQueue).await;
-            }
-            _ => {}
+        if self.current_tab == Tab::Library {
+            let _ = tx.send(TuiCommand::RefreshLibrary).await;
         }
     }
 }
