@@ -328,9 +328,9 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Toggle shuffle",
                 },
             ),
-            // Seek — left/right arrows
+            // Seek — comma/period
             (
-                KeyCode::Right.into(),
+                KeyCode::Char('.').into(),
                 BoundCommand {
                     action: KeyboardAction::SeekForward,
                     contexts: vec![KeyContext::Normal],
@@ -338,7 +338,7 @@ pub fn default_keybindings() -> Keybindings {
                 },
             ),
             (
-                KeyCode::Left.into(),
+                KeyCode::Char(',').into(),
                 BoundCommand {
                     action: KeyboardAction::SeekBackward,
                     contexts: vec![KeyContext::Normal],

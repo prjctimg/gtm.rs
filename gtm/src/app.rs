@@ -13,7 +13,7 @@ use base64::Engine;
 
 use crate::keymap::{default_keybindings, KeyContext, KeyboardAction};
 use crate::overlay::{OverlayCtx, OverlayId, OverlayManager};
-use crate::theme::AppTheme;
+use crate::theme::{AppTheme, THEMES};
 use crate::ui;
 
 pub const NUM_SETTINGS_CATEGORIES: usize = 5;
@@ -85,6 +85,7 @@ pub struct App {
     pub cmd_rx: mpsc::Receiver<TuiCommand>,
     cmd_tx: mpsc::Sender<TuiCommand>,
     keybindings: crate::keymap::Keybindings,
+    pub theme_index: usize,
 }
 
 #[allow(dead_code)]
@@ -154,6 +155,7 @@ impl App {
             cmd_rx,
             cmd_tx,
             keybindings,
+            theme_index: 0,
         })
     }
 
@@ -545,7 +547,7 @@ impl App {
                         let tx = self.cmd_tx();
                         let _ = tx.send(TuiCommand::Prev).await;
                     }
-                    Some(KeyboardAction::VolumeUp) | Some(KeyboardAction::SeekForward) => {
+                    Some(KeyboardAction::VolumeUp) => {
                         let new_vol = (self.state.volume + 5).min(100);
                         if new_vol > 85 {
                             self.pending_volume = Some(new_vol);
@@ -556,11 +558,21 @@ impl App {
                             self.notify(format!("Volume: {}%", new_vol), NotificationKind::Info);
                         }
                     }
-                    Some(KeyboardAction::VolumeDown) | Some(KeyboardAction::SeekBackward) => {
+                    Some(KeyboardAction::VolumeDown) => {
                         let tx = self.cmd_tx();
                         let new_vol = self.state.volume.saturating_sub(5);
                         let _ = tx.send(TuiCommand::SetVolume(new_vol)).await;
                         self.notify(format!("Volume: {}%", new_vol), NotificationKind::Info);
+                    }
+                    Some(KeyboardAction::SeekForward) => {
+                        let tx = self.cmd_tx();
+                        let pos = self.display_position + 5.0;
+                        let _ = tx.send(TuiCommand::Seek(pos)).await;
+                    }
+                    Some(KeyboardAction::SeekBackward) => {
+                        let tx = self.cmd_tx();
+                        let pos = (self.display_position - 5.0).max(0.0);
+                        let _ = tx.send(TuiCommand::Seek(pos)).await;
                     }
                     Some(KeyboardAction::ToggleMute) => {
                         let tx = self.cmd_tx();
@@ -748,6 +760,9 @@ impl App {
                             self.overlays.close_top();
                         }
                         OverlayId::ThemePicker => {
+                            let idx = top.selected.min(THEMES.len().saturating_sub(1));
+                            self.theme = (THEMES[idx].builder)();
+                            self.theme_index = idx;
                             self.overlays.close_top();
                         }
                         OverlayId::SoundEffects => {
