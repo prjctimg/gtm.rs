@@ -38,6 +38,8 @@ pub struct App {
     pub crossfade_duration: u8,
     pub pending_volume: Option<u8>,
     pub overlays: OverlayManager,
+    pub sleep_timer_remaining: Option<u64>,
+    pub playback_speed: f64,
     pub cmd_rx: mpsc::Receiver<TuiCommand>,
     cmd_tx: mpsc::Sender<TuiCommand>,
     keybindings: crate::keymap::Keybindings,
@@ -96,6 +98,8 @@ impl App {
             crossfade_duration: 7,
             pending_volume: None,
             overlays: OverlayManager::new(),
+            sleep_timer_remaining: None,
+            playback_speed: 1.0,
             cmd_rx,
             cmd_tx,
             keybindings,
@@ -540,6 +544,11 @@ impl App {
         let tx = self.cmd_tx();
         match key.code {
             KeyCode::Esc => {
+                if let Some(top) = self.overlays.top() {
+                    if top.id == OverlayId::SleepTimer {
+                        self.sleep_timer_remaining = None;
+                    }
+                }
                 self.pending_volume = None;
                 self.overlays.close_top();
             }
@@ -578,6 +587,39 @@ impl App {
                             if let Some(v) = self.pending_volume.take() {
                                 let _ = tx.send(TuiCommand::SetVolume(v)).await;
                             }
+                            self.overlays.close_top();
+                        }
+                        OverlayId::SleepTimer => {
+                            // Set sleep timer from selected preset
+                            let presets = [5u64, 10, 15, 30, 60];
+                            let idx = top.selected.min(presets.len() - 1);
+                            self.sleep_timer_remaining = Some(presets[idx]);
+                            self.overlays.close_top();
+                        }
+                        OverlayId::CommandPalette => {
+                            self.overlays.close_top();
+                        }
+                        OverlayId::Equalizer => {
+                            // Apply selected EQ preset
+                            let presets = [
+                                gtm_core::state::EqPreset::Flat,
+                                gtm_core::state::EqPreset::Pop,
+                                gtm_core::state::EqPreset::Rock,
+                                gtm_core::state::EqPreset::Jazz,
+                                gtm_core::state::EqPreset::Classical,
+                                gtm_core::state::EqPreset::Bass,
+                                gtm_core::state::EqPreset::Vocal,
+                            ];
+                            let idx = top.selected.min(presets.len() - 1);
+                            let _ = tx.send(TuiCommand::SetVolume(0)).await; // placeholder
+                            let _ = self.client.set_eq_preset(presets[idx]).await;
+                            self.overlays.close_top();
+                        }
+                        OverlayId::ThemePicker => {
+                            self.overlays.close_top();
+                        }
+                        OverlayId::SoundEffects => {
+                            // Toggle crossfade selected
                             self.overlays.close_top();
                         }
                         _ => {}

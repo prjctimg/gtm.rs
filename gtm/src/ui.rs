@@ -9,7 +9,7 @@ use ratatui::widgets::{Block, BorderType, Borders, Clear, List, ListItem, Paragr
 use ratatui::Terminal;
 use crate::app::{App, InputMode};
 use crate::overlay::OverlayId;
-use gtm_core::state::{PlaybackStatus, RepeatMode, Tab};
+use gtm_core::state::{EqPreset, PlaybackStatus, RepeatMode, Tab};
 
 pub fn run_tui(socket: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = socket
@@ -466,6 +466,11 @@ fn render_overlay(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         OverlayId::YTSearch => render_yt_search_overlay(f, inner, app),
         OverlayId::SearchLibrary => render_search_library_overlay(f, inner, app),
         OverlayId::VolumeConfirm => render_volume_confirm_overlay(f, inner, app),
+        OverlayId::About => render_about_overlay(f, inner, app),
+        OverlayId::SleepTimer => render_sleep_timer_overlay(f, inner, app),
+        OverlayId::CommandPalette => render_command_palette_overlay(f, inner, app),
+        OverlayId::Equalizer => render_equalizer_overlay(f, inner, app),
+        OverlayId::SoundEffects => render_sound_effects_overlay(f, inner, app),
         _ => {
             let p = Paragraph::new(format!("{} overlay", top.id.title()))
                 .alignment(Alignment::Center)
@@ -668,6 +673,249 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
         f.render_widget(Clear, err_area);
         f.render_widget(err_para, err_area);
     }
+}
+
+fn render_about_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let version = option_env!("CARGO_PKG_VERSION").unwrap_or("0.1.0");
+    let lines = vec![
+        Line::from(Span::styled(
+            format!(" gtm {version}"),
+            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            " Copyright (C) 2026, prjctimg <prjctimg@outlook.com>",
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(Span::styled(
+            " License GPL-3.0 — This is free software.",
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            format!(" Status:   {:?}", app.state.status),
+            Style::default().fg(Color::Yellow),
+        )),
+        Line::from(Span::styled(
+            format!(" Volume:   {}%", app.state.volume),
+            Style::default().fg(volume_color(app.state.volume)),
+        )),
+        Line::from(Span::styled(
+            format!(" Queue:    {} tracks", app.state.queue.len()),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!(" Shuffle:  {}", if app.state.shuffle { "ON" } else { "OFF" }),
+            Style::default().fg(Color::White),
+        )),
+        Line::from(Span::styled(
+            format!(" Repeat:   {:?}", app.state.repeat),
+            Style::default().fg(Color::White),
+        )),
+    ];
+
+    let p = Paragraph::new(lines)
+        .alignment(Alignment::Left)
+        .style(Style::default().bg(Color::Rgb(20, 20, 30)));
+    f.render_widget(p, area);
+}
+
+fn render_sleep_timer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let presets = [5u64, 10, 15, 30, 60];
+    let sel = app.overlays.top().map_or(0, |o| o.selected.min(presets.len() - 1));
+
+    let mut items: Vec<ListItem> = presets
+        .iter()
+        .enumerate()
+        .map(|(i, mins)| {
+            let label = if *mins == 1 { "minute" } else { "minutes" };
+            let prefix = if i == sel { " \u{25B6} " } else { "   " };
+            let content = format!("{prefix}{} {}", mins, label);
+            let style = if i == sel {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            ListItem::new(content).style(style)
+        })
+        .collect();
+
+    if let Some(remaining) = app.sleep_timer_remaining {
+        let status = format!(" Active: {} min remaining", remaining);
+        items.push(ListItem::new(status).style(Style::default().fg(Color::Green)));
+        items.push(ListItem::new(" [Esc] Cancel timer").style(Style::default().fg(Color::Gray)));
+    }
+
+    let list = List::new(items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Sleep Timer ")
+            .border_type(BorderType::Rounded),
+    );
+    f.render_widget(list, area);
+}
+
+fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let commands = [
+        "Play/Pause   [Space]",
+        "Next Track   [n]",
+        "Prev Track   [p]",
+        "Volume Up    [+]",
+        "Volume Down  [-]",
+        "Mute Toggle  [m]",
+        "Repeat       [r]",
+        "Shuffle      [h]",
+        "Quit         [q]",
+        "Tab Cycle    [Tab]",
+        "NowPlaying   [1]",
+        "Library      [2]",
+        "Settings     [3]",
+        "Search       [/]",
+        "Command      [:]",
+        "Queue O/L    [Alt+Q]",
+        "YouTube O/L  [Alt+Y]",
+        "Library O/L  [Alt+F]",
+        "EQ O/L       [Alt+E]",
+        "SleepTimer   [Alt+Z]",
+        "ThemePicker  [Alt+T]",
+        "Sound FX O/L [Alt+X]",
+        "About O/L    [Alt+A]",
+        "Spotify O/L  [Alt+S]",
+        "Cmd Palette  [Alt+P]",
+    ];
+
+    let query = app.overlays.top().map_or(String::new(), |o| o.query.clone());
+    let q = query.to_lowercase();
+    let filtered: Vec<&&str> = if q.is_empty() {
+        commands.iter().collect()
+    } else {
+        commands.iter().filter(|c| c.to_lowercase().contains(&q)).collect()
+    };
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+
+    let search_input = Paragraph::new(format!(" Filter: {}", query))
+        .style(Style::default().fg(Color::Black).bg(Color::Yellow));
+    f.render_widget(search_input, chunks[0]);
+
+    let sel = app.overlays.top().map_or(0, |o| o.selected.min(filtered.len().saturating_sub(1)));
+    let list_items: Vec<ListItem> = filtered
+        .iter()
+        .enumerate()
+        .map(|(i, cmd)| {
+            let prefix = if i == sel { " \u{25B6} " } else { "   " };
+            let style = if i == sel {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default()
+            };
+            ListItem::new(format!("{prefix}{}", cmd)).style(style)
+        })
+        .collect();
+
+    let list = List::new(list_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Commands ")
+            .border_type(BorderType::Rounded),
+    );
+    f.render_widget(list, chunks[1]);
+}
+
+fn render_equalizer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let presets = [
+        ("Flat",      EqPreset::Flat),
+        ("Pop",       EqPreset::Pop),
+        ("Rock",      EqPreset::Rock),
+        ("Jazz",      EqPreset::Jazz),
+        ("Classical", EqPreset::Classical),
+        ("Bass",      EqPreset::Bass),
+        ("Vocal",     EqPreset::Vocal),
+    ];
+
+    let sel = app.overlays.top().map_or(0, |o| o.selected.min(presets.len() - 1));
+
+    let list_items: Vec<ListItem> = presets.iter().enumerate().map(|(i, (name, _))| {
+        let prefix = if i == sel { " \u{25B6} " } else { "   " };
+        let style = if i == sel {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else if *name == app.state.eq_preset.label() {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default()
+        };
+        ListItem::new(format!("{prefix}{}", name)).style(style)
+    }).collect();
+
+    let graph = render_eq_graph();
+    let all_items: Vec<ListItem> = list_items.into_iter().chain(
+        std::iter::once(ListItem::new(""))
+            .chain(std::iter::once(ListItem::new(graph).style(Style::default().fg(Color::Cyan))))
+    ).collect();
+
+    let list = List::new(all_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Equalizer ")
+            .border_type(BorderType::Rounded),
+    );
+    f.render_widget(list, area);
+}
+
+fn render_eq_graph() -> String {
+    let bands = ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
+    let bar_height = 5usize;
+    let mut lines = Vec::new();
+    for row in (0..=bar_height).rev() {
+        let mut line = String::new();
+        for _ in bands.iter() {
+            if row == 0 {
+                line.push_str(" ├─┤ ");
+            } else if row == bar_height / 2 {
+                line.push_str(" ─── ");
+            } else {
+                line.push_str("     ");
+            }
+        }
+        lines.push(line);
+    }
+    lines.push(bands.join(" "));
+    lines.join("\n")
+}
+
+fn render_sound_effects_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let crossfade_on = app.state.crossfade.as_ref().map(|c| c.enabled).unwrap_or(false);
+    let crossfade_dur = app.state.crossfade.as_ref().map(|c| c.duration_secs).unwrap_or(0);
+
+    let items = vec![
+        format!("Playback Speed:  {:.1}x", app.playback_speed),
+        format!("Reverb:          Off"),
+        format!("Crossfade:       {}", if crossfade_on { "ON" } else { "OFF" }),
+        format!("Crossfade Dur:   {}s", crossfade_dur),
+        format!("EQ Preset:       {}", app.state.eq_preset.label()),
+    ];
+
+    let sel = app.overlays.top().map_or(0, |o| o.selected.min(items.len() - 1));
+    let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, s)| {
+        let prefix = if i == sel { " \u{25B6} " } else { "   " };
+        let style = if i == sel {
+            Style::default().fg(Color::Black).bg(Color::Cyan)
+        } else {
+            Style::default()
+        };
+        ListItem::new(format!("{prefix}{}", s)).style(style)
+    }).collect();
+
+    let list = List::new(list_items).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Sound Effects ")
+            .border_type(BorderType::Rounded),
+    );
+    f.render_widget(list, area);
 }
 
 fn format_duration(secs: u64) -> String {
