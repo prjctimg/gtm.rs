@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::keymap::{default_keybindings, KeyContext, KeyboardAction};
 use crate::overlay::{OverlayCtx, OverlayId, OverlayManager};
+use crate::theme::AppTheme;
 use crate::ui;
 
 pub enum InputMode {
@@ -21,6 +22,7 @@ pub enum InputMode {
 
 #[allow(dead_code)]
 pub struct App {
+    pub theme: AppTheme,
     pub client: DaemonClient,
     pub state: DaemonState,
     pub current_tab: Tab,
@@ -81,6 +83,7 @@ impl App {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let keybindings = default_keybindings();
         Ok(Self {
+            theme: AppTheme::default(),
             client,
             state,
             current_tab: Tab::NowPlaying,
