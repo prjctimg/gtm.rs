@@ -35,6 +35,21 @@ pub enum InputMode {
     Command,
 }
 
+#[derive(Debug, Clone)]
+pub enum NotificationKind {
+    Info,
+    Success,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub message: String,
+    pub kind: NotificationKind,
+    pub expires_at: std::time::Instant,
+}
+
 #[allow(dead_code)]
 pub struct App {
     pub theme: AppTheme,
@@ -56,6 +71,7 @@ pub struct App {
     pub playlist_cache: Vec<gtm_core::track::Playlist>,
     pub error_message: Option<String>,
     pub status_message: Option<String>,
+    pub notifications: Vec<Notification>,
     pub crossfade_duration: u8,
     pub pending_volume: Option<u8>,
     pub overlays: OverlayManager,
@@ -123,6 +139,7 @@ impl App {
             playlist_cache: Vec::new(),
             error_message: None,
             status_message: None,
+            notifications: Vec::new(),
             crossfade_duration: 7,
             pending_volume: None,
             overlays: OverlayManager::new(),
@@ -183,6 +200,10 @@ impl App {
                 self.handle_command(cmd).await;
             }
 
+            // Expire stale notifications
+            let now = std::time::Instant::now();
+            self.notifications.retain(|n| n.expires_at > now);
+
             terminal.draw(|f| ui::render(f, &mut self))?;
 
             if event::poll(Duration::from_millis(50))? {
@@ -196,6 +217,15 @@ impl App {
             }
         }
         Ok(())
+    }
+
+    pub fn notify(&mut self, message: impl Into<String>, kind: NotificationKind) {
+        let expires_at = std::time::Instant::now() + std::time::Duration::from_secs(4);
+        self.notifications.push(Notification {
+            message: message.into(),
+            kind,
+            expires_at,
+        });
     }
 
     async fn fetch_state(&mut self) {
@@ -516,16 +546,23 @@ impl App {
                         } else {
                             let tx = self.cmd_tx();
                             let _ = tx.send(TuiCommand::SetVolume(new_vol)).await;
+                            self.notify(format!("Volume: {}%", new_vol), NotificationKind::Info);
                         }
                     }
                     Some(KeyboardAction::VolumeDown) | Some(KeyboardAction::SeekBackward) => {
                         let tx = self.cmd_tx();
                         let new_vol = self.state.volume.saturating_sub(5);
                         let _ = tx.send(TuiCommand::SetVolume(new_vol)).await;
+                        self.notify(format!("Volume: {}%", new_vol), NotificationKind::Info);
                     }
                     Some(KeyboardAction::ToggleMute) => {
                         let tx = self.cmd_tx();
                         let _ = tx.send(TuiCommand::ToggleMute).await;
+                        if self.state.mute {
+                            self.notify("Unmuted", NotificationKind::Info);
+                        } else {
+                            self.notify("Muted", NotificationKind::Warning);
+                        }
                     }
                     Some(KeyboardAction::CycleRepeat) => {
                         let tx = self.cmd_tx();
@@ -535,10 +572,16 @@ impl App {
                             RepeatMode::All => RepeatMode::Off,
                         };
                         let _ = tx.send(TuiCommand::CycleRepeat(new_mode)).await;
+                        self.notify(format!("Repeat: {:?}", new_mode), NotificationKind::Info);
                     }
                     Some(KeyboardAction::ToggleShuffle) => {
                         let tx = self.cmd_tx();
                         let _ = tx.send(TuiCommand::ToggleShuffle).await;
+                        if self.state.shuffle {
+                            self.notify("Shuffle OFF", NotificationKind::Info);
+                        } else {
+                            self.notify("Shuffle ON", NotificationKind::Info);
+                        }
                     }
                     Some(KeyboardAction::EnterFilter) => {
                         self.input_mode = InputMode::Searching;

@@ -115,14 +115,16 @@ pub fn render(f: &mut ratatui::Frame, app: &mut App) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
+            Constraint::Length(1),
             Constraint::Min(0),
             Constraint::Length(3),
         ])
         .split(area);
 
     render_tabs(f, chunks[0], app);
-    render_content(f, chunks[1], app);
-    render_footer(f, chunks[2], app);
+    render_notifications(f, chunks[1], app);
+    render_content(f, chunks[2], app);
+    render_footer(f, chunks[3], app);
 
     // Render overlays on top of everything
     if app.overlays.is_open() {
@@ -152,57 +154,38 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
         })
         .collect();
 
-    let status_icon = match app.state.status {
-        PlaybackStatus::Playing => "\u{25B6}",
-        PlaybackStatus::Paused => "\u{23F8}",
-        PlaybackStatus::Stopped => "\u{25A0}",
-    };
-
-    let vol = if app.state.mute {
-        "MUT".to_string()
-    } else {
-        format!("{:3}%", app.state.volume)
-    };
-
-    let repeat_icon = match app.state.repeat {
-        RepeatMode::Off => "",
-        RepeatMode::One => " \u{1F501}",
-        RepeatMode::All => " \u{1F500}",
-    };
-
-    let shuffle_icon = if app.state.shuffle { " \u{1F500}" } else { "" };
-
     let overlay_hint = if app.overlays.is_open() {
         " [Esc]Close "
     } else {
         " Alt+Q Queue "
     };
 
-    let status_line = format!(" {status_icon} Vol:{vol}{repeat_icon}{shuffle_icon}{overlay_hint} ");
-
-    let title_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Min(0),
-            Constraint::Length(status_line.len() as u16),
-        ])
-        .split(area);
-
     let tabs = Tabs::new(titles)
         .block(
             Block::default()
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
-                .title(" GTM ")
+                .title(format!(" GTM{overlay_hint}"))
                 .title_alignment(Alignment::Center),
         )
         .highlight_style(Style::default().add_modifier(Modifier::BOLD));
 
-    f.render_widget(tabs, title_chunks[0]);
+    f.render_widget(tabs, area);
+}
 
-    let status_para = Paragraph::new(status_line)
-        .style(Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD));
-    f.render_widget(status_para, title_chunks[1]);
+fn render_notifications(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    if let Some(n) = app.notifications.last() {
+        let color = match n.kind {
+            crate::app::NotificationKind::Info => app.theme.accent,
+            crate::app::NotificationKind::Success => app.theme.success,
+            crate::app::NotificationKind::Warning => app.theme.warning,
+            crate::app::NotificationKind::Error => app.theme.error,
+        };
+        let text = format!(" {} ", n.message);
+        let para = Paragraph::new(text)
+            .style(Style::default().fg(app.theme.fg_bright).bg(color));
+        f.render_widget(para, area);
+    }
 }
 
 // ─── Content Area ───
@@ -791,18 +774,50 @@ fn render_volume_confirm_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) 
 fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
     match app.input_mode {
         InputMode::Normal => {
-            let footer = Paragraph::new(
-                " [1]NP [2]Lib [3]Set | Alt+Q:Queue Alt+Y:YT Alt+F:Library Alt+Z:Sleep Alt+E:EQ | Space:P n:Next p:Prev +/-:Vol :Cmd q:Quit ",
-            )
-            .style(
-                Style::default()
-                    .fg(app.theme.fg)
-                    .bg(if app.state.status == PlaybackStatus::Playing {
-                        app.theme.success
-                    } else {
-                        app.theme.fg_dim
-                    }),
-            );
+            let status_icon = match app.state.status {
+                PlaybackStatus::Playing => "\u{25B6}",
+                PlaybackStatus::Paused => "\u{23F8}",
+                PlaybackStatus::Stopped => "\u{25A0}",
+            };
+            let vol_str = if app.state.mute {
+                "MUTED".to_string()
+            } else {
+                format!("{:3}%", app.state.volume)
+            };
+            let repeat_str = match app.state.repeat {
+                RepeatMode::Off => "",
+                RepeatMode::One => " \u{1F501}",
+                RepeatMode::All => " \u{1F500}",
+            };
+            let shuffle_str = if app.state.shuffle { " \u{1F500}" } else { "" };
+
+            let status_section = format!(" {status_icon} Vol:{vol_str}{repeat_str}{shuffle_str} ");
+
+            let progress_section = if let Some(ref track) = app.state.current_track {
+                let pos = app.state.time_pos as u64;
+                let dur = track.duration as u64;
+                let ratio = if dur > 0 { pos as f64 / dur as f64 } else { 0.0 };
+                let bar = render_progress_line(ratio, 20);
+                format!(" {} {} / {} ", bar, format_duration(pos), format_duration(dur))
+            } else {
+                String::new()
+            };
+
+            let help_section =
+                " [1]NP [2]Lib [3]Set | Alt+Q:Q Alt+Y:YT | Sp:P n:Next p:Prev +/-:Vol :Cmd q:Quit ";
+
+            let full_text = format!("{status_section}{progress_section}{help_section}");
+
+            let footer = Paragraph::new(full_text)
+                .style(
+                    Style::default()
+                        .fg(app.theme.fg)
+                        .bg(if app.state.status == PlaybackStatus::Playing {
+                            app.theme.success
+                        } else {
+                            app.theme.fg_dim
+                        }),
+                );
             f.render_widget(footer, area);
         }
         InputMode::Searching => {
