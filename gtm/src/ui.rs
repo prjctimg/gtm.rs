@@ -571,14 +571,17 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .split(area);
 
     // ── Left pane: categories with icons ──
+    let settings_focus = app.settings_pane_focus;
     let left_items: Vec<ListItem> = SETTINGS_CATEGORIES
         .iter()
         .enumerate()
         .map(|(i, cat)| {
             let icon = SETTINGS_ICONS.get(i).unwrap_or(&" ");
             let is_active = i == app.settings_category;
-            let style = if is_active {
+            let style = if is_active && settings_focus {
                 Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+            } else if is_active {
+                Style::default().fg(app.theme.accent)
             } else {
                 Style::default().fg(app.theme.fg_dim)
             };
@@ -911,11 +914,6 @@ fn render_volume_confirm_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) 
 // ─── Footer ───
 
 fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    // Clear error on next draw
-    if app.error_message.is_some() {
-        // shown inline in left segment
-    }
-
     match app.input_mode {
         InputMode::Normal => {
             let is_playing = app.state.status == PlaybackStatus::Playing;
@@ -924,23 +922,22 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 PlaybackStatus::Paused => "\u{23f8}",
                 PlaybackStatus::Stopped => "\u{25a0}",
             };
-            let vol_str = if app.state.mute { "MUTE".to_string() } else { format!("{:>3}%", app.state.volume) };
+            let vol_str = if app.state.mute { "MUTE".into() } else { format!("{:>3}%", app.state.volume) };
             let repeat_str = match app.state.repeat {
                 RepeatMode::Off => "",
-                RepeatMode::One => " 1",
-                RepeatMode::All => " A",
+                RepeatMode::One => " [1]",
+                RepeatMode::All => " [A]",
             };
-            let shuffle_str = if app.state.shuffle { " S" } else { "" };
-            let vol_bar_w = 6usize;
+            let shuffle_str = if app.state.shuffle { " [S]" } else { "" };
             let vol_ratio = if app.state.mute { 0.0 } else { app.state.volume as f64 / 100.0 };
-            let vol_bar = render_progress_line(vol_ratio, vol_bar_w + 2);
-            let status_text = format!(" {} {} {} {}{}{} ", status_icon, vol_bar, vol_str, repeat_str, shuffle_str, if let Some(ref e) = app.error_message { format!(" ERR:{}", e) } else { String::new() });
+            let vol_bar = render_progress_line(vol_ratio, 8);
+            let status_text = format!(" {} {} {} {}{}", status_icon, vol_bar, vol_str, repeat_str, shuffle_str);
 
-            // Left segment width based on content
-            let left_w = status_text.len() as u16 + 2;
+            // Left segment: fixed width for compact status bar
+            let left_w = (status_text.len() as u16 + 2).min(area.width.saturating_sub(20));
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(left_w.min(area.width.saturating_sub(4))), Constraint::Min(0)])
+                .constraints([Constraint::Length(left_w), Constraint::Min(0)])
                 .split(area);
 
             // Left: status
@@ -951,19 +948,23 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
             f.render_widget(status_para, chunks[0]);
 
             // Right: progress
+            let right_area = chunks[1];
             if let Some(ref track) = app.state.current_track {
                 let pos = app.display_position as u64;
                 let dur = track.duration as u64;
                 let ratio = if dur > 0 { pos as f64 / dur as f64 } else { 0.0 };
-                let bar = render_progress_line(ratio, chunks[1].width.saturating_sub(20) as usize);
-                let progress_text = format!(" {} {} / {} ", bar, format_duration(pos), format_duration(dur));
+                let time_str = format!(" {} / {} ", format_duration(pos), format_duration(dur));
+                let time_w = time_str.len() as u16;
+                let bar_w = right_area.width.saturating_sub(time_w + 1).max(4) as usize;
+                let bar = render_progress_line(ratio, bar_w);
+                let progress_text = format!(" {} {}", bar, time_str);
                 let progress_para = Paragraph::new(progress_text)
                     .style(Style::default().fg(app.theme.fg).bg(app.theme.border));
-                f.render_widget(progress_para, chunks[1]);
+                f.render_widget(progress_para, right_area);
             } else {
-                let progress_para = Paragraph::new(" stopped ")
+                let progress_para = Paragraph::new(" \u{25a0} stopped ")
                     .style(Style::default().fg(app.theme.fg_dim).bg(app.theme.border));
-                f.render_widget(progress_para, chunks[1]);
+                f.render_widget(progress_para, right_area);
             }
         }
         InputMode::Searching => {
