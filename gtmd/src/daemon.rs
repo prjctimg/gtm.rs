@@ -430,6 +430,7 @@ impl Daemon {
                 enabled,
                 duration_secs,
             } => self.cmd_crossfade(*enabled, *duration_secs).await,
+            DaemonReq::SetCrossfadeEasing { easing } => self.cmd_set_crossfade_easing(*easing).await,
             DaemonReq::Queue { action } => self.cmd_queue(action).await,
             DaemonReq::Library { action } => self.cmd_library(action).await,
             DaemonReq::Search { query } => self.cmd_search(query).await,
@@ -866,6 +867,20 @@ impl Daemon {
             duration_secs,
         })
         .await;
+        Ok(DaemonRes::Ok { version })
+    }
+
+    async fn cmd_set_crossfade_easing(
+        &mut self,
+        easing: gtm_core::state::Easing,
+    ) -> Result<DaemonRes, CoreError> {
+        let mut state = self.state.write().await;
+        if let Some(ref mut cf) = state.crossfade {
+            cf.easing = easing;
+        }
+        state.version += 1;
+        let version = state.version as u32;
+        drop(state);
         Ok(DaemonRes::Ok { version })
     }
 

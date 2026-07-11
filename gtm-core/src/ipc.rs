@@ -167,6 +167,9 @@ pub enum DaemonReq {
         enabled: bool,
         duration_secs: u8,
     },
+    SetCrossfadeEasing {
+        easing: state::Easing,
+    },
     SetEqPreset {
         preset: state::EqPreset,
     },

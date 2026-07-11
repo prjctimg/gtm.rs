@@ -369,11 +369,11 @@ impl AudioMixer {
 
     fn ease_out(t: f64, easing: Easing) -> f64 {
         match easing {
-            Easing::Linear => t,
-            Easing::SlowFadeInFastFadeOut => 1.0 - (1.0 - t).sqrt(),
-            Easing::FastFadeInSlowFadeOut => 1.0 - (1.0 - t) * (1.0 - t),
+            Easing::Linear => 1.0 - t,
+            Easing::SlowFadeInFastFadeOut => 1.0 - t * t,
+            Easing::FastFadeInSlowFadeOut => (1.0 - t) * (1.0 - t),
             Easing::Logarithmic => 2.0f64.powf(-t),
-            Easing::Smoothstep => t * t * (3.0 - 2.0 * t),
+            Easing::Smoothstep => 1.0 - (t * t * (3.0 - 2.0 * t)),
         }
     }
 

@@ -230,6 +230,10 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn set_crossfade_easing(&self, easing: crate::state::Easing) -> Result<u32> {
+        self.send_ok(DaemonReq::SetCrossfadeEasing { easing }).await
+    }
+
     // ─── Queue ───
 
     pub async fn queue_list(&self) -> Result<DaemonRes> {

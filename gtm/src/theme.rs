@@ -26,10 +26,6 @@ pub struct AppTheme {
 }
 
 impl AppTheme {
-    pub fn default() -> Self {
-        cyberdeck()
-    }
-
     pub fn volume_color(&self, volume: u8) -> Color {
         if volume > 85 {
             self.volume_high
