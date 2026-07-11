@@ -5,7 +5,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use gtm_core::client::DaemonClient;
 use gtm_core::ipc::DaemonRes;
 use gtm_core::state::{DaemonState, PlaybackStatus, RepeatMode, Tab};
-use gtm_core::track::TrackInfo;
+use gtm_core::track::{Playlist, TrackInfo, YTSearchResult};
 use ratatui::Terminal;
 use tokio::sync::mpsc;
 
@@ -86,9 +86,20 @@ pub struct App {
     pub last_cover_track_id: Option<i64>,
     pub cmd_rx: mpsc::Receiver<TuiCommand>,
     cmd_tx: mpsc::Sender<TuiCommand>,
+    ipc_rx: mpsc::UnboundedReceiver<IpcResult>,
+    ipc_tx: mpsc::UnboundedSender<IpcResult>,
     keybindings: crate::keymap::Keybindings,
     pub theme_index: usize,
     pub show_tag_popup: bool,
+}
+
+enum IpcResult {
+    RefreshDone(DaemonState, Option<Vec<u8>>, Option<i64>),
+    LibraryTracks(Vec<TrackInfo>),
+    Playlists(Vec<Playlist>),
+    Queue(Vec<TrackInfo>, usize),
+    YtResults(Vec<YTSearchResult>),
+    Error(String),
 }
 
 #[allow(dead_code)]
@@ -126,6 +137,7 @@ impl App {
         let client = DaemonClient::connect(socket_path).await?;
         let state = DaemonState::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (ipc_tx, ipc_rx) = mpsc::unbounded_channel();
         let keybindings = default_keybindings();
         Ok(Self {
             theme: AppTheme::default(),
@@ -160,6 +172,8 @@ impl App {
             last_cover_track_id: None,
             cmd_rx,
             cmd_tx,
+            ipc_rx,
+            ipc_tx,
             keybindings,
             theme_index: 0,
             show_tag_popup: false,
@@ -209,8 +223,27 @@ impl App {
                 self.state.apply_event(&ev);
             }
 
+            while let Ok(result) = self.ipc_rx.try_recv() {
+                match result {
+                    IpcResult::RefreshDone(state, cover, cover_tid) => {
+                        self.client.seed_clock_from_state(&state).await;
+                        self.state = state;
+                        self.current_cover = cover;
+                        self.last_cover_track_id = cover_tid;
+                    }
+                    IpcResult::LibraryTracks(tracks) => self.tracks_cache = tracks,
+                    IpcResult::Playlists(playlists) => self.playlist_cache = playlists,
+                    IpcResult::Queue(tracks, cursor) => {
+                        self.queue_cache = tracks;
+                        self.queue_cursor = cursor;
+                    }
+                    IpcResult::YtResults(results) => self.yt_results_cache = results,
+                    IpcResult::Error(e) => self.error_message = Some(e),
+                }
+            }
+
             while let Ok(cmd) = self.cmd_rx.try_recv() {
-                self.handle_command(cmd).await;
+                self.handle_command(cmd);
             }
 
             // Expire stale notifications
@@ -317,7 +350,7 @@ impl App {
         match self.settings_category {
             0 => 2,  // Audio: Volume, Mute
             1 => 8,  // YouTube: (all display-only for now)
-            2 => 3,  // Appearance: Repeat, Shuffle, Crossfade
+            2 => 3,  // Playback: Repeat, Shuffle, Crossfade
             3 => 2,  // System: Theme, Notifications
             4 => 1,  // Spotify: Status
             _ => 0,
@@ -333,152 +366,185 @@ impl App {
         }
     }
 
-    async fn handle_command(&mut self, cmd: TuiCommand) {
+    fn handle_command(&mut self, cmd: TuiCommand) {
+        // All IPC calls are spawned as background tasks to avoid blocking the UI loop.
+        let client = self.client.clone();
+        let ipc_tx = self.ipc_tx.clone();
+        let err_tx = ipc_tx.clone();
+        let error_handler = move |e: gtm_core::CoreError| {
+            let _ = err_tx.send(IpcResult::Error(e.to_string()));
+        };
+        let err_tx2 = ipc_tx.clone();
+        let error_handler2 = move |e: gtm_core::CoreError| {
+            let _ = err_tx2.send(IpcResult::Error(e.to_string()));
+        };
+
         match cmd {
             TuiCommand::Play(path) => {
-                if let Err(e) = self.client.play(&path, 0.0).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.play(&path, 0.0).await { error_handler(e); }
+                });
             }
             TuiCommand::PlayPause => {
-                if let Err(e) = self.client.play_pause().await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.play_pause().await { error_handler(e); }
+                });
             }
             TuiCommand::Pause => {
-                if let Err(e) = self.client.pause().await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.pause().await { error_handler(e); }
+                });
             }
             TuiCommand::Stop => {
-                if let Err(e) = self.client.stop().await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.stop().await { error_handler(e); }
+                });
             }
             TuiCommand::Next => {
-                if let Err(e) = self.client.next().await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.next().await { error_handler(e); }
+                });
             }
             TuiCommand::Prev => {
-                if let Err(e) = self.client.prev().await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.prev().await { error_handler(e); }
+                });
             }
             TuiCommand::Seek(pos) => {
-                if let Err(e) = self.client.seek(pos).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.seek(pos).await { error_handler(e); }
+                });
             }
             TuiCommand::SetVolume(v) => {
-                if let Err(e) = self.client.set_volume(v).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.set_volume(v).await { error_handler(e); }
+                });
             }
             TuiCommand::ToggleShuffle => {
-                if let Err(e) = self.client.toggle_shuffle().await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.toggle_shuffle().await { error_handler(e); }
+                });
             }
             TuiCommand::CycleRepeat(m) => {
-                if let Err(e) = self.client.cycle_repeat(m).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.cycle_repeat(m).await { error_handler(e); }
+                });
             }
             TuiCommand::ToggleMute => {
-                if let Err(e) = self.client.toggle_mute().await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.toggle_mute().await { error_handler(e); }
+                });
             }
             TuiCommand::Crossfade(en, dur) => {
-                if let Err(e) = self.client.crossfade(en, dur).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.crossfade(en, dur).await { error_handler(e); }
+                });
             }
             TuiCommand::QueueAdd(p) => {
-                if let Err(e) = self.client.queue_add(&p, None).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.queue_add(&p, None).await { error_handler2(e); }
+                });
             }
             TuiCommand::QueueRemove(i) => {
-                if let Err(e) = self.client.queue_rm(i).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.queue_rm(i).await { error_handler(e); }
+                });
             }
             TuiCommand::QueueMove(from, to) => {
-                if let Err(e) = self.client.queue_move(from, to).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.queue_move(from, to).await { error_handler(e); }
+                });
             }
             TuiCommand::QueueClear => {
-                if let Err(e) = self.client.queue_clear().await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.queue_clear().await { error_handler(e); }
+                });
             }
             TuiCommand::YtSearch(q) => {
-                if let Err(e) = self.client.yt_search(&q, None).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.yt_search(&q, None).await { error_handler2(e); }
+                });
             }
             TuiCommand::YtResolve(u) => {
-                if let Err(e) = self.client.yt_resolve_stream(&u).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.yt_resolve_stream(&u).await { error_handler2(e); }
+                });
             }
             TuiCommand::Search(q) => {
-                if let Err(e) = self.client.search(&q).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.search(&q).await { error_handler2(e); }
+                });
             }
             TuiCommand::AddFavourite(id) => {
-                if let Err(e) = self.client.add_favourite(id).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.add_favourite(id).await { error_handler(e); }
+                });
             }
             TuiCommand::RemoveFavourite(id) => {
-                if let Err(e) = self.client.remove_favourite(id).await {
-                    self.error_message = Some(e.to_string());
-                }
+                tokio::spawn(async move {
+                    if let Err(e) = client.remove_favourite(id).await { error_handler(e); }
+                });
             }
             TuiCommand::Refresh => {
-                for ev in self.client.drain().await {
-                    self.state.apply_event(&ev);
-                }
-                self.fetch_state().await;
+                // drain events on main thread (fast)
+                let client2 = self.client.clone();
+                let ipc_tx2 = self.ipc_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(state) = client2.get_status().await {
+                        client2.seed_clock_from_state(&state).await;
+                        let mut cover = None;
+                        let mut cover_tid = None;
+                        let track_id = state.current_track.as_ref().map(|t| t.id);
+                        if let Some(tid) = track_id {
+                            if let Ok(Some(b64)) = client2.get_cover_art(tid).await {
+                                if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+                                    cover = Some(bytes);
+                                    cover_tid = Some(tid);
+                                }
+                            }
+                        }
+                        let _ = ipc_tx2.send(IpcResult::RefreshDone(state, cover, cover_tid.or(track_id)));
+                    }
+                });
                 // Auto-poll YT search results while overlay is active
-                if self.overlays.top().map_or(false, |o| o.id == OverlayId::YTSearch) {
-                    if let Ok(DaemonRes::YtSearchResults { results, .. }) =
-                        self.client.yt_search_poll().await
-                    {
+                let ipc_tx3 = self.ipc_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(DaemonRes::YtSearchResults { results, .. }) = client.yt_search_poll().await {
                         if !results.is_empty() {
-                            self.yt_results_cache = results;
+                            let _ = ipc_tx3.send(IpcResult::YtResults(results));
                         }
                     }
-                }
+                });
             }
             TuiCommand::RefreshPlaylists => {
-                if let Ok(DaemonRes::Playlists { playlists, .. }) =
-                    self.client.library_get_playlists().await
-                {
-                    self.playlist_cache = playlists;
-                }
+                tokio::spawn(async move {
+                    if let Ok(DaemonRes::Playlists { playlists, .. }) = client.library_get_playlists().await {
+                        let _ = ipc_tx.send(IpcResult::Playlists(playlists));
+                    }
+                });
             }
             TuiCommand::RefreshLibrary => {
-                if let Ok(DaemonRes::Tracks { tracks, .. }) =
-                    self.client.library_get_tracks(None, None).await
-                {
-                    self.tracks_cache = tracks;
-                }
+                tokio::spawn(async move {
+                    if let Ok(DaemonRes::Tracks { tracks, .. }) = client.library_get_tracks(None, None).await {
+                        let _ = ipc_tx.send(IpcResult::LibraryTracks(tracks));
+                    }
+                });
             }
             TuiCommand::RefreshQueue => {
-                self.fetch_queue().await;
+                tokio::spawn(async move {
+                    if let Ok(DaemonRes::QueueState { tracks, cursor, .. }) = client.queue_list().await {
+                        let _ = ipc_tx.send(IpcResult::Queue(tracks, cursor as usize));
+                    }
+                });
             }
             TuiCommand::RefreshYt => {
-                if let Ok(DaemonRes::YtSearchResults { results, .. }) =
-                    self.client.yt_search_poll().await
-                {
-                    self.yt_results_cache = results;
-                }
+                tokio::spawn(async move {
+                    if let Ok(DaemonRes::YtSearchResults { results, .. }) = client.yt_search_poll().await {
+                        if !results.is_empty() {
+                            let _ = ipc_tx.send(IpcResult::YtResults(results));
+                        }
+                    }
+                });
             }
         };
     }
@@ -933,11 +999,21 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => {
                 if let Some(top) = self.overlays.top_mut() {
                     top.selected = top.selected.saturating_sub(1);
+                    if top.id == OverlayId::ThemePicker {
+                        let idx = top.selected.min(THEMES.len().saturating_sub(1));
+                        self.theme = (THEMES[idx].builder)();
+                        self.theme_index = idx;
+                    }
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 if let Some(top) = self.overlays.top_mut() {
                     top.selected += 1;
+                    if top.id == OverlayId::ThemePicker {
+                        let idx = top.selected.min(THEMES.len().saturating_sub(1));
+                        self.theme = (THEMES[idx].builder)();
+                        self.theme_index = idx;
+                    }
                 }
             }
             KeyCode::Enter => {
@@ -993,9 +1069,8 @@ impl App {
                                 gtm_core::state::EqPreset::Bass,
                                 gtm_core::state::EqPreset::Vocal,
                             ];
-                            let idx = top.selected.min(presets.len() - 1);
-                            let _ = tx.send(TuiCommand::SetVolume(0)).await; // placeholder
-                            let _ = self.client.set_eq_preset(presets[idx]).await;
+    let idx = top.selected.min(presets.len() - 1);
+    let _ = self.client.set_eq_preset(presets[idx]).await;
                             self.overlays.close_top();
                         }
                         OverlayId::ThemePicker => {

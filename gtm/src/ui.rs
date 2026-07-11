@@ -118,7 +118,7 @@ pub fn render(f: &mut ratatui::Frame, app: &mut App) {
             Constraint::Length(2),
             Constraint::Length(1),
             Constraint::Min(0),
-            Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(area);
 
@@ -137,7 +137,7 @@ pub fn render(f: &mut ratatui::Frame, app: &mut App) {
 
 fn render_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let version = option_env!("CARGO_PKG_VERSION").unwrap_or("0.1.0");
-    let tab_items = [("1", "Now Playing", Tab::NowPlaying), ("2", "Library", Tab::Library), ("3", "Settings", Tab::Settings)];
+    let tab_items = [("1", "▶ Now Playing", Tab::NowPlaying), ("2", "☰ Library", Tab::Library), ("3", "⚙ Settings", Tab::Settings)];
 
     let mut span_data: Vec<(bool, String)> = Vec::new();
     for (num, name, tab) in &tab_items {
@@ -321,7 +321,7 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let ratio = if dur > 0.0 { (pos / dur) as f64 } else { 0.0 };
     let ts_str = format!("{} / {}", pos_str, dur_str);
     let bar_width = right[6].width.saturating_sub(2) as usize;
-    let bar = render_progress_line(ratio, bar_width);
+    let bar = render_progress_variant(ratio, bar_width, app);
     let bar_with_ts = format!("{} {}", bar, ts_str);
     let bar_para = Paragraph::new(bar_with_ts)
         .style(Style::default().fg(app.theme.accent));
@@ -382,7 +382,7 @@ const LIBRARY_ICONS_NERD: &[&str] = &[
     "\u{f0510}", "\u{f010d}", "\u{f010e}", "\u{f04c7}", "\u{f39d8}",
 ];
 
-const LIBRARY_ICONS_ASCII: &[&str] = &["♪", "▤", "♪", "≡", "⏱", "★", "☆", "☊", "▼"];
+const LIBRARY_ICONS_ASCII: &[&str] = &["♫", "▤", "♪", "≡", "⏱", "★", "☆", "☊", "▼"];
 
 fn use_nerd_fonts() -> bool {
     match std::env::var("GTM_NERD_FONTS") {
@@ -431,7 +431,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
             } else if is_active {
                 Style::default().fg(app.theme.accent)
             } else {
-                Style::default().fg(app.theme.fg_dim)
+                Style::default().fg(app.theme.fg)
             };
             ListItem::new(label).style(style)
         })
@@ -653,8 +653,8 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(stats, stats_area);
 }
 
-const SETTINGS_ICONS: &[&str] = &["♫", "▶", "✧", "⚙", "☊"];
-const SETTINGS_CATEGORIES: &[&str] = &["Audio", "YouTube", "Appearance", "System", "Spotify"];
+const SETTINGS_ICONS: &[&str] = &["♫", "▶", "↻", "⚙", "☊"];
+const SETTINGS_CATEGORIES: &[&str] = &["Audio", "YouTube", "Playback", "System", "Spotify"];
 
 fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let panes = Layout::default()
@@ -675,7 +675,7 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
             } else if is_active {
                 Style::default().fg(app.theme.accent)
             } else {
-                Style::default().fg(app.theme.fg_dim)
+                Style::default().fg(app.theme.fg)
             };
             ListItem::new(format!(" {} {}", icon, cat)).style(style)
         })
@@ -767,7 +767,7 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
     match app.settings_category {
         0 => lines.push(Line::from(Span::styled(" Volume: Adjust playback volume. Mute: Toggle mute.", Style::default().fg(app.theme.fg)))),
         1 => lines.push(Line::from(Span::styled(" YouTube integration: JS runtime, download limits, search prefs.", Style::default().fg(app.theme.fg)))),
-        2 => lines.push(Line::from(Span::styled(" Repeat/Shuffle/Crossfade playback settings.", Style::default().fg(app.theme.fg)))),
+        2 => lines.push(Line::from(Span::styled(" Repeat/Shuffle/Crossfade playback controls.", Style::default().fg(app.theme.fg)))),
         3 => lines.push(Line::from(Span::styled(" Theme and notification display settings.", Style::default().fg(app.theme.fg)))),
         4 => lines.push(Line::from(Span::styled(" Spotify integration status.", Style::default().fg(app.theme.fg)))),
         _ => {}
@@ -1024,61 +1024,107 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
             let vol_str = if app.state.mute { "MUTE".into() } else { format!("{:>3}%", app.state.volume) };
             let repeat_str = match app.state.repeat {
                 RepeatMode::Off => "",
-                RepeatMode::One => " [1]",
-                RepeatMode::All => " [A]",
+                RepeatMode::One => " 1",
+                RepeatMode::All => " A",
             };
-            let shuffle_str = if app.state.shuffle { " [S]" } else { "" };
-            let vol_ratio = if app.state.mute { 0.0 } else { app.state.volume as f64 / 100.0 };
-            let vol_bar = render_progress_line(vol_ratio, 8);
-            let status_text = format!(" {} {} {} {}{}", status_icon, vol_bar, vol_str, repeat_str, shuffle_str);
+            let shuffle_str = if app.state.shuffle { " S" } else { "" };
 
-            // Left segment: fixed width for compact status bar
-            let left_w = (status_text.len() as u16 + 2).min(area.width.saturating_sub(20));
+            // Neon-style left section with icon, volume %, repeat/shuffle
+            let left_text = format!(" {} {} {}{}", status_icon, vol_str, repeat_str, shuffle_str);
+            let left_w = (left_text.len() as u16 + 2).min(area.width.saturating_sub(16));
+
             let chunks = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(left_w), Constraint::Min(0)])
                 .split(area);
 
-            // Left: status
-            let status_bg = if is_playing { app.theme.accent } else { app.theme.fg_dim };
-            let status_fg = if is_playing { app.theme.fg_bright } else { app.theme.overlay_bg };
-            let status_para = Paragraph::new(status_text)
-                .style(Style::default().fg(status_fg).bg(status_bg));
-            f.render_widget(status_para, chunks[0]);
+            // Left: lualine-style section with colored bg
+            let left_bg = if is_playing { app.theme.accent } else { app.theme.fg_dim };
+            let left_fg = if is_playing { app.theme.fg_bright } else { app.theme.overlay_bg };
+            f.render_widget(
+                Paragraph::new(left_text)
+                    .style(Style::default().fg(left_fg).bg(left_bg)),
+                chunks[0],
+            );
 
-            // Right: progress + clock
-            let right_area = chunks[1];
+            // Right: neon progress + clock on dark bg
             let clock_str = local_time_str();
             if let Some(ref track) = app.state.current_track {
                 let pos = app.display_position as u64;
                 let dur = track.duration as u64;
                 let ratio = if dur > 0 { pos as f64 / dur as f64 } else { 0.0 };
-                let time_str = format!(" {} / {} ", format_duration(pos), format_duration(dur));
-                let clock_w = clock_str.len() as u16;
-                let bar_w = right_area.width.saturating_sub(time_str.len() as u16 + clock_w + 2).max(4) as usize;
-                let bar = render_progress_line(ratio, bar_w);
-                let progress_text = format!(" {} {} {}", bar, time_str, clock_str);
-                let progress_para = Paragraph::new(progress_text)
-                    .style(Style::default().fg(app.theme.fg).bg(app.theme.border));
-                f.render_widget(progress_para, right_area);
+                let time_str = format!(" {} / {}", format_duration(pos), format_duration(dur));
+                let progress = render_progress_variant(ratio, 14, app);
+                let right_text = format!(" {} {}  {}", progress, time_str, clock_str);
+                f.render_widget(
+                    Paragraph::new(right_text)
+                        .style(Style::default().fg(app.theme.fg_bright).bg(app.theme.border)),
+                    chunks[1],
+                );
             } else {
-                let progress_text = format!(" \u{25a0} stopped  {}", clock_str);
-                let progress_para = Paragraph::new(progress_text)
-                    .style(Style::default().fg(app.theme.fg_dim).bg(app.theme.border));
-                f.render_widget(progress_para, right_area);
+                f.render_widget(
+                    Paragraph::new(format!(" \u{25a0} stopped  {}", clock_str))
+                        .style(Style::default().fg(app.theme.fg_dim).bg(app.theme.border)),
+                    chunks[1],
+                );
             }
         }
         InputMode::Searching => {
-            let input = Paragraph::new(format!(" > {}_", app.search_query))
-                .style(Style::default().fg(app.theme.fg));
-            f.render_widget(input, area);
+            f.render_widget(
+                Paragraph::new(format!(" > {}_", app.search_query))
+                    .style(Style::default().fg(app.theme.fg_bright).bg(app.theme.border)),
+                area,
+            );
         }
         InputMode::Command => {
-            let input = Paragraph::new(format!(" :{}_", app.search_query))
-                .style(Style::default().fg(app.theme.fg));
-            f.render_widget(input, area);
+            f.render_widget(
+                Paragraph::new(format!(" :{}_", app.search_query))
+                    .style(Style::default().fg(app.theme.fg_bright).bg(app.theme.border)),
+                area,
+            );
         }
     }
+}
+
+fn render_progress_variant(ratio: f64, width: usize, app: &App) -> String {
+    let inner_w = width.saturating_sub(2).max(4);
+    let filled = (ratio.clamp(0.0, 1.0) * inner_w as f64).round() as usize;
+    let mut line = String::with_capacity(width);
+    match app.theme_index % 3 {
+        0 => {
+            // Braille dots variant
+            line.push('⡀');
+            for i in 0..inner_w {
+                if i < filled {
+                    line.push('⣿');
+                } else {
+                    line.push('⣀');
+                }
+            }
+            line.push('⠤');
+        }
+        1 => {
+            // Seek-head line variant
+            line.push('─');
+            for i in 0..inner_w {
+                if i == filled {
+                    line.push('●');
+                } else {
+                    line.push('─');
+                }
+            }
+            line.push('─');
+        }
+        _ => {
+            // Classic bracket variant
+            line.push('[');
+            for i in 0..inner_w {
+                line.push(if i < filled { '█' } else { '░' });
+            }
+            line.push(']');
+        }
+    }
+    line
 }
 
 fn render_about_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -1256,40 +1302,13 @@ fn render_equalizer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         ListItem::new(format!("{prefix}{}", name)).style(style)
     }).collect();
 
-    let graph = render_eq_graph();
-    let all_items: Vec<ListItem> = list_items.into_iter().chain(
-        std::iter::once(ListItem::new(""))
-            .chain(std::iter::once(ListItem::new(graph).style(Style::default().fg(app.theme.accent))))
-    ).collect();
-
-    let list = List::new(all_items).block(
+    let list = List::new(list_items).block(
         Block::default()
             .borders(Borders::ALL)
             .title(" Equalizer ")
             .border_type(BorderType::Plain),
     );
     f.render_widget(list, area);
-}
-
-fn render_eq_graph() -> String {
-    let bands = ["31", "62", "125", "250", "500", "1k", "2k", "4k", "8k", "16k"];
-    let bar_height = 5usize;
-    let mut lines = Vec::new();
-    for row in (0..=bar_height).rev() {
-        let mut line = String::new();
-        for _ in bands.iter() {
-            if row == 0 {
-                line.push_str(" ├─┤ ");
-            } else if row == bar_height / 2 {
-                line.push_str(" ─── ");
-            } else {
-                line.push_str("     ");
-            }
-        }
-        lines.push(line);
-    }
-    lines.push(bands.join(" "));
-    lines.join("\n")
 }
 
 fn render_sound_effects_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
