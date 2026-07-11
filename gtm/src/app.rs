@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use base64::Engine;
 
+use crate::footer;
 use crate::keymap::{default_keybindings, KeyContext, KeyboardAction};
 use crate::overlay::{OverlayCtx, OverlayId, OverlayManager};
 use crate::theme::{AppTheme, THEMES};
@@ -33,22 +34,25 @@ struct Prefs {
     theme_index: usize,
     #[serde(default)]
     transparent_bg: bool,
+    #[serde(default)]
+    footer_preset: usize,
+    #[serde(default)]
+    hover_delay_secs: u64,
 }
 
 fn load_prefs() -> Prefs {
     let path = prefs_path();
     let s = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        Err(_) => return Prefs { theme_index: 0, transparent_bg: false },
+        Err(_) => return Prefs { theme_index: 0, transparent_bg: false, footer_preset: 0, hover_delay_secs: 0 },
     };
-    // Try new format first, then fall back to old format (bare usize)
     if let Ok(p) = serde_json::from_str::<Prefs>(&s) {
         return p;
     }
     if let Ok(idx) = serde_json::from_str::<usize>(&s) {
-        return Prefs { theme_index: idx.min(crate::theme::THEMES.len().saturating_sub(1)), transparent_bg: false };
+        return Prefs { theme_index: idx.min(crate::theme::THEMES.len().saturating_sub(1)), transparent_bg: false, footer_preset: 0, hover_delay_secs: 0 };
     }
-    Prefs { theme_index: 0, transparent_bg: false }
+    Prefs { theme_index: 0, transparent_bg: false, footer_preset: 0, hover_delay_secs: 0 }
 }
 
 fn save_prefs(prefs: &Prefs) {
@@ -141,6 +145,10 @@ pub struct App {
     pub list_scroll: usize,
     pub viewport_items: usize,
     pub transparent_bg: bool,
+    pub last_action_name: Option<(String, std::time::Instant)>,
+    pub footer_preset: usize,
+    pub hover_delay_secs: u64,
+    pub title_scroll: usize,
     last_queue_cursor: u128,
 }
 
@@ -243,6 +251,10 @@ impl App {
             list_scroll: 0,
             viewport_items: 20,
             transparent_bg: prefs.transparent_bg,
+            last_action_name: None,
+            footer_preset: prefs.footer_preset.min(footer::num_presets().saturating_sub(1)),
+            hover_delay_secs: prefs.hover_delay_secs.min(5),
+            title_scroll: 0,
             last_queue_cursor: initial_cursor,
         })
     }
@@ -377,10 +389,12 @@ impl App {
                 }
             }
 
-            // Hover timer: show info popup after 3s of no key press (Library tab only)
+            // Hover popup: show immediately on scroll when right-pane focused,
+            // or after hover_delay_secs of inactivity when not scrolling.
             if self.current_tab == Tab::Library && !self.library_pane_focus && !self.overlays.is_open() && !self.show_tag_popup {
+                let delay = Duration::from_secs(self.hover_delay_secs);
                 match self.hover_start {
-                    Some(t) if t.elapsed() >= std::time::Duration::from_secs(3) => {
+                    Some(t) if t.elapsed() >= delay => {
                         self.show_hover_info = true;
                     }
                     None => self.hover_start = Some(now),
@@ -402,6 +416,9 @@ impl App {
             let frame_count = self.frame_count.wrapping_add(1);
             self.frame_count = frame_count;
             let pos_changed = (self.display_position - self.last_display_position).abs() >= 0.1;
+            // Advance title scroll animation for responsive library
+            self.title_scroll = self.title_scroll.wrapping_add(1);
+
             let force_render = pos_changed
                 || !self.notifications.is_empty()
                 || frame_count % 10 == 0;
@@ -508,7 +525,7 @@ impl App {
             0 => 2,  // Audio: Volume, Mute
             1 => 8,  // YouTube: (all display-only for now)
             2 => 4,  // Playback: Repeat, Shuffle, Crossfade, Easing
-            3 => 3,  // System: Theme, Transparent BG, Sync Covers
+            3 => 5,  // System: Theme, Transparent BG, Sync Covers, Footer Preset, Hover Delay
             4 => 1,  // Spotify: Status
             _ => 0,
         }
@@ -768,6 +785,10 @@ impl App {
         };
     }
 
+    fn set_last_action(&mut self, name: &str) {
+        self.last_action_name = Some((name.to_string(), std::time::Instant::now() + std::time::Duration::from_secs(3)));
+    }
+
     async fn handle_key(&mut self, key: event::KeyEvent) -> bool {
         self.hover_start = None;
         self.show_hover_info = false;
@@ -889,6 +910,7 @@ impl App {
                         self.overlays.open(id);
                     }
                     Some(KeyboardAction::PlayPause) => {
+                        self.set_last_action("Play/Pause");
                         let tx = self.cmd_tx();
                         match self.state.status {
                             PlaybackStatus::Playing => {
@@ -908,14 +930,17 @@ impl App {
                         }
                     }
                     Some(KeyboardAction::Next) => {
+                        self.set_last_action("Next");
                         let tx = self.cmd_tx();
                         let _ = tx.send(TuiCommand::Next).await;
                     }
                     Some(KeyboardAction::Prev) => {
+                        self.set_last_action("Previous");
                         let tx = self.cmd_tx();
                         let _ = tx.send(TuiCommand::Prev).await;
                     }
                     Some(KeyboardAction::Stop) => {
+                        self.set_last_action("Stop");
                         let tx = self.cmd_tx();
                         let _ = tx.send(TuiCommand::Stop).await;
                     }
@@ -931,22 +956,26 @@ impl App {
                         }
                     }
                     Some(KeyboardAction::VolumeDown) => {
+                        self.set_last_action("Volume Down");
                         let tx = self.cmd_tx();
                         let new_vol = self.state.volume.saturating_sub(5);
                         let _ = tx.send(TuiCommand::SetVolume(new_vol)).await;
                         self.notify(format!("Volume: {}%", new_vol), NotificationKind::Info);
                     }
                     Some(KeyboardAction::SeekForward) => {
+                        self.set_last_action("Seek Forward");
                         let tx = self.cmd_tx();
                         let pos = self.display_position + 5.0;
                         let _ = tx.send(TuiCommand::Seek(pos)).await;
                     }
                     Some(KeyboardAction::SeekBackward) => {
+                        self.set_last_action("Seek Backward");
                         let tx = self.cmd_tx();
                         let pos = (self.display_position - 5.0).max(0.0);
                         let _ = tx.send(TuiCommand::Seek(pos)).await;
                     }
                     Some(KeyboardAction::ToggleMute) => {
+                        self.set_last_action("Toggle Mute");
                         let tx = self.cmd_tx();
                         let _ = tx.send(TuiCommand::ToggleMute).await;
                         if self.state.mute {
@@ -956,6 +985,7 @@ impl App {
                         }
                     }
                     Some(KeyboardAction::CycleRepeat) => {
+                        self.set_last_action("Cycle Repeat");
                         let tx = self.cmd_tx();
                         let new_mode = match self.state.repeat {
                             RepeatMode::Off => RepeatMode::One,
@@ -966,6 +996,7 @@ impl App {
                         self.notify(format!("Repeat: {:?}", new_mode), NotificationKind::Info);
                     }
                     Some(KeyboardAction::ToggleShuffle) => {
+                        self.set_last_action("Toggle Shuffle");
                         let tx = self.cmd_tx();
                         let _ = tx.send(TuiCommand::ToggleShuffle).await;
                         if self.state.shuffle {
@@ -975,6 +1006,7 @@ impl App {
                         }
                     }
                     Some(KeyboardAction::ToggleFavourite) => {
+                        self.set_last_action("Toggle Favourite");
                         if let Some(ref track) = self.state.current_track {
                             let tx = self.cmd_tx();
                             let _ = tx.send(TuiCommand::AddFavourite(track.id)).await;
@@ -982,9 +1014,21 @@ impl App {
                         }
                     }
                     Some(KeyboardAction::ClearQueue) => {
+                        self.set_last_action("Clear Queue");
                         let tx = self.cmd_tx();
                         let _ = tx.send(TuiCommand::QueueClear).await;
                         self.notify("Queue cleared", NotificationKind::Info);
+                    }
+                    Some(KeyboardAction::CycleFooterPreset) => {
+                        self.footer_preset = (self.footer_preset + 1) % footer::num_presets();
+                        let name = footer::presets()[self.footer_preset].name;
+                        self.set_last_action(&format!("Footer: {}", name));
+                        save_prefs(&Prefs {
+                            theme_index: self.theme_index,
+                            transparent_bg: self.transparent_bg,
+                            footer_preset: self.footer_preset,
+                            hover_delay_secs: self.hover_delay_secs,
+                        });
                     }
                     Some(KeyboardAction::FocusLeft) => {
                         match self.current_tab {
@@ -1140,23 +1184,36 @@ impl App {
                                     }
                                     _ => {}
                                 },
-                                3 => match opt {
-                                    1 => { // Transparent BG toggle
-                                        self.transparent_bg = !self.transparent_bg;
-                                        save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg });
-                                    }
-                                    2 => { // Sync Covers
-                                        let ipc_tx = self.ipc_tx.clone();
-                                        let c = self.client.clone();
-                                        tokio::spawn(async move {
-                                            if let Ok(DaemonRes::SyncCoversResult { synced, total, .. }) = c.library_sync_covers().await {
-                                                let msg = format!("Covers synced: {synced}/{total} tracks");
-                                                let _ = ipc_tx.send(IpcResult::Notification(msg, crate::app::NotificationKind::Info));
-                                            }
-                                        });
-                                    }
-                                    _ => {}
-                                },
+                                 3 => match opt {
+                                     1 => { // Transparent BG toggle
+                                         self.transparent_bg = !self.transparent_bg;
+                                         save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
+                                     }
+                                     2 => { // Sync Covers
+                                         let ipc_tx = self.ipc_tx.clone();
+                                         let c = self.client.clone();
+                                         tokio::spawn(async move {
+                                             if let Ok(DaemonRes::SyncCoversResult { synced, total, .. }) = c.library_sync_covers().await {
+                                                 let msg = format!("Covers synced: {synced}/{total} tracks");
+                                                 let _ = ipc_tx.send(IpcResult::Notification(msg, crate::app::NotificationKind::Info));
+                                             }
+                                         });
+                                     }
+                                     3 => { // Footer Preset cycle
+                                         self.footer_preset = (self.footer_preset + 1) % footer::num_presets();
+                                         let name = footer::presets()[self.footer_preset].name;
+                                         save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
+                                         self.notify(format!("Footer: {}", name), NotificationKind::Info);
+                                     }
+                                     4 => { // Hover Delay cycle
+                                         let delays = [0u64, 1, 2, 3, 5];
+                                         let idx = delays.iter().position(|d| *d == self.hover_delay_secs).unwrap_or(0);
+                                         self.hover_delay_secs = delays[(idx + 1) % delays.len()];
+                                         save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
+                                         self.notify(format!("Hover Delay: {}s", self.hover_delay_secs), NotificationKind::Info);
+                                     }
+                                     _ => {}
+                                 },
                                 _ => {}
                             }
                         }
@@ -1265,7 +1322,7 @@ impl App {
                         let idx = top.selected.min(THEMES.len().saturating_sub(1));
                         self.theme = (THEMES[idx].builder)();
                         self.theme_index = idx;
-                        save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg });
+                        save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
                     }
                 }
             }
@@ -1278,7 +1335,7 @@ impl App {
                         let idx = top.selected.min(THEMES.len().saturating_sub(1));
                         self.theme = (THEMES[idx].builder)();
                         self.theme_index = idx;
-                        save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg });
+                        save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
                     }
                 }
             }
@@ -1353,7 +1410,7 @@ impl App {
                             let idx = top.selected.min(THEMES.len().saturating_sub(1));
                             self.theme = (THEMES[idx].builder)();
                             self.theme_index = idx;
-                            save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg });
+                            save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
                             self.overlays.close_top();
                         }
                         OverlayId::SoundEffects => {
