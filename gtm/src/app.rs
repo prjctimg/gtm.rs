@@ -66,7 +66,7 @@ pub struct App {
     pub library_pane_focus: bool,
     pub settings_category: usize,
     pub settings_pane_focus: bool,
-    pub settings_option_scroll: usize,
+    pub settings_option: usize,
     pub tracks_cache: Vec<TrackInfo>,
     pub queue_cache: Vec<TrackInfo>,
     pub queue_cursor: usize,
@@ -140,7 +140,7 @@ impl App {
             library_pane_focus: false,
             settings_category: 0,
             settings_pane_focus: false,
-            settings_option_scroll: 0,
+            settings_option: 0,
             tracks_cache: Vec::new(),
             queue_cache: Vec::new(),
             queue_cursor: 0,
@@ -292,17 +292,35 @@ impl App {
             // Fetch cover art if current track changed
             let track_id = self.state.current_track.as_ref().map(|t| t.id);
             if track_id != self.last_cover_track_id {
-                self.last_cover_track_id = track_id;
                 if let Some(tid) = track_id {
-                    if let Ok(Some(b64)) = self.client.get_cover_art(tid).await {
-                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
-                            self.current_cover = Some(bytes);
+                    match self.client.get_cover_art(tid).await {
+                        Ok(Some(b64)) => {
+                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+                                self.current_cover = Some(bytes);
+                                self.last_cover_track_id = track_id;
+                            }
+                        }
+                        _ => {
+                            // retry on next refresh
+                            self.last_cover_track_id = None;
                         }
                     }
                 } else {
                     self.current_cover = None;
+                    self.last_cover_track_id = track_id;
                 }
             }
+        }
+    }
+
+    fn settings_options_for_category(&self) -> usize {
+        match self.settings_category {
+            0 => 2,  // Audio: Volume, Mute
+            1 => 8,  // YouTube: (all display-only for now)
+            2 => 3,  // Appearance: Repeat, Shuffle, Crossfade
+            3 => 2,  // System: Theme, Notifications
+            4 => 1,  // Spotify: Status
+            _ => 0,
         }
     }
 
@@ -427,6 +445,16 @@ impl App {
                     self.state.apply_event(&ev);
                 }
                 self.fetch_state().await;
+                // Auto-poll YT search results while overlay is active
+                if self.overlays.top().map_or(false, |o| o.id == OverlayId::YTSearch) {
+                    if let Ok(DaemonRes::YtSearchResults { results, .. }) =
+                        self.client.yt_search_poll().await
+                    {
+                        if !results.is_empty() {
+                            self.yt_results_cache = results;
+                        }
+                    }
+                }
             }
             TuiCommand::RefreshPlaylists => {
                 if let Ok(DaemonRes::Playlists { playlists, .. }) =
@@ -699,6 +727,9 @@ impl App {
                             Tab::Settings if self.settings_pane_focus => {
                                 self.settings_category = self.settings_category.saturating_sub(1);
                             }
+                            Tab::Settings => {
+                                self.settings_option = self.settings_option.saturating_sub(1);
+                            }
                             _ => {
                                 self.scroll_offset = self.scroll_offset.saturating_sub(1);
                             }
@@ -711,6 +742,10 @@ impl App {
                             }
                             Tab::Settings if self.settings_pane_focus => {
                                 self.settings_category = (self.settings_category + 1).min(NUM_SETTINGS_CATEGORIES.saturating_sub(1));
+                            }
+                            Tab::Settings => {
+                                let max = self.settings_options_for_category().saturating_sub(1);
+                                self.settings_option = (self.settings_option + 1).min(max);
                             }
                             _ => {
                                 self.scroll_offset += 1;
@@ -763,6 +798,41 @@ impl App {
                                     let _ = self.client.queue_set(paths, idx as u128).await;
                                     let _ = tx.send(TuiCommand::Play(path)).await;
                                 }
+                            }
+                        } else if self.current_tab == Tab::Settings && !self.settings_pane_focus {
+                            let tx = self.cmd_tx();
+                            let opt = self.settings_option;
+                            match self.settings_category {
+                                0 => match opt {
+                                    1 => { // Mute toggle
+                                        let muted = !self.state.mute;
+                                        let _ = tx.send(TuiCommand::SetVolume(if muted { 0 } else { self.state.volume })).await;
+                                        self.state.mute = muted;
+                                    }
+                                    _ => {}
+                                },
+                                2 => match opt {
+                                    0 => { // Repeat cycle
+                                        let next = match self.state.repeat {
+                                            gtm_core::state::RepeatMode::Off => gtm_core::state::RepeatMode::One,
+                                            gtm_core::state::RepeatMode::One => gtm_core::state::RepeatMode::All,
+                                            gtm_core::state::RepeatMode::All => gtm_core::state::RepeatMode::Off,
+                                        };
+                                        let _ = self.client.cycle_repeat(next).await;
+                                        self.state.repeat = next;
+                                    }
+                                    1 => { // Shuffle toggle
+                                        let _ = self.client.toggle_shuffle().await;
+                                        self.state.shuffle = !self.state.shuffle;
+                                    }
+                                    2 => { // Crossfade toggle
+                                        let enabled = !self.state.crossfade.as_ref().map(|c| c.enabled).unwrap_or(false);
+                                        let dur = self.state.crossfade.as_ref().map(|c| c.duration_secs).unwrap_or(self.crossfade_duration);
+                                        let _ = tx.send(TuiCommand::Crossfade(enabled, dur)).await;
+                                    }
+                                    _ => {}
+                                },
+                                _ => {}
                             }
                         }
                     }
@@ -888,6 +958,11 @@ impl App {
                                 let idx = top.selected.min(self.yt_results_cache.len() - 1);
                                 let url = self.yt_results_cache[idx].url.clone();
                                 let _ = tx.send(TuiCommand::YtResolve(url)).await;
+                            } else {
+                                // Initiate a new search
+                                let query = top.query.clone();
+                                let _ = tx.send(TuiCommand::YtSearch(query)).await;
+                                let _ = tx.send(TuiCommand::RefreshYt).await;
                             }
                         }
                         OverlayId::VolumeConfirm => {

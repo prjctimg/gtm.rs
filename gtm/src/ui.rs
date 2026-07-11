@@ -165,7 +165,7 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let pad = remaining.saturating_sub(spans.iter().map(|s| s.width() as u16).sum::<u16>());
     if pad > version_str.len() as u16 + 1 {
         spans.push(Span::raw(" ".repeat((pad - version_str.len() as u16) as usize)));
-        spans.push(Span::styled(version_str, Style::default().fg(app.theme.fg_dim)));
+        spans.push(Span::styled(version_str, Style::default().fg(app.theme.fg)));
     }
 
     let tab_line = Paragraph::new(Line::from(spans))
@@ -211,7 +211,7 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
         None => {
             let p = Paragraph::new("No track playing")
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(app.theme.fg_dim));
+                .style(Style::default().fg(app.theme.fg));
             f.render_widget(p, area);
             return;
         }
@@ -232,7 +232,7 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .borders(Borders::ALL)
             .title(" Cover ")
             .border_type(BorderType::Plain)
-            .style(Style::default().fg(app.theme.fg_dim));
+            .style(Style::default().fg(app.theme.fg));
         f.render_widget(placeholder, cover_area);
     }
 
@@ -258,21 +258,30 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
 
     // Separator
     let sep = Paragraph::new("─".repeat(right[1].width as usize))
-        .style(Style::default().fg(app.theme.fg_dim));
+        .style(Style::default().fg(app.theme.fg));
     f.render_widget(sep, right[1]);
 
-    // Track title
+    // Track title (fallback to filename)
+    let display_title = if track.title.is_empty() {
+        std::path::Path::new(&track.path)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default()
+    } else {
+        track.title.clone()
+    };
     let fav_prefix = if track.favourite { "\u{2665} " } else { "" };
     let title = Paragraph::new(Line::from(vec![
         Span::styled(fav_prefix, Style::default().fg(app.theme.error)),
-        Span::styled(&track.title, Style::default().fg(app.theme.fg_bright).add_modifier(Modifier::BOLD)),
+        Span::styled(&display_title, Style::default().fg(app.theme.fg_bright).add_modifier(Modifier::BOLD)),
     ]));
     f.render_widget(title, right[2]);
 
     // Artist
+    let display_artist = if track.artist.is_empty() { "Unknown" } else { &track.artist };
     let artist = Paragraph::new(Line::from(vec![
-        Span::styled("Artist: ", Style::default().fg(app.theme.fg_dim)),
-        Span::styled(&track.artist, Style::default().fg(app.theme.fg)),
+        Span::styled("Artist: ", Style::default().fg(app.theme.fg)),
+        Span::styled(display_artist, Style::default().fg(app.theme.fg_bright)),
     ]));
     f.render_widget(artist, right[3]);
 
@@ -290,16 +299,17 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     };
     if !format_chip.is_empty() {
         let fmt = Paragraph::new(Line::from(vec![
-            Span::styled("Format: ", Style::default().fg(app.theme.fg_dim)),
+            Span::styled("Format: ", Style::default().fg(app.theme.fg)),
             Span::styled(fmt_parts.join(" | "), Style::default().fg(app.theme.accent)),
         ]));
         f.render_widget(fmt, right[4]);
     }
 
     // Album
+    let display_album = if track.album.is_empty() { "Unknown" } else { &track.album };
     let album = Paragraph::new(Line::from(vec![
-        Span::styled("Album:  ", Style::default().fg(app.theme.fg_dim)),
-        Span::styled(&track.album, Style::default().fg(app.theme.fg)),
+        Span::styled("Album:  ", Style::default().fg(app.theme.fg)),
+        Span::styled(display_album, Style::default().fg(app.theme.fg_bright)),
     ]));
     f.render_widget(album, right[5]);
 
@@ -332,7 +342,7 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let controls = Paragraph::new(
         " [Space]P/P  [n/N]Next  [p/P]Prev  [s]Stop  [+/-]Vol  [m]Mute  [r/R]Repeat  [S]Shuffle  [t]Info  [:]Cmd  [q]Quit ",
     )
-    .style(Style::default().fg(app.theme.fg_dim));
+    .style(Style::default().fg(app.theme.fg));
     f.render_widget(controls, bottom_chunks[1]);
 }
 
@@ -481,10 +491,10 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
             "", "", "", "", w1 = num_w + 1, w2 = title_w + 2, w3 = dur_w + 1, w4 = br_w);
 
         let mut lines = vec![
-            Line::from(Span::styled(header_text, Style::default().fg(app.theme.fg_dim))),
+            Line::from(Span::styled(header_text, Style::default().fg(app.theme.fg))),
             Line::from(""),
-            Line::from(Span::styled(header_fmt, Style::default().fg(app.theme.fg_dim))),
-            Line::from(Span::styled(sep_line, Style::default().fg(app.theme.fg_dim))),
+            Line::from(Span::styled(header_fmt, Style::default().fg(app.theme.fg))),
+            Line::from(Span::styled(sep_line, Style::default().fg(app.theme.fg))),
         ];
 
         for (i, track) in filtered.iter().enumerate() {
@@ -513,7 +523,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
         let sel = app.scroll_offset.min(albums.len().saturating_sub(1));
         let st_line = format!(" {} albums ", albums.len());
         let mut lines = vec![
-            Line::from(Span::styled(format!(" {} · {} albums", category_label, albums.len()), Style::default().fg(app.theme.fg_dim))),
+            Line::from(Span::styled(format!(" {} · {} albums", category_label, albums.len()), Style::default().fg(app.theme.fg))),
             Line::from(""),
         ];
         for (i, (name, count)) in albums.iter().enumerate() {
@@ -532,7 +542,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
         let sel = app.scroll_offset.min(artists.len().saturating_sub(1));
         let st_line = format!(" {} artists ", artists.len());
         let mut lines = vec![
-            Line::from(Span::styled(format!(" {} · {} artists", category_label, artists.len()), Style::default().fg(app.theme.fg_dim))),
+            Line::from(Span::styled(format!(" {} · {} artists", category_label, artists.len()), Style::default().fg(app.theme.fg))),
             Line::from(""),
         ];
         for (i, (name, count)) in artists.iter().enumerate() {
@@ -551,7 +561,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
         let sel = app.scroll_offset.min(playlists.len().saturating_sub(1));
         let st_line = format!(" {} playlists ", playlists.len());
         let mut lines = vec![
-            Line::from(Span::styled(format!(" {} · {} playlists", category_label, playlists.len()), Style::default().fg(app.theme.fg_dim))),
+            Line::from(Span::styled(format!(" {} · {} playlists", category_label, playlists.len()), Style::default().fg(app.theme.fg))),
             Line::from(""),
         ];
         for (i, pl) in playlists.iter().enumerate() {
@@ -592,10 +602,10 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
             "", "", "", "", w1 = num_w + 1, w2 = title_w + 2, w3 = dur_w + 1, w4 = br_w);
 
         let mut lines = vec![
-            Line::from(Span::styled(header_text, Style::default().fg(app.theme.fg_dim))),
+            Line::from(Span::styled(header_text, Style::default().fg(app.theme.fg))),
             Line::from(""),
-            Line::from(Span::styled(header_fmt, Style::default().fg(app.theme.fg_dim))),
-            Line::from(Span::styled(sep_line, Style::default().fg(app.theme.fg_dim))),
+            Line::from(Span::styled(header_fmt, Style::default().fg(app.theme.fg))),
+            Line::from(Span::styled(sep_line, Style::default().fg(app.theme.fg))),
         ];
 
         for (i, track) in filtered.iter().enumerate() {
@@ -638,7 +648,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &App) {
     // ── Stats bar ──
     let stats = Paragraph::new(Line::from(vec![
         Span::raw("  "),
-        Span::styled(stats_line, Style::default().fg(app.theme.fg_dim)),
+        Span::styled(stats_line, Style::default().fg(app.theme.fg)),
     ]));
     f.render_widget(stats, stats_area);
 }
@@ -737,6 +747,7 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(right_block, panes[1]);
 
     let mut lines = Vec::new();
+    let sel = app.settings_option;
     for (i, item) in items.iter().enumerate() {
         if i == 1 && app.settings_category == 1 {
             lines.push(Line::from(Span::styled(
@@ -744,15 +755,21 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 Style::default().fg(app.theme.accent),
             )));
         }
-        lines.push(Line::from(Span::styled(item, Style::default().fg(app.theme.fg))));
+        let is_sel = i == sel && !settings_focus;
+        let style = if is_sel {
+            Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+        } else {
+            Style::default().fg(app.theme.fg)
+        };
+        lines.push(Line::from(Span::styled(item, style)));
     }
     lines.push(Line::from(""));
     match app.settings_category {
-        0 => lines.push(Line::from(Span::styled(" Volume: Adjust playback volume. Mute: Toggle mute.", Style::default().fg(app.theme.fg_dim)))),
-        1 => lines.push(Line::from(Span::styled(" YouTube integration: JS runtime, download limits, search prefs.", Style::default().fg(app.theme.fg_dim)))),
-        2 => lines.push(Line::from(Span::styled(" Repeat/Shuffle/Crossfade playback settings.", Style::default().fg(app.theme.fg_dim)))),
-        3 => lines.push(Line::from(Span::styled(" Theme and notification display settings.", Style::default().fg(app.theme.fg_dim)))),
-        4 => lines.push(Line::from(Span::styled(" Spotify integration status.", Style::default().fg(app.theme.fg_dim)))),
+        0 => lines.push(Line::from(Span::styled(" Volume: Adjust playback volume. Mute: Toggle mute.", Style::default().fg(app.theme.fg)))),
+        1 => lines.push(Line::from(Span::styled(" YouTube integration: JS runtime, download limits, search prefs.", Style::default().fg(app.theme.fg)))),
+        2 => lines.push(Line::from(Span::styled(" Repeat/Shuffle/Crossfade playback settings.", Style::default().fg(app.theme.fg)))),
+        3 => lines.push(Line::from(Span::styled(" Theme and notification display settings.", Style::default().fg(app.theme.fg)))),
+        4 => lines.push(Line::from(Span::styled(" Spotify integration status.", Style::default().fg(app.theme.fg)))),
         _ => {}
     }
 
