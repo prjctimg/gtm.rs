@@ -16,6 +16,33 @@ use crate::overlay::{OverlayCtx, OverlayId, OverlayManager};
 use crate::theme::{AppTheme, THEMES};
 use crate::ui;
 
+fn prefs_path() -> std::path::PathBuf {
+    let config = std::env::var("XDG_CONFIG_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+            std::path::PathBuf::from(home).join(".config")
+        });
+    let dir = config.join("gtm");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("prefs.json")
+}
+
+fn load_theme_index() -> usize {
+    let path = prefs_path();
+    std::fs::read_to_string(path).ok()
+        .and_then(|s| serde_json::from_str::<usize>(&s).ok())
+        .unwrap_or(0)
+        .min(crate::theme::THEMES.len().saturating_sub(1))
+}
+
+fn save_theme_index(idx: usize) {
+    let path = prefs_path();
+    if let Ok(s) = serde_json::to_string(&idx) {
+        let _ = std::fs::write(path, s);
+    }
+}
+
 pub const NUM_SETTINGS_CATEGORIES: usize = 5;
 pub const LIBRARY_CATEGORIES: &[&str] = &[
     "All Tracks",
@@ -91,10 +118,13 @@ pub struct App {
     keybindings: crate::keymap::Keybindings,
     pub theme_index: usize,
     pub show_tag_popup: bool,
+    pub hover_start: Option<std::time::Instant>,
+    pub show_hover_info: bool,
 }
 
 enum IpcResult {
     RefreshDone(DaemonState, Option<Vec<u8>>, Option<i64>),
+    CoverArt(Option<Vec<u8>>, Option<i64>),
     LibraryTracks(Vec<TrackInfo>),
     Playlists(Vec<Playlist>),
     Queue(Vec<TrackInfo>, usize),
@@ -139,8 +169,9 @@ impl App {
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
         let (ipc_tx, ipc_rx) = mpsc::unbounded_channel();
         let keybindings = default_keybindings();
+        let saved_theme = load_theme_index();
         Ok(Self {
-            theme: AppTheme::default(),
+            theme: (THEMES[saved_theme].builder)(),
             client,
             state,
             display_position: 0.0,
@@ -175,8 +206,10 @@ impl App {
             ipc_rx,
             ipc_tx,
             keybindings,
-            theme_index: 0,
+            theme_index: saved_theme,
             show_tag_popup: false,
+            hover_start: None,
+            show_hover_info: false,
         })
     }
 
@@ -223,11 +256,34 @@ impl App {
                 self.state.apply_event(&ev);
             }
 
+            // If track changed via daemon event (not from our own Refresh),
+            // trigger a cover art fetch so the UI updates immediately.
+            let current_tid = self.state.current_track.as_ref().map(|t| t.id);
+            if current_tid != self.last_cover_track_id && current_tid.is_some() {
+                let client2 = self.client.clone();
+                let ipc_tx2 = self.ipc_tx.clone();
+                tokio::spawn(async move {
+                    if let Some(tid) = current_tid {
+                        if let Ok(Some(b64)) = client2.get_cover_art(tid).await {
+                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+                                let _ = ipc_tx2.send(IpcResult::CoverArt(
+                                    Some(bytes), Some(tid)
+                                ));
+                            }
+                        }
+                    }
+                });
+            }
+
             while let Ok(result) = self.ipc_rx.try_recv() {
                 match result {
                     IpcResult::RefreshDone(state, cover, cover_tid) => {
                         self.client.seed_clock_from_state(&state).await;
                         self.state = state;
+                        self.current_cover = cover;
+                        self.last_cover_track_id = cover_tid;
+                    }
+                    IpcResult::CoverArt(cover, cover_tid) => {
                         self.current_cover = cover;
                         self.last_cover_track_id = cover_tid;
                     }
@@ -249,6 +305,19 @@ impl App {
             // Expire stale notifications
             let now = std::time::Instant::now();
             self.notifications.retain(|n| n.expires_at > now);
+
+            // Hover timer: show info popup after 3s of no key press
+            if !self.overlays.is_open() && !self.show_tag_popup {
+                match self.hover_start {
+                    Some(t) if t.elapsed() >= std::time::Duration::from_secs(3) => {
+                        self.show_hover_info = true;
+                    }
+                    None => self.hover_start = Some(now),
+                    _ => {}
+                }
+            } else {
+                self.show_hover_info = false;
+            }
 
             self.display_position = self.client.estimated_position().await;
 
@@ -501,6 +570,18 @@ impl App {
                                     cover = Some(bytes);
                                     cover_tid = Some(tid);
                                 }
+                            } else {
+                                // Cover not available yet — retry after a short delay
+                                let c2 = client2.clone();
+                                let ipc3 = ipc_tx2.clone();
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                                    if let Ok(Some(b64)) = c2.get_cover_art(tid).await {
+                                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+                                            let _ = ipc3.send(IpcResult::CoverArt(Some(bytes), Some(tid)));
+                                        }
+                                    }
+                                });
                             }
                         }
                         let _ = ipc_tx2.send(IpcResult::RefreshDone(state, cover, cover_tid.or(track_id)));
@@ -550,6 +631,8 @@ impl App {
     }
 
     async fn handle_key(&mut self, key: event::KeyEvent) -> bool {
+        self.hover_start = None;
+        self.show_hover_info = false;
         // If an overlay is open, Esc closes it; keys pass through to overlay
         if self.overlays.is_open() {
             return match key.code {
@@ -997,22 +1080,29 @@ impl App {
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
+                // For overlays with input fields, only allow arrow keys (not vim keys)
+                let has_input = matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::YTSearch) | Some(OverlayId::SearchLibrary) | Some(OverlayId::CommandPalette));
+                if has_input && key.code != KeyCode::Up { return; }
                 if let Some(top) = self.overlays.top_mut() {
                     top.selected = top.selected.saturating_sub(1);
                     if top.id == OverlayId::ThemePicker {
                         let idx = top.selected.min(THEMES.len().saturating_sub(1));
                         self.theme = (THEMES[idx].builder)();
                         self.theme_index = idx;
+                        save_theme_index(idx);
                     }
                 }
             }
             KeyCode::Down | KeyCode::Char('j') => {
+                let has_input = matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::YTSearch) | Some(OverlayId::SearchLibrary) | Some(OverlayId::CommandPalette));
+                if has_input && key.code != KeyCode::Down { return; }
                 if let Some(top) = self.overlays.top_mut() {
                     top.selected += 1;
                     if top.id == OverlayId::ThemePicker {
                         let idx = top.selected.min(THEMES.len().saturating_sub(1));
                         self.theme = (THEMES[idx].builder)();
                         self.theme_index = idx;
+                        save_theme_index(idx);
                     }
                 }
             }
@@ -1077,6 +1167,7 @@ impl App {
                             let idx = top.selected.min(THEMES.len().saturating_sub(1));
                             self.theme = (THEMES[idx].builder)();
                             self.theme_index = idx;
+                            save_theme_index(idx);
                             self.overlays.close_top();
                         }
                         OverlayId::SoundEffects => {
