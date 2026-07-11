@@ -99,6 +99,8 @@ pub struct App {
     pub client: DaemonClient,
     pub state: DaemonState,
     pub display_position: f64,
+    last_display_position: f64,
+    frame_count: u64,
     pub current_tab: Tab,
     pub input_mode: InputMode,
     pub search_query: String,
@@ -199,6 +201,8 @@ impl App {
             client,
             state,
             display_position: 0.0,
+            last_display_position: 0.0,
+            frame_count: 0,
             current_tab: Tab::NowPlaying,
             input_mode: InputMode::Normal,
             search_query: String::new(),
@@ -322,7 +326,6 @@ impl App {
             while let Ok(result) = self.ipc_rx.try_recv() {
                 match result {
                     IpcResult::RefreshDone(state, cover, cover_tid) => {
-                        self.client.seed_clock_from_state(&state).await;
                         self.state = state;
                         self.current_cover = cover;
                         self.last_cover_track_id = cover_tid;
@@ -388,10 +391,25 @@ impl App {
             }
 
             let raw_pos = self.client.estimated_position().await;
-            // EMA smoothing to reduce stutter
+            // Monotonic guard: prevent large backward jumps from clock skew.
+            // Allow at most 0.5s of regression to avoid visible stutter.
+            let raw_pos = raw_pos.max(self.display_position - 0.5);
+            // EMA smoothing
             self.display_position = self.display_position * 0.85 + raw_pos * 0.15;
 
-            terminal.draw(|f| ui::render(f, &mut self))?;
+            // Dirty-render: skip redraw if position hasn't changed meaningfully
+            // to reduce CPU usage.  Always render every 10th frame as a safety net.
+            let frame_count = self.frame_count.wrapping_add(1);
+            self.frame_count = frame_count;
+            let pos_changed = (self.display_position - self.last_display_position).abs() >= 0.1;
+            let force_render = pos_changed
+                || !self.notifications.is_empty()
+                || frame_count % 10 == 0;
+            self.last_display_position = self.display_position;
+
+            if force_render {
+                terminal.draw(|f| ui::render(f, &mut self))?;
+            }
 
             if event::poll(Duration::from_millis(50))? {
                 if let Event::Key(key) = event::read()? {
@@ -490,7 +508,7 @@ impl App {
             0 => 2,  // Audio: Volume, Mute
             1 => 8,  // YouTube: (all display-only for now)
             2 => 4,  // Playback: Repeat, Shuffle, Crossfade, Easing
-            3 => 2,  // System: Theme, Notifications
+            3 => 3,  // System: Theme, Transparent BG, Sync Covers
             4 => 1,  // Spotify: Status
             _ => 0,
         }
@@ -613,18 +631,39 @@ impl App {
             }
             TuiCommand::YtDownload(url) => {
                 let ipc = ipc_tx.clone();
+                let client2 = self.client.clone();
                 tokio::spawn(async move {
+                    let audio_dir = std::env::var("XDG_DATA_HOME")
+                        .map(|d| std::path::PathBuf::from(d).join("gtm").join("audio"))
+                        .unwrap_or_else(|_| {
+                            let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                            std::path::PathBuf::from(home).join(".local/share/gtm/audio")
+                        });
+                    std::fs::create_dir_all(&audio_dir).ok();
+                    let template = audio_dir.join("%(title)s.%(ext)s");
                     let output = tokio::process::Command::new("yt-dlp")
                         .arg("--extract-audio")
                         .arg("--audio-format")
                         .arg("mp3")
+                        .arg("--write-thumbnail")
+                        .arg("--convert-thumbnails")
+                        .arg("jpg")
                         .arg("-o")
-                        .arg("~/Downloads/%(title)s.%(ext)s")
+                        .arg(template.to_string_lossy().as_ref())
                         .arg(&url)
                         .output()
                         .await;
                     let msg = match output {
-                        Ok(o) if o.status.success() => format!("Downloaded: {}", url),
+                        Ok(o) if o.status.success() => {
+                            let _ = client2.library_scan(
+                                audio_dir.to_string_lossy().as_ref(),
+                            ).await;
+                            // Also refresh the track cache
+                            if let Ok(DaemonRes::Tracks { tracks, .. }) = client2.library_get_tracks(None, None).await {
+                                let _ = ipc.send(IpcResult::LibraryTracks(tracks));
+                            }
+                            format!("Downloaded: {}", url)
+                        }
                         Ok(o) => format!("Download failed: {}", String::from_utf8_lossy(&o.stderr)),
                         Err(e) => format!("Download error: {e}"),
                     };
@@ -657,7 +696,9 @@ impl App {
                 let ipc_tx2 = self.ipc_tx.clone();
                 tokio::spawn(async move {
                     if let Ok(state) = client2.get_status().await {
-                        client2.seed_clock_from_state(&state).await;
+                        // Do NOT call seed_clock_from_state here — that resets the
+                        // local clock and causes visible position stutter.  The
+                        // clock is kept in sync by apply_clock_events during drain().
                         let mut cover = None;
                         let mut cover_tid = None;
                         let track_id = state.current_track.as_ref().map(|t| t.id);
@@ -1103,6 +1144,16 @@ impl App {
                                     1 => { // Transparent BG toggle
                                         self.transparent_bg = !self.transparent_bg;
                                         save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg });
+                                    }
+                                    2 => { // Sync Covers
+                                        let ipc_tx = self.ipc_tx.clone();
+                                        let c = self.client.clone();
+                                        tokio::spawn(async move {
+                                            if let Ok(DaemonRes::SyncCoversResult { synced, total, .. }) = c.library_sync_covers().await {
+                                                let msg = format!("Covers synced: {synced}/{total} tracks");
+                                                let _ = ipc_tx.send(IpcResult::Notification(msg, crate::app::NotificationKind::Info));
+                                            }
+                                        });
                                     }
                                     _ => {}
                                 },

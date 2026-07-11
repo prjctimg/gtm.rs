@@ -777,6 +777,7 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
         3 => vec![
             "Theme           [ Cyberdeck  ▶ ]".to_string(),
             format!("Transparent BG  [ {} ]", if app.transparent_bg { "●" } else { "○" }),
+            "Sync Covers     [ Enter  ▶ ]".to_string(),
         ],
         4 => vec!["Spotify Status  [ Disconnected ▶ ]".to_string()],
         _ => vec![],
@@ -825,6 +826,7 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
         }
         (3, 0) => lines.push(Line::from(Span::styled(" Theme: Press Enter to open the Theme Picker overlay (Alt+C).", Style::default().fg(app.theme.fg)))),
         (3, 1) => lines.push(Line::from(Span::styled(" Transparent BG: Press Enter to toggle. When on, overlay backgrounds become transparent.", Style::default().fg(app.theme.fg)))),
+        (3, 2) => lines.push(Line::from(Span::styled(" Sync Covers: Download missing cover art from Deezer for all library tracks.", Style::default().fg(app.theme.fg)))),
         (4, 0) => lines.push(Line::from(Span::styled(" Spotify: Integration status — requires daemon restart.", Style::default().fg(app.theme.fg)))),
         _ => {}
     }

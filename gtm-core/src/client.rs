@@ -364,6 +364,13 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn library_sync_covers(&self) -> Result<DaemonRes> {
+        self.send_raw(DaemonReq::Library {
+            action: LibraryAction::SyncCovers,
+        })
+        .await
+    }
+
     // ─── Search / Favourites ───
 
     pub async fn search(&self, query: &str) -> Result<DaemonRes> {
