@@ -158,10 +158,11 @@ impl Daemon {
         let bg_state = self.state.clone();
         let bg_lib_paths = self.config.library_paths.clone();
         let bg_data_dir = self.config.data_dir.clone();
+        let bg_cache_dir = self.config.cache_dir.clone();
         let bg_req_tx = self.req_tx.clone();
         let bg_event_tx = self.event_tx.clone();
         tokio::spawn(async move {
-            Self::background_scan(bg_state, bg_lib_paths, bg_data_dir, bg_req_tx, bg_event_tx).await;
+            Self::background_scan(bg_state, bg_lib_paths, bg_data_dir, bg_cache_dir, bg_req_tx, bg_event_tx).await;
         });
 
         let mut poll_interval = tokio::time::interval(Duration::from_millis(33));
@@ -204,6 +205,7 @@ impl Daemon {
         state: Arc<RwLock<DaemonState>>,
         library_paths: Vec<std::path::PathBuf>,
         data_dir: std::path::PathBuf,
+        cache_dir: std::path::PathBuf,
         req_tx: mpsc::UnboundedSender<(ClientId, DaemonReq, ReplyTx)>,
         _event_tx: broadcast::Sender<DaemonEvent>,
     ) {
@@ -218,13 +220,14 @@ impl Daemon {
             }
             let audio_dir_str = audio_dir.to_string_lossy().to_string();
             let data_dir = data_dir.clone();
+            let cache_dir_str = cache_dir.to_string_lossy().to_string();
             let total = total_tracks.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let lib = match Library::new(data_dir.to_str().unwrap_or("")) {
                     Ok(l) => l,
                     Err(e) => return Err(format!("Library::new: {e}")),
                 };
-                lib.scan_directory(&audio_dir_str, true)
+                lib.scan_directory(&audio_dir_str, true, Some(&cache_dir_str))
                     .map_err(|e| format!("scan: {e}"))
             })
             .await;
@@ -1152,9 +1155,10 @@ impl Daemon {
             gtm_core::ipc::LibraryAction::Scan { path } => {
                 let audio_dir = path.clone();
                 let data_dir = self.config.data_dir.clone();
+                let cache_dir = self.config.cache_dir.to_string_lossy().to_string();
                 let result = tokio::task::spawn_blocking(move || {
                     let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
-                    lib.scan_directory(&audio_dir, true)
+                    lib.scan_directory(&audio_dir, true, Some(&cache_dir))
                 })
                 .await
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;

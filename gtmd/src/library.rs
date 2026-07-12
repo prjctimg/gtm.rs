@@ -89,12 +89,12 @@ impl Library {
         }
     }
 
-    pub fn add_track(&self, path: &str) -> Result<TrackInfo, String> {
+    pub fn add_track(&self, path: &str, cache_dir: Option<&str>) -> Result<TrackInfo, String> {
         if self.track_by_path(path)?.is_some() {
             return Err("track already exists".to_string());
         }
 
-        let (meta, hash) = extract_metadata(path)?;
+        let (meta, hash) = extract_metadata(path, cache_dir)?;
 
         self.conn
             .execute(
@@ -320,7 +320,7 @@ impl Library {
                 base.join(line).to_string_lossy().to_string()
             };
 
-            match self.add_track(&abs_path) {
+            match self.add_track(&abs_path, None) {
                 Ok(track) => {
                     let _ = self.add_to_playlist(playlist.id, track.id);
                 }
@@ -331,7 +331,7 @@ impl Library {
         Ok(playlist)
     }
 
-    pub fn scan_directory(&self, dir: &str, recursive: bool) -> Result<Vec<TrackInfo>, String> {
+    pub fn scan_directory(&self, dir: &str, recursive: bool, cache_dir: Option<&str>) -> Result<Vec<TrackInfo>, String> {
         let mut added = Vec::new();
         let extensions = ["mp3", "flac", "ogg", "wav", "m4a", "aac", "opus"];
 
@@ -350,7 +350,7 @@ impl Library {
                 continue;
             }
             let path = entry.path().to_string_lossy().to_string();
-            match self.add_track(&path) {
+            match self.add_track(&path, cache_dir) {
                 Ok(t) => added.push(t),
                 Err(e) => warn!("skip {path}: {e}"),
             }
@@ -438,10 +438,10 @@ fn tag_title(dst: &mut String, tag: &symphonia::core::meta::Tag) {
     *dst = tag.raw.value.to_string();
 }
 
-fn extract_metadata(path: &str) -> Result<(Metadata, String), String> {
-    let cache_base = dirs::cache_dir()
-        .unwrap_or_else(|| PathBuf::from("/tmp"))
-        .join("gtm")
+fn extract_metadata(path: &str, cache_dir: Option<&str>) -> Result<(Metadata, String), String> {
+    let cache_base = cache_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| dirs::cache_dir().unwrap_or_else(|| PathBuf::from("/tmp")).join("gtm"))
         .join("covers");
     fs::create_dir_all(&cache_base).ok();
 

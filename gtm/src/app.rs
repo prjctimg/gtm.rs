@@ -1411,6 +1411,27 @@ impl App {
                                 let tx = self.cmd_tx();
                                 let _ = tx.send(TuiCommand::Crossfade(enabled, new_dur)).await;
                             }
+                            KeyCode::Char('S') => {
+                                // Sync covers for tracks missing cover art
+                                let c = self.client.clone();
+                                let ipc_tx = self.ipc_tx.clone();
+                                self.notify("Syncing covers...", NotificationKind::Info);
+                                tokio::spawn(async move {
+                                    match c.library_sync_covers().await {
+                                        Ok(DaemonRes::SyncCoversResult { synced, total, .. }) => {
+                                            let msg = format!("Covers synced: {synced}/{total} tracks");
+                                            let _ = ipc_tx.send(IpcResult::Notification(msg, crate::app::NotificationKind::Info));
+                                        }
+                                        Ok(DaemonRes::Error { message, .. }) => {
+                                            let _ = ipc_tx.send(IpcResult::Notification(format!("Sync failed: {message}"), crate::app::NotificationKind::Error));
+                                        }
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            let _ = ipc_tx.send(IpcResult::Error(e.to_string()));
+                                        }
+                                    }
+                                });
+                            }
                             _ => {}
                         }
                     }
