@@ -135,6 +135,8 @@ pub struct App {
     pub last_cover_track_id: Option<i64>,
     pub cmd_rx: mpsc::Receiver<TuiCommand>,
     cmd_tx: mpsc::Sender<TuiCommand>,
+    high_pri_cmd_rx: mpsc::UnboundedReceiver<TuiCommand>,
+    high_pri_cmd_tx: mpsc::UnboundedSender<TuiCommand>,
     ipc_rx: mpsc::UnboundedReceiver<IpcResult>,
     ipc_tx: mpsc::UnboundedSender<IpcResult>,
     keybindings: crate::keymap::Keybindings,
@@ -149,7 +151,15 @@ pub struct App {
     pub footer_preset: usize,
     pub hover_delay_secs: u64,
     pub title_scroll: usize,
+    pub is_ready: bool,
     last_queue_cursor: u128,
+    last_track_id_display: Option<i64>,
+    pub effects: tachyonfx::EffectManager<&'static str>,
+    pub last_render_time: std::time::Instant,
+    prev_tab: Tab,
+    prev_track_id: Option<i64>,
+    prev_status: gtm_core::state::PlaybackStatus,
+    prev_volume: u8,
 }
 
 enum IpcResult {
@@ -200,6 +210,7 @@ impl App {
         let client = DaemonClient::connect(socket_path).await?;
         let state = DaemonState::new();
         let (cmd_tx, cmd_rx) = mpsc::channel(64);
+        let (high_pri_cmd_tx, high_pri_cmd_rx) = mpsc::unbounded_channel();
         let (ipc_tx, ipc_rx) = mpsc::unbounded_channel();
         let keybindings = default_keybindings();
         let prefs = load_prefs();
@@ -241,6 +252,8 @@ impl App {
             last_cover_track_id: None,
             cmd_rx,
             cmd_tx,
+            high_pri_cmd_rx,
+            high_pri_cmd_tx,
             ipc_rx,
             ipc_tx,
             keybindings,
@@ -255,12 +268,24 @@ impl App {
             footer_preset: prefs.footer_preset.min(footer::num_presets().saturating_sub(1)),
             hover_delay_secs: prefs.hover_delay_secs.min(5),
             title_scroll: 0,
+            is_ready: false,
             last_queue_cursor: initial_cursor,
+            last_track_id_display: None,
+            effects: tachyonfx::EffectManager::default(),
+            last_render_time: std::time::Instant::now(),
+            prev_tab: Tab::NowPlaying,
+            prev_track_id: None,
+            prev_status: gtm_core::state::PlaybackStatus::Stopped,
+            prev_volume: 100,
         })
     }
 
     pub fn cmd_tx(&self) -> mpsc::Sender<TuiCommand> {
         self.cmd_tx.clone()
+    }
+
+    pub fn send_high(&self, cmd: TuiCommand) {
+        let _ = self.high_pri_cmd_tx.send(cmd);
     }
 
     #[allow(dead_code)]
@@ -288,12 +313,14 @@ impl App {
             self.state.volume = 85;
         }
         self.fetch_queue().await;
+        self.fetch_library_tracks().await;
+        self.is_ready = true;
 
         let cmd_tx = self.cmd_tx();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(Duration::from_millis(250)).await;
-                let _ = cmd_tx.send(TuiCommand::Refresh).await;
+                tokio::time::sleep(Duration::from_millis(1000)).await;
+                let _ = cmd_tx.try_send(TuiCommand::Refresh);
             }
         });
 
@@ -316,20 +343,28 @@ impl App {
             }
             self.last_queue_cursor = self.state.queue_cursor;
 
-            // If track changed via daemon event (not from our own Refresh),
-            // trigger a cover art fetch so the UI updates immediately.
+            // If track changed, reset display_position to avoid stale EMA from old track.
             let current_tid = self.state.current_track.as_ref().map(|t| t.id);
+            if current_tid != self.last_track_id_display {
+                self.last_track_id_display = current_tid;
+                let raw = self.client.estimated_position().await;
+                self.display_position = raw;
+                self.last_display_position = raw;
+            }
+
+            // If track changed via daemon event, trigger a cover art fetch.
+            // Set last_cover_track_id immediately to prevent redundant spawns.
             if current_tid != self.last_cover_track_id && current_tid.is_some() {
+                let tid = current_tid.unwrap();
+                self.last_cover_track_id = Some(tid);
                 let client2 = self.client.clone();
                 let ipc_tx2 = self.ipc_tx.clone();
                 tokio::spawn(async move {
-                    if let Some(tid) = current_tid {
-                        if let Ok(Some(b64)) = client2.get_cover_art(tid).await {
-                            if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
-                                let _ = ipc_tx2.send(IpcResult::CoverArt(
-                                    Some(bytes), Some(tid)
-                                ));
-                            }
+                    if let Ok(Some(b64)) = client2.get_cover_art(tid).await {
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+                            let _ = ipc_tx2.send(IpcResult::CoverArt(
+                                Some(bytes), Some(tid)
+                            ));
                         }
                     }
                 });
@@ -367,6 +402,9 @@ impl App {
                 }
             }
 
+            while let Ok(cmd) = self.high_pri_cmd_rx.try_recv() {
+                self.handle_command(cmd);
+            }
             while let Ok(cmd) = self.cmd_rx.try_recv() {
                 self.handle_command(cmd);
             }
@@ -387,6 +425,35 @@ impl App {
                         }
                     }
                 }
+            }
+
+            // Detect state changes and trigger animations
+            use ratatui::style::Color;
+            use tachyonfx::{fx, Interpolation};
+            if self.current_tab != self.prev_tab {
+                self.prev_tab = self.current_tab;
+                self.effects.add_effect(
+                    fx::fade_from_fg(Color::Black, (200, Interpolation::QuadOut))
+                );
+            }
+            let current_tid = self.state.current_track.as_ref().map(|t| t.id);
+            if current_tid != self.prev_track_id {
+                self.prev_track_id = current_tid;
+                self.effects.add_effect(
+                    fx::coalesce((350, Interpolation::SineOut))
+                );
+            }
+            if self.state.status != self.prev_status {
+                self.prev_status = self.state.status;
+                self.effects.add_effect(
+                    fx::fade_from_fg(Color::DarkGray, (250, Interpolation::SineOut))
+                );
+            }
+            if self.state.volume != self.prev_volume {
+                self.prev_volume = self.state.volume;
+                self.effects.add_effect(
+                    fx::fade_from_fg(Color::DarkGray, (200, Interpolation::SineOut))
+                );
             }
 
             // Hover popup: show immediately on scroll when right-pane focused,
@@ -419,16 +486,20 @@ impl App {
             // Advance title scroll animation for responsive library
             self.title_scroll = self.title_scroll.wrapping_add(1);
 
+            let is_animating = self.effects.is_running();
             let force_render = pos_changed
                 || !self.notifications.is_empty()
-                || frame_count % 10 == 0;
+                || frame_count % 10 == 0
+                || is_animating;
             self.last_display_position = self.display_position;
 
             if force_render {
-                terminal.draw(|f| ui::render(f, &mut self))?;
+                let dt = self.last_render_time.elapsed();
+                self.last_render_time = std::time::Instant::now();
+                terminal.draw(|f| ui::render(f, &mut self, dt))?;
             }
 
-            if event::poll(Duration::from_millis(50))? {
+            if event::poll(Duration::from_millis(16))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
                         if !self.handle_key(key).await {
@@ -540,6 +611,28 @@ impl App {
         }
     }
 
+    async fn fetch_library_tracks(&mut self) {
+        for attempt in 0..3 {
+            match self.client.library_get_tracks(None, None).await {
+                Ok(DaemonRes::Tracks { tracks, .. }) if !tracks.is_empty() => {
+                    self.tracks_cache = tracks;
+                    return;
+                }
+                Ok(DaemonRes::Tracks { .. }) if attempt < 2 => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                Ok(DaemonRes::Tracks { tracks, .. }) => {
+                    // Last attempt — accept even empty tracks
+                    self.tracks_cache = tracks;
+                }
+                Ok(_) | Err(_) if attempt < 2 => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                _ => {}
+            }
+        }
+    }
+
     fn handle_command(&mut self, cmd: TuiCommand) {
         // All IPC calls are spawned as background tasks to avoid blocking the UI loop.
         let client = self.client.clone();
@@ -647,6 +740,7 @@ impl App {
                 });
             }
             TuiCommand::YtDownload(url) => {
+                self.notify("Download started…", NotificationKind::Info);
                 let ipc = ipc_tx.clone();
                 let client2 = self.client.clone();
                 tokio::spawn(async move {
@@ -662,9 +756,10 @@ impl App {
                         .arg("--extract-audio")
                         .arg("--audio-format")
                         .arg("mp3")
-                        .arg("--write-thumbnail")
+                        .arg("--embed-thumbnail")
                         .arg("--convert-thumbnails")
                         .arg("jpg")
+                        .arg("--write-thumbnail")
                         .arg("-o")
                         .arg(template.to_string_lossy().as_ref())
                         .arg(&url)
@@ -679,12 +774,20 @@ impl App {
                             if let Ok(DaemonRes::Tracks { tracks, .. }) = client2.library_get_tracks(None, None).await {
                                 let _ = ipc.send(IpcResult::LibraryTracks(tracks));
                             }
-                            format!("Downloaded: {}", url)
+                            // Extract filename from yt-dlp output for a nicer notification
+                            let filename = String::from_utf8_lossy(&o.stdout)
+                                .lines().next().unwrap_or(&url).to_string();
+                            format!("Downloaded: {}", filename)
                         }
-                        Ok(o) => format!("Download failed: {}", String::from_utf8_lossy(&o.stderr)),
+                        Ok(o) => format!("Download failed: {}", String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("unknown error")),
                         Err(e) => format!("Download error: {e}"),
                     };
-                    let _ = ipc.send(IpcResult::Notification(msg, crate::app::NotificationKind::Info));
+                    let kind = if msg.starts_with("Downloaded") {
+                        crate::app::NotificationKind::Success
+                    } else {
+                        crate::app::NotificationKind::Error
+                    };
+                    let _ = ipc.send(IpcResult::Notification(msg, kind));
                 });
             }
             TuiCommand::YtResolve(u) => {
@@ -713,9 +816,6 @@ impl App {
                 let ipc_tx2 = self.ipc_tx.clone();
                 tokio::spawn(async move {
                     if let Ok(state) = client2.get_status().await {
-                        // Do NOT call seed_clock_from_state here — that resets the
-                        // local clock and causes visible position stutter.  The
-                        // clock is kept in sync by apply_clock_events during drain().
                         let mut cover = None;
                         let mut cover_tid = None;
                         let track_id = state.current_track.as_ref().map(|t| t.id);
@@ -725,18 +825,6 @@ impl App {
                                     cover = Some(bytes);
                                     cover_tid = Some(tid);
                                 }
-                            } else {
-                                // Cover not available yet — retry after a short delay
-                                let c2 = client2.clone();
-                                let ipc3 = ipc_tx2.clone();
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-                                    if let Ok(Some(b64)) = c2.get_cover_art(tid).await {
-                                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
-                                            let _ = ipc3.send(IpcResult::CoverArt(Some(bytes), Some(tid)));
-                                        }
-                                    }
-                                });
                             }
                         }
                         let _ = ipc_tx2.send(IpcResult::RefreshDone(state, cover, cover_tid.or(track_id)));
@@ -787,6 +875,49 @@ impl App {
 
     fn set_last_action(&mut self, name: &str) {
         self.last_action_name = Some((name.to_string(), std::time::Instant::now() + std::time::Duration::from_secs(3)));
+    }
+
+    fn clamp_overlay_selection(&mut self) {
+        if let Some(top) = self.overlays.top_mut() {
+            let max = match top.id {
+                OverlayId::Queue => self.queue_cache.len().saturating_sub(1),
+                OverlayId::YTSearch => self.yt_results_cache.len().saturating_sub(1),
+                OverlayId::SearchLibrary => {
+                    let q = top.query.to_lowercase();
+                    if q.is_empty() {
+                        self.tracks_cache.len()
+                    } else {
+                        self.tracks_cache.iter().filter(|t| {
+                            t.title.to_lowercase().contains(&q)
+                                || t.artist.to_lowercase().contains(&q)
+                        }).count()
+                    }.saturating_sub(1)
+                }
+                OverlayId::Equalizer => 12,
+                OverlayId::SleepTimer => 4,
+                OverlayId::ThemePicker => THEMES.len().saturating_sub(1),
+                OverlayId::CommandPalette => {
+                    let commands = crate::ui::COMMAND_PALETTE_COMMANDS;
+                    let q = top.query.to_lowercase();
+                    if q.is_empty() {
+                        commands.len()
+                    } else {
+                        commands.iter().filter(|c| {
+                            let lower = c.to_lowercase();
+                            let mut qi = 0usize;
+                            for ch in lower.chars() {
+                                if qi < q.len() && ch == q.as_bytes()[qi] as char {
+                                    qi += 1;
+                                }
+                            }
+                            qi == q.len()
+                        }).count()
+                    }.saturating_sub(1)
+                }
+                _ => usize::MAX,
+            };
+            top.selected = top.selected.min(max);
+        }
     }
 
     async fn handle_key(&mut self, key: event::KeyEvent) -> bool {
@@ -843,16 +974,14 @@ impl App {
                     let cmd = self.search_query.clone().trim().to_lowercase();
                     self.input_mode = InputMode::Normal;
                     self.search_query.clear();
-                    let tx = self.cmd_tx();
                     if cmd == "quit" || cmd == "q" {
                         return false;
                     }
                     if let Ok(vol) = cmd.parse::<u8>() {
                         if vol > 85 {
                             self.pending_volume = Some(vol);
-                            self.overlays.open(OverlayId::VolumeConfirm);
                         } else {
-                            let _ = tx.send(TuiCommand::SetVolume(vol)).await;
+                            self.send_high(TuiCommand::SetVolume(vol));
                         }
                     }
                 }
@@ -865,6 +994,22 @@ impl App {
                 _ => {}
             },
             InputMode::Normal => {
+                // If a volume safety prompt is pending, intercept Enter/Esc
+                if self.pending_volume.is_some() {
+                    match key.code {
+                        KeyCode::Enter => {
+                            if let Some(v) = self.pending_volume.take() {
+                                self.send_high(TuiCommand::SetVolume(v));
+                                self.notify(format!("Volume: {}%", v), NotificationKind::Info);
+                            }
+                        }
+                        KeyCode::Esc => {
+                            self.pending_volume = None;
+                        }
+                        _ => {}
+                    }
+                    return true;
+                }
                 match self.keybindings.dispatch(key, KeyContext::Normal) {
                     Some(KeyboardAction::Quit) => return false,
                     Some(KeyboardAction::QuitDaemon) => {
@@ -911,73 +1056,63 @@ impl App {
                     }
                     Some(KeyboardAction::PlayPause) => {
                         self.set_last_action("Play/Pause");
-                        let tx = self.cmd_tx();
                         match self.state.status {
                             PlaybackStatus::Playing => {
-                                let _ = tx.send(TuiCommand::Pause).await;
+                                self.send_high(TuiCommand::Pause);
                             }
                             PlaybackStatus::Paused => {
-                                let _ = tx.send(TuiCommand::PlayPause).await;
+                                self.send_high(TuiCommand::PlayPause);
                             }
                             PlaybackStatus::Stopped => {
                                 if !self.queue_cache.is_empty() {
                                     let idx =
                                         self.queue_cursor.min(self.queue_cache.len() - 1);
                                     let path = self.queue_cache[idx].path.clone();
-                                    let _ = tx.send(TuiCommand::Play(path)).await;
+                                    self.send_high(TuiCommand::Play(path));
                                 }
                             }
                         }
                     }
                     Some(KeyboardAction::Next) => {
                         self.set_last_action("Next");
-                        let tx = self.cmd_tx();
-                        let _ = tx.send(TuiCommand::Next).await;
+                        self.send_high(TuiCommand::Next);
                     }
                     Some(KeyboardAction::Prev) => {
                         self.set_last_action("Previous");
-                        let tx = self.cmd_tx();
-                        let _ = tx.send(TuiCommand::Prev).await;
+                        self.send_high(TuiCommand::Prev);
                     }
                     Some(KeyboardAction::Stop) => {
                         self.set_last_action("Stop");
-                        let tx = self.cmd_tx();
-                        let _ = tx.send(TuiCommand::Stop).await;
+                        self.send_high(TuiCommand::Stop);
                     }
                     Some(KeyboardAction::VolumeUp) => {
                         let new_vol = (self.state.volume + 5).min(100);
                         if new_vol > 85 {
                             self.pending_volume = Some(new_vol);
-                            self.overlays.open(OverlayId::VolumeConfirm);
                         } else {
-                            let tx = self.cmd_tx();
-                            let _ = tx.send(TuiCommand::SetVolume(new_vol)).await;
+                            self.send_high(TuiCommand::SetVolume(new_vol));
                             self.notify(format!("Volume: {}%", new_vol), NotificationKind::Info);
                         }
                     }
                     Some(KeyboardAction::VolumeDown) => {
                         self.set_last_action("Volume Down");
-                        let tx = self.cmd_tx();
                         let new_vol = self.state.volume.saturating_sub(5);
-                        let _ = tx.send(TuiCommand::SetVolume(new_vol)).await;
+                        self.send_high(TuiCommand::SetVolume(new_vol));
                         self.notify(format!("Volume: {}%", new_vol), NotificationKind::Info);
                     }
                     Some(KeyboardAction::SeekForward) => {
                         self.set_last_action("Seek Forward");
-                        let tx = self.cmd_tx();
                         let pos = self.display_position + 5.0;
-                        let _ = tx.send(TuiCommand::Seek(pos)).await;
+                        self.send_high(TuiCommand::Seek(pos));
                     }
                     Some(KeyboardAction::SeekBackward) => {
                         self.set_last_action("Seek Backward");
-                        let tx = self.cmd_tx();
                         let pos = (self.display_position - 5.0).max(0.0);
-                        let _ = tx.send(TuiCommand::Seek(pos)).await;
+                        self.send_high(TuiCommand::Seek(pos));
                     }
                     Some(KeyboardAction::ToggleMute) => {
                         self.set_last_action("Toggle Mute");
-                        let tx = self.cmd_tx();
-                        let _ = tx.send(TuiCommand::ToggleMute).await;
+                        self.send_high(TuiCommand::ToggleMute);
                         if self.state.mute {
                             self.notify("Unmuted", NotificationKind::Info);
                         } else {
@@ -986,19 +1121,17 @@ impl App {
                     }
                     Some(KeyboardAction::CycleRepeat) => {
                         self.set_last_action("Cycle Repeat");
-                        let tx = self.cmd_tx();
                         let new_mode = match self.state.repeat {
                             RepeatMode::Off => RepeatMode::One,
                             RepeatMode::One => RepeatMode::All,
                             RepeatMode::All => RepeatMode::Off,
                         };
-                        let _ = tx.send(TuiCommand::CycleRepeat(new_mode)).await;
+                        self.send_high(TuiCommand::CycleRepeat(new_mode));
                         self.notify(format!("Repeat: {:?}", new_mode), NotificationKind::Info);
                     }
                     Some(KeyboardAction::ToggleShuffle) => {
                         self.set_last_action("Toggle Shuffle");
-                        let tx = self.cmd_tx();
-                        let _ = tx.send(TuiCommand::ToggleShuffle).await;
+                        self.send_high(TuiCommand::ToggleShuffle);
                         if self.state.shuffle {
                             self.notify("Shuffle OFF", NotificationKind::Info);
                         } else {
@@ -1083,9 +1216,9 @@ impl App {
                                 self.settings_option = (self.settings_option + 1).min(max);
                             }
                             _ => {
-                                self.scroll_offset += 1;
-                                // Auto-scroll: keep selection visible
                                 let max_list = self.filtered_tracks().len();
+                                self.scroll_offset = (self.scroll_offset + 1).min(max_list.saturating_sub(1));
+                                // Auto-scroll: keep selection visible
                                 if self.scroll_offset >= self.list_scroll + self.viewport_items && self.list_scroll + self.viewport_items < max_list {
                                     self.list_scroll += 1;
                                 }
@@ -1103,9 +1236,9 @@ impl App {
                                     let idx = self.scroll_offset;
                                     let paths: Vec<String> = filtered.iter().map(|t| t.path.clone()).collect();
                                     let path = paths[idx].clone();
-                                    let tx = self.cmd_tx();
-                                    let _ = self.client.queue_set(paths, idx as u128).await;
-                                    let _ = tx.send(TuiCommand::Play(path)).await;
+                                    let c = self.client.clone();
+                                    tokio::spawn(async move { let _ = c.queue_set(paths, idx as u128).await; });
+                                    self.send_high(TuiCommand::Play(path));
                                 }
                             } else if self.library_category == 1 {
                                 // Albums: select album → show its tracks
@@ -1134,9 +1267,9 @@ impl App {
                                     let idx = self.scroll_offset;
                                     let paths: Vec<String> = filtered.iter().map(|t| t.path.clone()).collect();
                                     let path = paths[idx].clone();
-                                    let tx = self.cmd_tx();
-                                    let _ = self.client.queue_set(paths, idx as u128).await;
-                                    let _ = tx.send(TuiCommand::Play(path)).await;
+                                    let c = self.client.clone();
+                                    tokio::spawn(async move { let _ = c.queue_set(paths, idx as u128).await; });
+                                    self.send_high(TuiCommand::Play(path));
                                 }
                             }
                         } else if self.current_tab == Tab::Settings && !self.settings_pane_focus {
@@ -1146,7 +1279,7 @@ impl App {
                                 0 => match opt {
                                     1 => { // Mute toggle
                                         let muted = !self.state.mute;
-                                        let _ = tx.send(TuiCommand::SetVolume(if muted { 0 } else { self.state.volume })).await;
+                                        self.send_high(TuiCommand::SetVolume(if muted { 0 } else { self.state.volume }));
                                         self.state.mute = muted;
                                     }
                                     _ => {}
@@ -1158,11 +1291,13 @@ impl App {
                                             gtm_core::state::RepeatMode::One => gtm_core::state::RepeatMode::All,
                                             gtm_core::state::RepeatMode::All => gtm_core::state::RepeatMode::Off,
                                         };
-                                        let _ = self.client.cycle_repeat(next).await;
+                                        let c = self.client.clone();
+                                        tokio::spawn(async move { let _ = c.cycle_repeat(next).await; });
                                         self.state.repeat = next;
                                     }
                                     1 => { // Shuffle toggle
-                                        let _ = self.client.toggle_shuffle().await;
+                                        let c = self.client.clone();
+                                        tokio::spawn(async move { let _ = c.toggle_shuffle().await; });
                                         self.state.shuffle = !self.state.shuffle;
                                     }
                                     2 => { // Crossfade toggle
@@ -1189,16 +1324,25 @@ impl App {
                                          self.transparent_bg = !self.transparent_bg;
                                          save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
                                      }
-                                     2 => { // Sync Covers
-                                         let ipc_tx = self.ipc_tx.clone();
-                                         let c = self.client.clone();
-                                         tokio::spawn(async move {
-                                             if let Ok(DaemonRes::SyncCoversResult { synced, total, .. }) = c.library_sync_covers().await {
-                                                 let msg = format!("Covers synced: {synced}/{total} tracks");
-                                                 let _ = ipc_tx.send(IpcResult::Notification(msg, crate::app::NotificationKind::Info));
-                                             }
-                                         });
-                                     }
+                                      2 => { // Sync Covers
+                                          let ipc_tx = self.ipc_tx.clone();
+                                          let c = self.client.clone();
+                                          tokio::spawn(async move {
+                                              match c.library_sync_covers().await {
+                                                  Ok(DaemonRes::SyncCoversResult { synced, total, .. }) => {
+                                                      let msg = format!("Covers synced: {synced}/{total} tracks");
+                                                      let _ = ipc_tx.send(IpcResult::Notification(msg, crate::app::NotificationKind::Info));
+                                                  }
+                                                  Ok(DaemonRes::Error { message, .. }) => {
+                                                      let _ = ipc_tx.send(IpcResult::Notification(format!("Sync failed: {message}"), crate::app::NotificationKind::Error));
+                                                  }
+                                                  Ok(_) => {}
+                                                  Err(e) => {
+                                                      let _ = ipc_tx.send(IpcResult::Error(e.to_string()));
+                                                  }
+                                              }
+                                          });
+                                      }
                                      3 => { // Footer Preset cycle
                                          self.footer_preset = (self.footer_preset + 1) % footer::num_presets();
                                          let name = footer::presets()[self.footer_preset].name;
@@ -1286,7 +1430,6 @@ impl App {
                         self.sleep_timer_remaining = None;
                     }
                 }
-                self.pending_volume = None;
                 self.overlays.close_top();
             }
             // Queue move up/down (Ctrl+K/J) must come before plain k/j
@@ -1313,9 +1456,14 @@ impl App {
                 }
             }
             KeyCode::Up | KeyCode::Char('k') => {
-                // For overlays with input fields, only allow arrow keys (not vim keys)
                 let has_input = matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::YTSearch) | Some(OverlayId::SearchLibrary) | Some(OverlayId::CommandPalette));
-                if has_input && key.code != KeyCode::Up { return; }
+                if has_input && key.code != KeyCode::Up {
+                    // Add 'k' to the query instead of navigating
+                    if let Some(top) = self.overlays.top_mut() {
+                        top.query.push('k');
+                    }
+                    return;
+                }
                 if let Some(top) = self.overlays.top_mut() {
                     top.selected = top.selected.saturating_sub(1);
                     if top.id == OverlayId::ThemePicker {
@@ -1325,10 +1473,17 @@ impl App {
                         save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
                     }
                 }
+                self.clamp_overlay_selection();
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let has_input = matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::YTSearch) | Some(OverlayId::SearchLibrary) | Some(OverlayId::CommandPalette));
-                if has_input && key.code != KeyCode::Down { return; }
+                if has_input && key.code != KeyCode::Down {
+                    // Add 'j' to the query instead of navigating
+                    if let Some(top) = self.overlays.top_mut() {
+                        top.query.push('j');
+                    }
+                    return;
+                }
                 if let Some(top) = self.overlays.top_mut() {
                     top.selected += 1;
                     if top.id == OverlayId::ThemePicker {
@@ -1338,6 +1493,7 @@ impl App {
                         save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
                     }
                 }
+                self.clamp_overlay_selection();
             }
             KeyCode::Enter => {
                 // Dispatch based on overlay type
@@ -1347,7 +1503,7 @@ impl App {
                             if !self.queue_cache.is_empty() {
                                 let idx = top.selected.min(self.queue_cache.len() - 1);
                                 let path = self.queue_cache[idx].path.clone();
-                                let _ = tx.send(TuiCommand::Play(path)).await;
+                                self.send_high(TuiCommand::Play(path));
                             }
                         }
                         OverlayId::YTSearch => {
@@ -1374,13 +1530,6 @@ impl App {
                                 let _ = tx.send(TuiCommand::RefreshYt).await;
                             }
                         }
-                        OverlayId::VolumeConfirm => {
-                            // Volume safety confirmed
-                            if let Some(v) = self.pending_volume.take() {
-                                let _ = tx.send(TuiCommand::SetVolume(v)).await;
-                            }
-                            self.overlays.close_top();
-                        }
                         OverlayId::SleepTimer => {
                             // Set sleep timer from selected preset
                             let presets = [5u64, 10, 15, 30, 60];
@@ -1389,6 +1538,82 @@ impl App {
                             self.overlays.close_top();
                         }
                         OverlayId::CommandPalette => {
+                            let commands = crate::ui::COMMAND_PALETTE_COMMANDS;
+                            let query = top.query.to_lowercase();
+                            let filtered: Vec<&&str> = if query.is_empty() {
+                                commands.iter().collect()
+                            } else {
+                                commands.iter().filter(|c| {
+                                    let lower = c.to_lowercase();
+                                    let mut qi = 0usize;
+                                    for ch in lower.chars() {
+                                        if qi < query.len() && ch == query.as_bytes()[qi] as char {
+                                            qi += 1;
+                                        }
+                                    }
+                                    qi == query.len()
+                                }).collect()
+                            };
+                            let idx = top.selected.min(filtered.len().saturating_sub(1));
+                            if let Some(cmd) = filtered.get(idx) {
+                                let label = cmd.to_lowercase();
+                                if label.starts_with("play/pause") {
+                                    self.send_high(TuiCommand::PlayPause);
+                                } else if label.starts_with("next track") {
+                                    self.send_high(TuiCommand::Next);
+                                } else if label.starts_with("prev track") {
+                                    self.send_high(TuiCommand::Prev);
+                                } else if label.starts_with("volume up") {
+                                    let new_vol = (self.state.volume + 5).min(100);
+                                    self.send_high(TuiCommand::SetVolume(new_vol));
+                                } else if label.starts_with("volume down") {
+                                    let new_vol = self.state.volume.saturating_sub(5);
+                                    self.send_high(TuiCommand::SetVolume(new_vol));
+                                } else if label.starts_with("mute") {
+                                    self.send_high(TuiCommand::ToggleMute);
+                                } else if label.starts_with("repeat") {
+                                    let new_mode = match self.state.repeat {
+                                        RepeatMode::Off => RepeatMode::All,
+                                        RepeatMode::All => RepeatMode::One,
+                                        RepeatMode::One => RepeatMode::Off,
+                                    };
+                                    self.send_high(TuiCommand::CycleRepeat(new_mode));
+                                } else if label.starts_with("shuffle") {
+                                    self.send_high(TuiCommand::ToggleShuffle);
+                                } else if label.starts_with("quit") {
+                                    self.send_high(TuiCommand::Stop);
+                                } else if label.starts_with("tab cycle") {
+                                    self.current_tab = match self.current_tab {
+                                        Tab::NowPlaying => Tab::Library,
+                                        Tab::Library => Tab::Settings,
+                                        Tab::Settings => Tab::NowPlaying,
+                                    };
+                                } else if label.starts_with("nowplaying") {
+                                    self.current_tab = Tab::NowPlaying;
+                                } else if label.starts_with("library") {
+                                    self.current_tab = Tab::Library;
+                                } else if label.starts_with("settings") {
+                                    self.current_tab = Tab::Settings;
+                                } else if label.starts_with("queue") {
+                                    self.overlays.open(OverlayId::Queue);
+                                } else if label.starts_with("youtube") {
+                                    self.overlays.open(OverlayId::YTSearch);
+                                } else if label.starts_with("library o/l") {
+                                    self.overlays.open(OverlayId::SearchLibrary);
+                                } else if label.starts_with("eq") {
+                                    self.overlays.open(OverlayId::Equalizer);
+                                } else if label.starts_with("sleeptimer") {
+                                    self.overlays.open(OverlayId::SleepTimer);
+                                } else if label.starts_with("themepicker") {
+                                    self.overlays.open(OverlayId::ThemePicker);
+                                } else if label.starts_with("sound fx") {
+                                    self.overlays.open(OverlayId::SoundEffects);
+                                } else if label.starts_with("about") {
+                                    self.overlays.open(OverlayId::About);
+                                } else if label.starts_with("cmd palette") {
+                                    // Already here — just close
+                                }
+                            }
                             self.overlays.close_top();
                         }
                         OverlayId::Equalizer => {
@@ -1401,9 +1626,16 @@ impl App {
                                 gtm_core::state::EqPreset::Classical,
                                 gtm_core::state::EqPreset::Bass,
                                 gtm_core::state::EqPreset::Vocal,
+                                gtm_core::state::EqPreset::Electronic,
+                                gtm_core::state::EqPreset::HipHop,
+                                gtm_core::state::EqPreset::Latin,
+                                gtm_core::state::EqPreset::Acoustic,
+                                gtm_core::state::EqPreset::Podcast,
+                                gtm_core::state::EqPreset::Dance,
                             ];
-    let idx = top.selected.min(presets.len() - 1);
-    let _ = self.client.set_eq_preset(presets[idx]).await;
+                            let idx = top.selected.min(presets.len() - 1);
+                            let c = self.client.clone();
+                            tokio::spawn(async move { let _ = c.set_eq_preset(presets[idx]).await; });
                             self.overlays.close_top();
                         }
                         OverlayId::ThemePicker => {
@@ -1413,8 +1645,27 @@ impl App {
                             save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, hover_delay_secs: self.hover_delay_secs });
                             self.overlays.close_top();
                         }
+                        OverlayId::SearchLibrary => {
+                            let q = top.query.to_lowercase();
+                            let filtered: Vec<&gtm_core::track::TrackInfo> = if q.is_empty() {
+                                self.tracks_cache.iter().collect()
+                            } else {
+                                self.tracks_cache
+                                    .iter()
+                                    .filter(|t| {
+                                        t.title.to_lowercase().contains(&q)
+                                            || t.artist.to_lowercase().contains(&q)
+                                    })
+                                    .collect()
+                            };
+                            if !filtered.is_empty() {
+                                let idx = top.selected.min(filtered.len() - 1);
+                                let path = filtered[idx].path.clone();
+                                self.send_high(TuiCommand::Play(path));
+                            }
+                            self.overlays.close_top();
+                        }
                         OverlayId::SoundEffects => {
-                            // Toggle crossfade selected
                             self.overlays.close_top();
                         }
                         _ => {}
@@ -1444,7 +1695,7 @@ impl App {
             KeyCode::Char(c) => {
                 if let Some(top) = self.overlays.top_mut() {
                     match top.id {
-                        OverlayId::YTSearch | OverlayId::SearchLibrary => {
+                        OverlayId::YTSearch | OverlayId::SearchLibrary | OverlayId::CommandPalette => {
                             top.query.push(c);
                             if top.id == OverlayId::YTSearch {
                                 self.yt_search_debounce = Some(std::time::Instant::now() + Duration::from_millis(500));
@@ -1457,9 +1708,6 @@ impl App {
             KeyCode::Backspace => {
                 if let Some(top) = self.overlays.top_mut() {
                     top.query.pop();
-                    if top.id == OverlayId::YTSearch {
-                        self.yt_search_debounce = Some(std::time::Instant::now() + Duration::from_millis(500));
-                    }
                 }
             }
             _ => {}

@@ -132,6 +132,17 @@ impl Library {
         Ok(())
     }
 
+    pub fn update_cover_path(&self, id: i64, cover_path: &str) -> Result<(), String> {
+        let affected = self
+            .conn
+            .execute("UPDATE tracks SET cover_path = ?1 WHERE id = ?2", params![cover_path, id])
+            .map_err(|e| format!("update cover_path: {e}"))?;
+        if affected == 0 {
+            return Err("track not found".to_string());
+        }
+        Ok(())
+    }
+
     pub fn toggle_favourite(&self, id: i64) -> Result<bool, String> {
         self.conn
             .execute(
@@ -356,7 +367,8 @@ impl Library {
                 "SELECT id, path, title, artist, album, duration, track_number, genre, year, bitrate, samplerate, hash, cover_path, favourite
                  FROM tracks
                  WHERE title LIKE ?1 OR artist LIKE ?1 OR album LIKE ?1
-                 ORDER BY title ASC",
+                 ORDER BY title ASC
+                 LIMIT 10",
             )
             .map_err(|e| format!("prepare: {e}"))?;
         let rows = stmt
@@ -365,7 +377,7 @@ impl Library {
         rows.collect::<Result<Vec<_>, _>>().map_err(|e| format!("rows: {e}"))
     }
 
-    fn track_by_path(&self, path: &str) -> Result<Option<TrackInfo>, String> {
+    pub fn track_by_path(&self, path: &str) -> Result<Option<TrackInfo>, String> {
         let mut stmt = self
             .conn
             .prepare("SELECT id, path, title, artist, album, duration, track_number, genre, year, bitrate, samplerate, hash, cover_path, favourite FROM tracks WHERE path = ?1")

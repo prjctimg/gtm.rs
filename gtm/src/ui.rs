@@ -111,8 +111,14 @@ fn find_gtmd_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> 
 
 // ─── Layout ───
 
-pub fn render(f: &mut ratatui::Frame, app: &mut App) {
+pub fn render(f: &mut ratatui::Frame, app: &mut App, dt: std::time::Duration) {
     let area = f.area();
+    // Explicit background fill — the TUI defines its own background
+    f.render_widget(
+        ratatui::widgets::Block::default()
+            .style(ratatui::style::Style::default().bg(app.theme.bg)),
+        area,
+    );
     // help bar only shows on Now Playing tab, hidden during overlays
     let show_help = app.current_tab == Tab::NowPlaying && !app.overlays.is_open();
     let help_height: u16 = if show_help { 1 } else { 0 };
@@ -144,6 +150,9 @@ pub fn render(f: &mut ratatui::Frame, app: &mut App) {
     if app.show_hover_info && !app.overlays.is_open() {
         render_hover_popup(f, area, app);
     }
+
+    // Apply tachyonfx animations over the rendered buffer
+    app.effects.process_effects(dt.into(), f.buffer_mut(), area);
 }
 
 // ─── Tab Bar ───
@@ -208,6 +217,13 @@ fn render_notifications(f: &mut ratatui::Frame, area: Rect, app: &App) {
 // ─── Content Area ───
 
 fn render_content(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    if !app.is_ready {
+        let loading = Paragraph::new(" Loading library…")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(app.theme.fg_dim));
+        f.render_widget(loading, area);
+        return;
+    }
     match app.current_tab {
         Tab::NowPlaying => render_now_playing(f, area, app),
         Tab::Library => render_library(f, area, app),
@@ -558,15 +574,26 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     } else if app.library_category == 1 {
         // Albums browse
         let albums = app.unique_albums();
-        let sel = app.scroll_offset.min(albums.len().saturating_sub(1));
-        let st_line = format!(" {} albums ", albums.len());
+        let total_len = albums.len();
+        let sel = app.scroll_offset.min(total_len.saturating_sub(1));
+        let st_line = format!(" {} albums ", total_len);
+        let reserve = 5usize;
+        let available = panes[1].height.saturating_sub(reserve as u16) as usize;
+        app.viewport_items = available;
+        if sel >= app.list_scroll + available && app.list_scroll + available < total_len {
+            app.list_scroll = sel.saturating_add(1).saturating_sub(available);
+        } else if sel < app.list_scroll {
+            app.list_scroll = sel;
+        }
+        let end = (app.list_scroll + available).min(total_len);
         let mut lines = vec![
-            Line::from(Span::styled(format!(" {} · {} albums", category_label, albums.len()), Style::default().fg(app.theme.fg))),
+            Line::from(Span::styled(format!(" {} · {} albums", category_label, total_len), Style::default().fg(app.theme.fg))),
             Line::from(""),
         ];
-        for (i, (name, count)) in albums.iter().enumerate() {
-            let prefix = if i == sel && !left_focus { " >" } else { "  " };
-            let style = if i == sel && !left_focus {
+        for (i, (name, count)) in albums[app.list_scroll..end].iter().enumerate() {
+            let real_i = app.list_scroll + i;
+            let prefix = if real_i == sel && !left_focus { " >" } else { "  " };
+            let style = if real_i == sel && !left_focus {
                 Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
             } else {
                 Style::default().fg(app.theme.fg)
@@ -577,15 +604,26 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     } else if app.library_category == 2 {
         // Artists browse
         let artists = app.unique_artists();
-        let sel = app.scroll_offset.min(artists.len().saturating_sub(1));
-        let st_line = format!(" {} artists ", artists.len());
+        let total_len = artists.len();
+        let sel = app.scroll_offset.min(total_len.saturating_sub(1));
+        let st_line = format!(" {} artists ", total_len);
+        let reserve = 5usize;
+        let available = panes[1].height.saturating_sub(reserve as u16) as usize;
+        app.viewport_items = available;
+        if sel >= app.list_scroll + available && app.list_scroll + available < total_len {
+            app.list_scroll = sel.saturating_add(1).saturating_sub(available);
+        } else if sel < app.list_scroll {
+            app.list_scroll = sel;
+        }
+        let end = (app.list_scroll + available).min(total_len);
         let mut lines = vec![
-            Line::from(Span::styled(format!(" {} · {} artists", category_label, artists.len()), Style::default().fg(app.theme.fg))),
+            Line::from(Span::styled(format!(" {} · {} artists", category_label, total_len), Style::default().fg(app.theme.fg))),
             Line::from(""),
         ];
-        for (i, (name, count)) in artists.iter().enumerate() {
-            let prefix = if i == sel && !left_focus { " >" } else { "  " };
-            let style = if i == sel && !left_focus {
+        for (i, (name, count)) in artists[app.list_scroll..end].iter().enumerate() {
+            let real_i = app.list_scroll + i;
+            let prefix = if real_i == sel && !left_focus { " >" } else { "  " };
+            let style = if real_i == sel && !left_focus {
                 Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
             } else {
                 Style::default().fg(app.theme.fg)
@@ -596,15 +634,26 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     } else if app.library_category == 3 {
         // Playlists browse
         let playlists = &app.playlist_cache;
-        let sel = app.scroll_offset.min(playlists.len().saturating_sub(1));
-        let st_line = format!(" {} playlists ", playlists.len());
+        let total_len = playlists.len();
+        let sel = app.scroll_offset.min(total_len.saturating_sub(1));
+        let st_line = format!(" {} playlists ", total_len);
+        let reserve = 5usize;
+        let available = panes[1].height.saturating_sub(reserve as u16) as usize;
+        app.viewport_items = available;
+        if sel >= app.list_scroll + available && app.list_scroll + available < total_len {
+            app.list_scroll = sel.saturating_add(1).saturating_sub(available);
+        } else if sel < app.list_scroll {
+            app.list_scroll = sel;
+        }
+        let end = (app.list_scroll + available).min(total_len);
         let mut lines = vec![
-            Line::from(Span::styled(format!(" {} · {} playlists", category_label, playlists.len()), Style::default().fg(app.theme.fg))),
+            Line::from(Span::styled(format!(" {} · {} playlists", category_label, total_len), Style::default().fg(app.theme.fg))),
             Line::from(""),
         ];
-        for (i, pl) in playlists.iter().enumerate() {
-            let prefix = if i == sel && !left_focus { " >" } else { "  " };
-            let style = if i == sel && !left_focus {
+        for (i, pl) in playlists[app.list_scroll..end].iter().enumerate() {
+            let real_i = app.list_scroll + i;
+            let prefix = if real_i == sel && !left_focus { " >" } else { "  " };
+            let style = if real_i == sel && !left_focus {
                 Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
             } else {
                 Style::default().fg(app.theme.fg)
@@ -910,7 +959,6 @@ fn render_overlay(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         OverlayId::Queue => render_queue_overlay(f, inner, app),
         OverlayId::YTSearch => render_yt_search_overlay(f, inner, app),
         OverlayId::SearchLibrary => render_search_library_overlay(f, inner, app),
-        OverlayId::VolumeConfirm => render_volume_confirm_overlay(f, inner, app),
         OverlayId::About => render_about_overlay(f, inner, app),
         OverlayId::SleepTimer => render_sleep_timer_overlay(f, inner, app),
         OverlayId::CommandPalette => render_command_palette_overlay(f, inner, app),
@@ -1089,34 +1137,20 @@ fn render_search_library_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) 
     f.render_widget(list, chunks[1]);
 }
 
-fn render_volume_confirm_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let vol = app.pending_volume.unwrap_or(app.state.volume);
-    let lines = vec![
-        Line::from(Span::styled(
-            format!(" Setting volume to {}% may be unsafe for hearing.", vol),
-            Style::default().fg(app.theme.error).add_modifier(Modifier::BOLD),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            " Are you sure you want to continue?",
-            Style::default().fg(app.theme.warning),
-        )),
-        Line::from(""),
-        Line::from(Span::styled(
-            " [Enter] Yes    [Esc] Cancel",
-            Style::default().fg(app.theme.fg_dim),
-        )),
-    ];
-
-    let p = Paragraph::new(lines)
-        .alignment(Alignment::Center)
-        .style(Style::default().bg(app.theme.overlay_bg));
-    f.render_widget(p, area);
-}
-
 // ─── Footer ───
 
 fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    // Volume safety prompt: shown inline in the footer
+    if app.pending_volume.is_some() {
+        let vol = app.pending_volume.unwrap_or(app.state.volume);
+        let prompt = format!("Volume >{}%? [Enter] Yes [Esc] No", vol);
+        f.render_widget(
+            Paragraph::new(prompt)
+                .style(Style::default().fg(app.theme.fg_bright).bg(app.theme.error)),
+            area,
+        );
+        return;
+    }
     match app.input_mode {
         InputMode::Normal => {
             let presets = crate::footer::presets();
@@ -1261,42 +1295,60 @@ fn render_sleep_timer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(list, area);
 }
 
+pub const COMMAND_PALETTE_COMMANDS: &[&str] = &[
+    "Play/Pause   [Space]",
+    "Next Track   [n]",
+    "Prev Track   [p]",
+    "Volume Up    [+]",
+    "Volume Down  [-]",
+    "Mute Toggle  [m]",
+    "Repeat       [r]",
+    "Shuffle      [h]",
+    "Quit         [q]",
+    "Tab Cycle    [Tab]",
+    "NowPlaying   [1]",
+    "Library      [2]",
+    "Settings     [3]",
+    "Search       [/]",
+    "Command      [:]",
+    "Queue O/L    [Alt+Q]",
+    "YouTube O/L  [Alt+Y]",
+    "Library O/L  [Alt+F]",
+    "EQ O/L       [Alt+E]",
+    "SleepTimer   [Alt+Z]",
+    "ThemePicker  [Alt+T]",
+    "Sound FX O/L [Alt+X]",
+    "About O/L    [Alt+A]",
+    "Spotify O/L  [Alt+S]",
+    "Cmd Palette  [Alt+P]",
+];
+
 fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let commands = [
-        "Play/Pause   [Space]",
-        "Next Track   [n]",
-        "Prev Track   [p]",
-        "Volume Up    [+]",
-        "Volume Down  [-]",
-        "Mute Toggle  [m]",
-        "Repeat       [r]",
-        "Shuffle      [h]",
-        "Quit         [q]",
-        "Tab Cycle    [Tab]",
-        "NowPlaying   [1]",
-        "Library      [2]",
-        "Settings     [3]",
-        "Search       [/]",
-        "Command      [:]",
-        "Queue O/L    [Alt+Q]",
-        "YouTube O/L  [Alt+Y]",
-        "Library O/L  [Alt+F]",
-        "EQ O/L       [Alt+E]",
-        "SleepTimer   [Alt+Z]",
-        "ThemePicker  [Alt+T]",
-        "Sound FX O/L [Alt+X]",
-        "About O/L    [Alt+A]",
-        "Spotify O/L  [Alt+S]",
-        "Cmd Palette  [Alt+P]",
-    ];
+    let commands = COMMAND_PALETTE_COMMANDS;
 
     let query = app.overlays.top().map_or(String::new(), |o| o.query.clone());
     let q = query.to_lowercase();
-    let filtered: Vec<&&str> = if q.is_empty() {
-        commands.iter().collect()
+    let mut filtered: Vec<(&&str, usize)> = if q.is_empty() {
+        commands.iter().map(|c| (c, 0)).collect()
     } else {
-        commands.iter().filter(|c| c.to_lowercase().contains(&q)).collect()
+        commands.iter().filter_map(|c| {
+            let lower = c.to_lowercase();
+            // Fuzzy subsequence match: each char in q must appear in order
+            let mut qi = 0usize;
+            for ch in lower.chars() {
+                if qi < q.len() && ch == q.as_bytes()[qi] as char {
+                    qi += 1;
+                }
+            }
+            if qi == q.len() {
+                Some((c, qi))
+            } else {
+                None
+            }
+        }).collect()
     };
+    // Sort by score descending (longer match = better)
+    filtered.sort_by(|a, b| b.1.cmp(&a.1));
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -1311,7 +1363,7 @@ fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App)
     let list_items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
-        .map(|(i, cmd)| {
+        .map(|(i, (cmd, _score))| {
             let prefix = if i == sel { " > " } else { "   " };
             let style = if i == sel {
                 Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
@@ -1340,6 +1392,12 @@ fn render_equalizer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         ("Classical", EqPreset::Classical),
         ("Bass",      EqPreset::Bass),
         ("Vocal",     EqPreset::Vocal),
+        ("Electronic",EqPreset::Electronic),
+        ("Hip-Hop",   EqPreset::HipHop),
+        ("Latin",     EqPreset::Latin),
+        ("Acoustic",  EqPreset::Acoustic),
+        ("Podcast",   EqPreset::Podcast),
+        ("Dance",     EqPreset::Dance),
     ];
 
     let sel = app.overlays.top().map_or(0, |o| o.selected.min(presets.len() - 1));
