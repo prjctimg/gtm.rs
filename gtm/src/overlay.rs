@@ -1,3 +1,9 @@
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// Overlay system — floating panels accessible via Alt+key from any tab
+//
+// This is free software released under the GPL-3.0 license.
+
 //! Overlay system — floating panels accessible via Alt+key from any tab.
 //!
 //! Each overlay is a self-contained UI module that renders on top of the

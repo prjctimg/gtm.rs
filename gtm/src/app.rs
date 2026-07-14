@@ -1,3 +1,9 @@
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// Application state machine: input handling, IPC dispatch, crossfade
+//
+// This is free software released under the GPL-3.0 license.
+
 use std::path::Path;
 use std::time::Duration;
 
@@ -458,9 +464,11 @@ impl App {
             let current_tid = self.state.current_track.as_ref().map(|t| t.id);
             if current_tid != self.prev_track_id {
                 self.prev_track_id = current_tid;
-                self.effects.add_effect(
-                    fx::coalesce((350, Interpolation::SineOut))
-                );
+                if self.current_tab == Tab::NowPlaying {
+                    self.effects.add_effect(
+                        fx::coalesce((350, Interpolation::SineOut))
+                    );
+                }
             }
             if self.state.status != self.prev_status {
                 self.prev_status = self.state.status;
@@ -476,10 +484,11 @@ impl App {
             }
             if self.last_cover_track_id != self.prev_cover_id {
                 self.prev_cover_id = self.last_cover_track_id;
-                // Subtle glow on cover / metadata update
-                self.effects.add_effect(
-                    fx::fade_from_fg(Color::Black, (180, Interpolation::QuadOut))
-                );
+                if self.current_tab == Tab::NowPlaying {
+                    self.effects.add_effect(
+                        fx::fade_from_fg(Color::Black, (180, Interpolation::QuadOut))
+                    );
+                }
             }
 
             // Hover popup: show immediately on scroll when right-pane focused,
@@ -1388,6 +1397,12 @@ impl App {
                                         let _ = tx.send(TuiCommand::SetCrossfadeEasing(next)).await;
                                         if let Some(ref mut cf) = self.state.crossfade { cf.easing = next; }
                                     }
+                                    4 => { // EQ Enabled toggle
+                                        let new_enabled = !self.state.eq_enabled;
+                                        self.state.eq_enabled = new_enabled;
+                                        let c = self.client.clone();
+                                        tokio::spawn(async move { let _ = c.set_eq_enabled(new_enabled).await; });
+                                    }
                                     _ => {}
                                 },
                                  3 => match opt {
@@ -1734,6 +1749,8 @@ impl App {
                                 gtm_core::state::EqPreset::Acoustic,
                                 gtm_core::state::EqPreset::Podcast,
                                 gtm_core::state::EqPreset::Dance,
+                                gtm_core::state::EqPreset::Headphones,
+                                gtm_core::state::EqPreset::Speaker,
                             ];
                             let idx = top.selected.min(presets.len() - 1);
                             let c = self.client.clone();
@@ -1859,6 +1876,8 @@ impl App {
                     gtm_core::state::EqPreset::Acoustic,
                     gtm_core::state::EqPreset::Podcast,
                     gtm_core::state::EqPreset::Dance,
+                    gtm_core::state::EqPreset::Headphones,
+                    gtm_core::state::EqPreset::Speaker,
                 ];
                 let idx = top.selected.min(presets.len() - 1);
                 self.send_high(TuiCommand::SetEqPreset(presets[idx]));

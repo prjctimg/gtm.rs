@@ -1,3 +1,9 @@
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// Daemon event loop, IPC command handlers, and audio event processing
+//
+// This is free software released under the GPL-3.0 license.
+
 //! Daemon event loop, IPC command handlers, and audio event processing.
 //!
 //! ```text
@@ -434,6 +440,7 @@ impl Daemon {
             DaemonReq::YtResolveStream { url } => self.cmd_yt_resolve_stream(url).await,
             DaemonReq::GetStatus => self.cmd_get_status().await,
             DaemonReq::SetEqPreset { preset } => self.cmd_set_eq_preset(*preset).await,
+            DaemonReq::SetEqEnabled { enabled } => self.cmd_set_eq_enabled(*enabled).await,
             DaemonReq::SetReverb { enabled, room_size } => self.cmd_set_reverb(*enabled, *room_size).await,
             DaemonReq::GetCoverArt { track_id } => self.cmd_get_cover_art(*track_id).await,
             DaemonReq::Ping => Ok(DaemonRes::Pong),
@@ -564,24 +571,31 @@ impl Daemon {
                             Some(state.queue[state.queue_cursor as usize].clone());
                     }
                     let track = state.current_track.clone();
-                    let dur = state.duration;
                     drop(state);
                     if let Some(t) = track {
                         self.push_event(DaemonEvent::PlaybackStarted {
-                            track: t,
+                            track: t.clone(),
                             auto_advanced: true,
                             time_pos: actual,
-                            duration: dur,
+                            duration: t.duration as f64,
                         });
                     }
                 } else {
+                    // No crossfade — try advancing to the next track.
+                    // Don't push TrackEnded yet; cmd_next() will either
+                    // push PlaybackStarted (crossfade or play) or we push
+                    // TrackEnded if there's no next track.
                     let mut state = self.state.write().await;
                     state.status = PlaybackStatus::Stopped;
                     state.time_pos = 0.0;
                     state.current_track = None;
                     drop(state);
-                    self.push_event(DaemonEvent::TrackEnded);
-                    let _ = self.cmd_next().await;
+                    let res = self.cmd_next().await;
+                    // If cmd_next didn't start playback (end of queue, error),
+                    // notify the client.
+                    if res.is_err() || self.state.read().await.status == PlaybackStatus::Stopped {
+                        self.push_event(DaemonEvent::TrackEnded);
+                    }
                 }
             }
             AudioEvent::Error(msg) => {
@@ -817,6 +831,20 @@ impl Daemon {
                         .unwrap_or_default()
                 );
                 self.push_event(DaemonEvent::QueueIndexChanged { index: idx });
+                let dur = self.mixer.duration();
+                {
+                    let mut st = self.state.write().await;
+                    st.status = PlaybackStatus::Playing;
+                    st.current_track = Some(track.clone());
+                    st.time_pos = 0.0;
+                    st.duration = dur;
+                }
+                self.push_event(DaemonEvent::PlaybackStarted {
+                    track,
+                    auto_advanced: true,
+                    time_pos: 0.0,
+                    duration: dur,
+                });
                 return Ok(DaemonRes::Ok { version: self.state.read().await.version as u32 });
             }
         }
@@ -857,6 +885,20 @@ impl Daemon {
                         .unwrap_or_default()
                 );
                 self.push_event(DaemonEvent::QueueIndexChanged { index: idx });
+                let dur = self.mixer.duration();
+                {
+                    let mut st = self.state.write().await;
+                    st.status = PlaybackStatus::Playing;
+                    st.current_track = Some(track.clone());
+                    st.time_pos = 0.0;
+                    st.duration = dur;
+                }
+                self.push_event(DaemonEvent::PlaybackStarted {
+                    track,
+                    auto_advanced: true,
+                    time_pos: 0.0,
+                    duration: dur,
+                });
                 return Ok(DaemonRes::Ok { version: self.state.read().await.version as u32 });
             }
         }
@@ -977,6 +1019,20 @@ impl Daemon {
         Ok(DaemonRes::Ok { version })
     }
 
+    async fn cmd_set_eq_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> Result<DaemonRes, CoreError> {
+        let mut state = self.state.write().await;
+        state.eq_enabled = enabled;
+        state.version += 1;
+        let version = state.version as u32;
+        drop(state);
+        self.mixer.set_eq_enabled(enabled);
+        self.push_event(DaemonEvent::EqEnabledChanged { enabled });
+        Ok(DaemonRes::Ok { version })
+    }
+
     async fn cmd_set_reverb(
         &mut self,
         enabled: bool,
@@ -1060,7 +1116,9 @@ impl Daemon {
                     drop(state);
                     self.push_event(DaemonEvent::QueueChanged { queue, cursor });
                     if was_empty {
-                        return self.cmd_play(path, 0.0).await;
+                        // Auto-play; if it fails (e.g. file missing), still
+                        // report success for the queue operation.
+                        let _ = self.cmd_play(path, 0.0).await;
                     }
                 }
                 let version = self.state.read().await.version as u32;
@@ -1079,7 +1137,7 @@ impl Daemon {
                     drop(state);
                     self.push_event(DaemonEvent::QueueChanged { queue, cursor });
                     if was_empty {
-                        return self.cmd_play(&first_path, 0.0).await;
+                        let _ = self.cmd_play(&first_path, 0.0).await;
                     }
                 }
                 let version = self.state.read().await.version as u32;

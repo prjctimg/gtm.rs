@@ -1,3 +1,9 @@
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// Library management: audio file scanning, metadata extraction, and persistence
+//
+// This is free software released under the GPL-3.0 license.
+
 use std::fs;
 use std::fs::File;
 use std::path::PathBuf;

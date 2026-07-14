@@ -40,6 +40,7 @@ impl DaemonState {
             duration: 0.0,
             sleep_timer: None,
             eq_preset: crate::state::EqPreset::Flat,
+            eq_enabled: true,
             reverb: ReverbConfig::default(),
         }
     }

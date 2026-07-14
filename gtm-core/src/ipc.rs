@@ -138,6 +138,9 @@ pub enum DaemonEvent {
     EqPresetChanged {
         preset: state::EqPreset,
     },
+    EqEnabledChanged {
+        enabled: bool,
+    },
     ReverbChanged {
         enabled: bool,
         room_size: f32,
@@ -181,6 +184,9 @@ pub enum DaemonReq {
     },
     SetEqPreset {
         preset: state::EqPreset,
+    },
+    SetEqEnabled {
+        enabled: bool,
     },
     SetReverb {
         enabled: bool,

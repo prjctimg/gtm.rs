@@ -1,3 +1,9 @@
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// Mixer trait and rodio-based implementation with EQ, reverb, and crossfade
+//
+// This is free software released under the GPL-3.0 license.
+
 use std::fs::File;
 use std::io::BufReader;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
@@ -36,6 +42,7 @@ pub trait Mixer: Send + Sync {
 
     // ─── EQ / Reverb ───
     fn set_eq_preset(&self, preset: &EqPreset);
+    fn set_eq_enabled(&self, enabled: bool);
     fn set_reverb(&self, config: &ReverbConfig);
 }
 
@@ -79,6 +86,7 @@ pub struct AudioMixer {
     crossfade_easing: Easing,
     // ─── EQ / Reverb ───
     pub eq_gains: EqGains,
+    eq_enabled: Arc<AtomicBool>,
     reverb_enabled: Arc<AtomicBool>,
     reverb_room_size: Arc<Mutex<f32>>,
 }
@@ -151,6 +159,10 @@ impl Mixer for AudioMixer {
         self.eq_gains.apply_preset(preset);
     }
 
+    fn set_eq_enabled(&self, enabled: bool) {
+        self.eq_enabled.store(enabled, Ordering::Relaxed);
+    }
+
     fn set_reverb(&self, config: &ReverbConfig) {
         self.reverb_enabled.store(config.enabled, Ordering::Relaxed);
         *self.reverb_room_size.lock().unwrap() = config.room_size;
@@ -189,6 +201,7 @@ impl AudioMixer {
             stored_volume: 100,
             last_reported_pos: f64::NEG_INFINITY,
             eq_gains: EqGains::new_flat(),
+            eq_enabled: Arc::new(AtomicBool::new(true)),
             reverb_enabled: Arc::new(AtomicBool::new(false)),
             reverb_room_size: Arc::new(Mutex::new(0.3)),
         })
@@ -226,12 +239,17 @@ impl AudioMixer {
 
     /// Wrap a decoded source with EQ and optional reverb.
     fn wrap_source(&self, source: Box<dyn Source<Item = f32> + Send>) -> Box<dyn Source<Item = f32> + Send> {
-        let eq = EqSource::new(source, self.eq_gains.clone());
+        // Apply EQ only when enabled
+        let boxed: Box<dyn Source<Item = f32> + Send> = if self.eq_enabled.load(Ordering::Relaxed) {
+            Box::new(EqSource::new(source, self.eq_gains.clone()))
+        } else {
+            source
+        };
         if self.reverb_enabled.load(Ordering::Relaxed) {
             let room_size = *self.reverb_room_size.lock().unwrap();
-            Box::new(ReverbSource::new(eq, room_size, self.reverb_enabled.clone()))
+            Box::new(ReverbSource::new(boxed, room_size, self.reverb_enabled.clone()))
         } else {
-            Box::new(eq)
+            boxed
         }
     }
 

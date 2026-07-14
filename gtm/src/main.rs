@@ -1,3 +1,9 @@
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// GTM music player — single binary, TUI + CLI modes
+//
+// This is free software released under the GPL-3.0 license.
+
 //! GTM music player — single binary, TUI + CLI modes.
 //!
 //! ```text

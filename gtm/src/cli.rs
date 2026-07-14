@@ -1,3 +1,9 @@
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// CLI mode: dispatches subcommands to the daemon via IPC
+//
+// This is free software released under the GPL-3.0 license.
+
 //! CLI mode: dispatches subcommands to the daemon via IPC.
 //!
 //! ```text

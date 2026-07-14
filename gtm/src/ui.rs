@@ -1,3 +1,9 @@
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// TUI rendering: tab layout, overlays, library, now-playing, settings
+//
+// This is free software released under the GPL-3.0 license.
+
 use std::path::PathBuf;
 
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
@@ -797,6 +803,7 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
                     "Crossfade       [ ○ ]  Off".to_string()
                 },
                 format!("Easing          [ {}   ▶ ]", easing),
+                format!("EQ Enabled      [ {} ]", if app.state.eq_enabled { "●   On " } else { "○   Off" }),
             ]
         }
         3 => {
@@ -854,6 +861,10 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
         (2, 3) => {
             let easing = app.state.crossfade.as_ref().map(|c| format!("{:?}", c.easing)).unwrap_or_else(|| "N/A".into());
             lines.push(Line::from(Span::styled(format!(" Easing: Press Enter to cycle (current: {}). Controls crossfade volume curve.", easing), Style::default().fg(app.theme.fg))));
+        }
+        (2, 4) => {
+            let eq_on = app.state.eq_enabled;
+            lines.push(Line::from(Span::styled(if eq_on { " EQ: On. Press Enter to disable the equalizer." } else { " EQ: Off. Press Enter to enable the equalizer." }, Style::default().fg(app.theme.fg))));
         }
         (3, 0) => lines.push(Line::from(Span::styled(" Theme: Press Enter to open the Theme Picker overlay (Alt+C).", Style::default().fg(app.theme.fg)))),
         (3, 1) => lines.push(Line::from(Span::styled(" Transparent BG: Press Enter to toggle. When on, overlay backgrounds become transparent.", Style::default().fg(app.theme.fg)))),
@@ -1482,6 +1493,8 @@ fn render_equalizer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         ("Acoustic",  EqPreset::Acoustic),
         ("Podcast",   EqPreset::Podcast),
         ("Dance",     EqPreset::Dance),
+        ("Headphones",EqPreset::Headphones),
+        ("Speaker",   EqPreset::Speaker),
     ];
 
     let sel = app.overlays.top().map_or(0, |o| o.selected.min(presets.len() - 1));

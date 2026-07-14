@@ -1,5 +1,9 @@
-// Real-time 15-band parametric EQ and reverb using fundsp.
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// Real-time 15-band parametric EQ and reverb using fundsp
 //
+// This is free software released under the GPL-3.0 license.
+
 // `EqSource` wraps a `rodio::Source` and applies per-sample EQ via shared
 // atomic gain values, allowing the mixer thread to change presets without
 // restarting the stream.

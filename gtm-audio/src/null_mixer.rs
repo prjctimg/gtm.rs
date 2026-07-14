@@ -1,3 +1,9 @@
+// Copyright (c) 2025 - present
+// Author: prjctimg <prjctimg@outlook.com>
+// No-op mixer for headless/daemon mode without audio output
+//
+// This is free software released under the GPL-3.0 license.
+
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Mutex;
 
@@ -124,5 +130,6 @@ impl Mixer for NullMixer {
     }
 
     fn set_eq_preset(&self, _preset: &EqPreset) {}
+    fn set_eq_enabled(&self, _enabled: bool) {}
     fn set_reverb(&self, _config: &ReverbConfig) {}
 }
