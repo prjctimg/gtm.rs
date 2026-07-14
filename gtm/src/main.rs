@@ -85,6 +85,7 @@ enum CliCommand {
     DeletePlaylist { id: i64 },
     AddToPlaylist { playlist_id: i64, track_ids: Vec<i64> },
     ImportM3u { path: String },
+    ExportM3u { playlist_id: i64, path: String },
     Recent { count: u128 },
     Favourites,
     FavouriteAdd { track_id: i64 },

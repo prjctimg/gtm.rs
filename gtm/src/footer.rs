@@ -1,5 +1,6 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
+use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
 use ratatui::Frame;
 
@@ -81,8 +82,11 @@ pub fn render_preset(f: &mut Frame, area: Rect, app: &App, preset: &FooterPreset
         .chain(preset.z.iter())
         .collect();
 
-    let left_str = render_modules(&left_modules, app);
-    let right_str = render_modules(&right_modules, app);
+    let left_parts = render_modules(&left_modules, app);
+    let right_parts = render_modules(&right_modules, app);
+
+    let left_str: String = left_parts.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(" ");
+    let right_str: String = right_parts.iter().map(|(s, _)| s.as_str()).collect::<Vec<_>>().join(" ");
 
     let left_w = if left_str.is_empty() { 0u16 } else { left_str.len() as u16 + 2 };
     let right_w = if right_str.is_empty() { 0u16 } else { right_str.len() as u16 + 2 };
@@ -91,22 +95,20 @@ pub fn render_preset(f: &mut Frame, area: Rect, app: &App, preset: &FooterPreset
     let is_playing = app.state.status == PlaybackStatus::Playing;
 
     let left_bg = if is_playing { app.theme.accent } else { app.theme.fg_dim };
-    let left_fg = if is_playing {
-        crate::ui::readable_fg(app.theme.accent, app.theme.overlay_bg, app.theme.fg_bright)
-    } else {
-        app.theme.overlay_bg
-    };
 
     if left_w == 0 && right_w == 0 {
         return;
     }
 
     if total_needed as u16 >= area.width {
-        // Only show left side when too narrow
-        let left_text = format!(" {} ", left_str);
+        let mut spans = Vec::new();
+        for (i, (text, color)) in left_parts.iter().enumerate() {
+            if i > 0 { spans.push(Span::raw(" ")); }
+            spans.push(Span::styled(text.clone(), Style::default().fg(*color)));
+        }
         f.render_widget(
-            Paragraph::new(left_text)
-                .style(Style::default().fg(left_fg).bg(left_bg)),
+            Paragraph::new(Line::from(spans))
+                .style(Style::default().bg(left_bg)),
             area,
         );
         return;
@@ -118,47 +120,76 @@ pub fn render_preset(f: &mut Frame, area: Rect, app: &App, preset: &FooterPreset
         .split(area);
 
     if left_w > 0 {
-        let left_text = format!(" {} ", left_str);
+        let mut spans = Vec::new();
+        spans.push(Span::raw(" "));
+        for (i, (text, color)) in left_parts.iter().enumerate() {
+            if i > 0 { spans.push(Span::raw(" ")); }
+            spans.push(Span::styled(text.clone(), Style::default().fg(*color)));
+        }
+        spans.push(Span::raw(" "));
         f.render_widget(
-            Paragraph::new(left_text)
-                .style(Style::default().fg(left_fg).bg(left_bg)),
+            Paragraph::new(Line::from(spans))
+                .style(Style::default().bg(left_bg)),
             chunks[0],
         );
     }
 
     if right_w > 0 {
-        let right_text = format!(" {} ", right_str);
+        let mut spans = Vec::new();
+        spans.push(Span::raw(" "));
+        for (i, (text, color)) in right_parts.iter().enumerate() {
+            if i > 0 { spans.push(Span::raw(" ")); }
+            spans.push(Span::styled(text.clone(), Style::default().fg(*color)));
+        }
+        spans.push(Span::raw(" "));
         f.render_widget(
-            Paragraph::new(right_text)
-                .style(Style::default().fg(app.theme.fg_bright).bg(app.theme.border)),
+            Paragraph::new(Line::from(spans))
+                .style(Style::default().bg(app.theme.border)),
             chunks[1],
         );
     }
 }
 
-fn render_modules(modules: &[&FooterModule], app: &App) -> String {
+fn module_color(m: &FooterModule) -> ratatui::style::Color {
+    use ratatui::style::Color;
+    match m {
+        FooterModule::Playback => Color::Rgb(0, 255, 200),   // cyan-neon
+        FooterModule::Title => Color::Rgb(255, 200, 0),       // amber
+        FooterModule::Volume => Color::Rgb(255, 100, 255),    // magenta
+        FooterModule::Repeat => Color::Rgb(100, 200, 255),    // sky
+        FooterModule::Shuffle => Color::Rgb(255, 150, 50),    // orange
+        FooterModule::Progress => Color::Rgb(100, 255, 100),  // green
+        FooterModule::Queue => Color::Rgb(200, 150, 255),     // lavender
+        FooterModule::Clock => Color::Rgb(200, 200, 200),     // gray
+        FooterModule::KeyAction => Color::Rgb(255, 255, 100), // yellow
+        FooterModule::Backend => Color::Rgb(150, 200, 255),   // light-blue
+        FooterModule::System => Color::Rgb(200, 200, 200),    // gray
+        FooterModule::Device => Color::Rgb(200, 200, 200),    // gray
+    }
+}
+
+fn render_modules(modules: &[&FooterModule], app: &App) -> Vec<(String, ratatui::style::Color)> {
     let mut parts = Vec::new();
     for m in modules {
-        match m {
-            FooterModule::Playback => parts.push(render_playback(app)),
-            FooterModule::Title => parts.push(render_title(app)),
-            FooterModule::Volume => parts.push(render_volume(app)),
-            FooterModule::Repeat => parts.push(render_repeat(app)),
-            FooterModule::Shuffle => parts.push(render_shuffle(app)),
-            FooterModule::Progress => parts.push(render_progress(app)),
-            FooterModule::Queue => parts.push(render_queue(app)),
-            FooterModule::Clock => parts.push(render_clock()),
-            FooterModule::KeyAction => parts.push(render_keyaction(app)),
-            FooterModule::Backend => parts.push(render_backend()),
-            FooterModule::System => parts.push(render_system()),
-            FooterModule::Device => parts.push(render_device()),
+        let text = match m {
+            FooterModule::Playback => render_playback(app),
+            FooterModule::Title => render_title(app),
+            FooterModule::Volume => render_volume(app),
+            FooterModule::Repeat => render_repeat(app),
+            FooterModule::Shuffle => render_shuffle(app),
+            FooterModule::Progress => render_progress(app),
+            FooterModule::Queue => render_queue(app),
+            FooterModule::Clock => render_clock(),
+            FooterModule::KeyAction => render_keyaction(app),
+            FooterModule::Backend => render_backend(),
+            FooterModule::System => render_system(),
+            FooterModule::Device => render_device(),
+        };
+        if !text.is_empty() {
+            parts.push((text, module_color(m)));
         }
     }
-    parts.iter().filter(|s| !s.is_empty()).fold(String::new(), |mut acc, s| {
-        if !acc.is_empty() { acc.push(' '); }
-        acc.push_str(s);
-        acc
-    })
+    parts
 }
 
 fn render_playback(app: &App) -> String {
@@ -170,7 +201,7 @@ fn render_playback(app: &App) -> String {
 }
 
 fn render_title(app: &App) -> String {
-    app.state.current_track.as_ref().map_or_else(
+    let raw = app.state.current_track.as_ref().map_or_else(
         || String::new(),
         |t| {
             if t.artist.is_empty() {
@@ -179,7 +210,13 @@ fn render_title(app: &App) -> String {
                 format!("{} \u{2013} {}", t.artist, t.title)
             }
         },
-    )
+    );
+    if raw.len() > 30 {
+        let s = raw.chars().cycle().skip(app.footer_title_scroll % raw.len()).take(30).collect::<String>();
+        format!("{} \u{2026}", s)
+    } else {
+        raw
+    }
 }
 
 fn render_volume(app: &App) -> String {

@@ -19,6 +19,7 @@ pub enum OverlayId {
     SleepTimer,
     ThemePicker,
     SoundEffects,
+    Help,
 }
 
 /// Active overlay instance — state + metadata.
@@ -110,6 +111,7 @@ impl OverlayId {
             OverlayId::SleepTimer => "Sleep Timer",
                 OverlayId::ThemePicker => "Theme",
             OverlayId::SoundEffects => "Sound Effects",
+            OverlayId::Help => "Help",
         }
     }
 }

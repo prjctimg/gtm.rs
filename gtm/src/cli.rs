@@ -211,6 +211,11 @@ pub fn run(socket: Option<String>, json: bool, cmd: &CliCommand) {
                 .await
                 .map(|v| format!("ok version={v}"))
                 .map_err(|e| e.to_string()),
+            CliCommand::ExportM3u { playlist_id, path } => client
+                .library_export_m3u(*playlist_id, path)
+                .await
+                .map(|v| format!("ok version={v}"))
+                .map_err(|e| e.to_string()),
             CliCommand::Recent { count } => {
                 let res = client
                     .library_get_recent(*count)

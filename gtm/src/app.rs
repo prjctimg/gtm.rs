@@ -7,6 +7,8 @@ use gtm_core::ipc::DaemonRes;
 use gtm_core::state::{DaemonState, Easing, PlaybackStatus, RepeatMode, Tab};
 use gtm_core::track::{Playlist, TrackInfo, YTSearchResult};
 use ratatui::Terminal;
+use ratatui_image::picker::Picker;
+use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
 
 use base64::Engine;
@@ -64,12 +66,10 @@ fn save_prefs(prefs: &Prefs) {
 pub const NUM_SETTINGS_CATEGORIES: usize = 5;
 pub const LIBRARY_CATEGORIES: &[&str] = &[
     "All Tracks",
+    "♥ Liked",
     "Albums",
     "Artists",
     "Playlists",
-    "Recently Added",
-    "Most Played",
-    "Least Played",
     "Spotify",
     "Downloads",
 ];
@@ -133,6 +133,8 @@ pub struct App {
     pub playback_speed: f64,
     pub current_cover: Option<Vec<u8>>,
     pub last_cover_track_id: Option<i64>,
+    pub cover_picker: Option<Picker>,
+    pub cover_stateful: Option<StatefulProtocol>,
     pub cmd_rx: mpsc::Receiver<TuiCommand>,
     cmd_tx: mpsc::Sender<TuiCommand>,
     high_pri_cmd_rx: mpsc::UnboundedReceiver<TuiCommand>,
@@ -151,6 +153,7 @@ pub struct App {
     pub footer_preset: usize,
     pub hover_delay_secs: u64,
     pub title_scroll: usize,
+    pub footer_title_scroll: usize,
     pub is_ready: bool,
     last_queue_cursor: u128,
     last_track_id_display: Option<i64>,
@@ -160,6 +163,7 @@ pub struct App {
     prev_track_id: Option<i64>,
     prev_status: gtm_core::state::PlaybackStatus,
     prev_volume: u8,
+    prev_cover_id: Option<i64>,
 }
 
 enum IpcResult {
@@ -250,6 +254,8 @@ impl App {
             playback_speed: 1.0,
             current_cover: None,
             last_cover_track_id: None,
+            cover_picker: None,
+            cover_stateful: None,
             cmd_rx,
             cmd_tx,
             high_pri_cmd_rx,
@@ -268,6 +274,7 @@ impl App {
             footer_preset: prefs.footer_preset.min(footer::num_presets().saturating_sub(1)),
             hover_delay_secs: prefs.hover_delay_secs.min(5),
             title_scroll: 0,
+            footer_title_scroll: 0,
             is_ready: false,
             last_queue_cursor: initial_cursor,
             last_track_id_display: None,
@@ -277,6 +284,7 @@ impl App {
             prev_track_id: None,
             prev_status: gtm_core::state::PlaybackStatus::Stopped,
             prev_volume: 100,
+            prev_cover_id: None,
         })
     }
 
@@ -316,6 +324,14 @@ impl App {
         self.fetch_library_tracks().await;
         self.is_ready = true;
 
+        // Initialize cover image picker (blocking terminal query)
+        let picker = tokio::task::spawn_blocking(|| {
+            Picker::from_query_stdio().ok()
+        })
+        .await
+        .unwrap_or(None);
+        self.cover_picker = picker;
+
         let cmd_tx = self.cmd_tx();
         tokio::spawn(async move {
             loop {
@@ -329,18 +345,6 @@ impl App {
                 self.state.apply_event(&ev);
             }
 
-            // Detect crossfade auto-advance: when queue cursor moves forward
-            // while a track is playing, show "Up Next" notification.
-            if self.state.status == PlaybackStatus::Playing
-                && self.state.queue_cursor > self.last_queue_cursor
-                && self.state.queue_cursor > 0
-            {
-                let idx = self.state.queue_cursor as usize;
-                if idx < self.queue_cache.len() {
-                    let next = &self.queue_cache[idx];
-                    self.notify(format!(" \u{25b6} Up Next: {} — {}", next.artist, next.title), NotificationKind::Info);
-                }
-            }
             self.last_queue_cursor = self.state.queue_cursor;
 
             // If track changed, reset display_position to avoid stale EMA from old track.
@@ -354,9 +358,12 @@ impl App {
 
             // If track changed via daemon event, trigger a cover art fetch.
             // Set last_cover_track_id immediately to prevent redundant spawns.
+            // Clear stale cover immediately so we don't show old art on the new track.
             if current_tid != self.last_cover_track_id && current_tid.is_some() {
                 let tid = current_tid.unwrap();
                 self.last_cover_track_id = Some(tid);
+                self.current_cover = None;
+                self.cover_stateful = None;
                 let client2 = self.client.clone();
                 let ipc_tx2 = self.ipc_tx.clone();
                 tokio::spawn(async move {
@@ -374,12 +381,20 @@ impl App {
                 match result {
                     IpcResult::RefreshDone(state, cover, cover_tid) => {
                         self.state = state;
-                        self.current_cover = cover;
-                        self.last_cover_track_id = cover_tid;
+                        self.client.seed_clock_from_state(&self.state).await;
+                        if let Some(c) = cover {
+                            self.current_cover = Some(c);
+                            self.last_cover_track_id = cover_tid;
+                        } else {
+                            self.current_cover = None;
+                            self.last_cover_track_id = cover_tid;
+                        }
+                        self.sync_cover_stateful();
                     }
                     IpcResult::CoverArt(cover, cover_tid) => {
                         self.current_cover = cover;
                         self.last_cover_track_id = cover_tid;
+                        self.sync_cover_stateful();
                     }
                     IpcResult::LibraryTracks(tracks) => self.tracks_cache = tracks,
                     IpcResult::Playlists(playlists) => self.playlist_cache = playlists,
@@ -455,6 +470,13 @@ impl App {
                     fx::fade_from_fg(Color::DarkGray, (200, Interpolation::SineOut))
                 );
             }
+            if self.last_cover_track_id != self.prev_cover_id {
+                self.prev_cover_id = self.last_cover_track_id;
+                // Subtle glow on cover / metadata update
+                self.effects.add_effect(
+                    fx::fade_from_fg(Color::Black, (180, Interpolation::QuadOut))
+                );
+            }
 
             // Hover popup: show immediately on scroll when right-pane focused,
             // or after hover_delay_secs of inactivity when not scrolling.
@@ -483,8 +505,11 @@ impl App {
             let frame_count = self.frame_count.wrapping_add(1);
             self.frame_count = frame_count;
             let pos_changed = (self.display_position - self.last_display_position).abs() >= 0.1;
-            // Advance title scroll animation for responsive library
-            self.title_scroll = self.title_scroll.wrapping_add(1);
+            // Advance title scroll animations (every 3rd frame)
+            if frame_count % 3 == 0 {
+                self.title_scroll = self.title_scroll.wrapping_add(1);
+                self.footer_title_scroll = self.footer_title_scroll.wrapping_add(1);
+            }
 
             let is_animating = self.effects.is_running();
             let force_render = pos_changed
@@ -521,7 +546,7 @@ impl App {
         });
     }
 
-    /// Filtered tracks for the current library view, respecting search query and browse_detail.
+    /// Filtered tracks for the current library view, respecting search query, browse_detail, and category.
     pub fn filtered_tracks(&self) -> Vec<&TrackInfo> {
         let mut tracks: Vec<&TrackInfo> = self.tracks_cache.iter().collect();
         if !self.search_query.is_empty() {
@@ -539,6 +564,9 @@ impl App {
                     || t.artist.to_lowercase().contains(&detail_lower)
                     || t.title.to_lowercase().contains(&detail_lower)
             });
+        }
+        if self.library_category == 1 {
+            tracks.retain(|t| t.favourite);
         }
         tracks
     }
@@ -579,15 +607,31 @@ impl App {
                             }
                         }
                         _ => {
-                            // retry on next refresh
+                            self.current_cover = None;
+                            self.cover_stateful = None;
                             self.last_cover_track_id = None;
                         }
                     }
                 } else {
                     self.current_cover = None;
+                    self.cover_stateful = None;
                     self.last_cover_track_id = track_id;
                 }
+                self.sync_cover_stateful();
             }
+        }
+    }
+
+    fn sync_cover_stateful(&mut self) {
+        match (&self.current_cover, &self.cover_picker) {
+            (Some(bytes), Some(picker)) => {
+                if let Ok(img) = image::load_from_memory(bytes) {
+                    self.cover_stateful = Some(picker.new_resize_protocol(img));
+                } else {
+                    self.cover_stateful = None;
+                }
+            }
+            _ => self.cover_stateful = None,
         }
     }
 
@@ -1054,6 +1098,9 @@ impl App {
                     Some(KeyboardAction::OpenOverlay(id)) => {
                         self.overlays.open(id);
                     }
+                    Some(KeyboardAction::ToggleHelp) => {
+                        self.overlays.open(OverlayId::Help);
+                    }
                     Some(KeyboardAction::PlayPause) => {
                         self.set_last_action("Play/Pause");
                         match self.state.status {
@@ -1240,21 +1287,21 @@ impl App {
                                     tokio::spawn(async move { let _ = c.queue_set(paths, idx as u128).await; });
                                     self.send_high(TuiCommand::Play(path));
                                 }
-                            } else if self.library_category == 1 {
+                            } else if self.library_category == 2 {
                                 // Albums: select album → show its tracks
                                 let albums = self.unique_albums();
                                 if self.scroll_offset < albums.len() {
                                     self.browse_detail = Some(albums[self.scroll_offset].0.clone());
                                     self.scroll_offset = 0;
                                 }
-                            } else if self.library_category == 2 {
+                            } else if self.library_category == 3 {
                                 // Artists: select artist → show its tracks
                                 let artists = self.unique_artists();
                                 if self.scroll_offset < artists.len() {
                                     self.browse_detail = Some(artists[self.scroll_offset].0.clone());
                                     self.scroll_offset = 0;
                                 }
-                            } else if self.library_category == 3 {
+                            } else if self.library_category == 4 {
                                 // Playlists: select playlist → show its tracks
                                 if self.scroll_offset < self.playlist_cache.len() {
                                     self.browse_detail = Some(self.playlist_cache[self.scroll_offset].name.clone());

@@ -51,6 +51,10 @@ pub enum LibraryAction {
     ImportM3u {
         path: String,
     },
+    ExportM3u {
+        playlist_id: i64,
+        path: String,
+    },
     GetRecent {
         count: u128,
     },

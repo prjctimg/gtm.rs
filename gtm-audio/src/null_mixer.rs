@@ -48,6 +48,11 @@ impl Mixer for NullMixer {
         Ok(())
     }
 
+    fn load_standby_decoded(&mut self, _source: Box<dyn Source<Item = f32> + Send>) -> AudioResult<()> {
+        *self.standby_loaded.lock().unwrap() = true;
+        Ok(())
+    }
+
     fn standby_is_loaded(&self) -> bool {
         *self.standby_loaded.lock().unwrap()
     }

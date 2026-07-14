@@ -359,6 +359,13 @@ impl DaemonClient {
         .await
     }
 
+    pub async fn library_export_m3u(&self, playlist_id: i64, path: &str) -> Result<u32> {
+        self.send_ok(DaemonReq::Library {
+            action: LibraryAction::ExportM3u { playlist_id, path: path.into() },
+        })
+        .await
+    }
+
     pub async fn library_get_recent(&self, count: u128) -> Result<DaemonRes> {
         self.send_raw(DaemonReq::Library {
             action: LibraryAction::GetRecent { count },

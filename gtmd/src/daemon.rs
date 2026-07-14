@@ -466,7 +466,7 @@ impl Daemon {
         }
     }
 
-    async fn push_event(&self, event: DaemonEvent) {
+    fn push_event(&self, event: DaemonEvent) {
         let _ = self.event_tx.send(event);
     }
 
@@ -550,8 +550,7 @@ impl Daemon {
                                     let _ = s.advance_queue(1);
                                     let idx = s.queue_cursor;
                                     drop(s);
-                                    self.push_event(DaemonEvent::QueueIndexChanged { index: idx })
-                                        .await;
+                                    self.push_event(DaemonEvent::QueueIndexChanged { index: idx });
                                 }
                             }
                         }
@@ -563,8 +562,7 @@ impl Daemon {
                 let mut state = self.state.write().await;
                 state.duration = dur;
                 drop(state);
-                self.push_event(DaemonEvent::DurationChanged { duration: dur })
-                    .await;
+                self.push_event(DaemonEvent::DurationChanged { duration: dur });
             }
             // Track finished — if we were crossfading the next track is already
             // playing on the swapped player.  Emit PlaybackStarted so the
@@ -591,8 +589,7 @@ impl Daemon {
                             auto_advanced: true,
                             time_pos: actual,
                             duration: dur,
-                        })
-                        .await;
+                        });
                     }
                 } else {
                     let mut state = self.state.write().await;
@@ -600,7 +597,7 @@ impl Daemon {
                     state.time_pos = 0.0;
                     state.current_track = None;
                     drop(state);
-                    self.push_event(DaemonEvent::TrackEnded).await;
+                    self.push_event(DaemonEvent::TrackEnded);
                     let _ = self.cmd_next().await;
                 }
             }
@@ -609,8 +606,7 @@ impl Daemon {
                 self.push_event(DaemonEvent::Custom {
                     name: "audio_error".into(),
                     data: [("error".into(), msg)].into(),
-                })
-                .await;
+                });
             }
         }
     }
@@ -714,8 +710,7 @@ impl Daemon {
             auto_advanced: false,
             time_pos: start_pos,
             duration: dur,
-        })
-        .await;
+        });
         Ok(DaemonRes::Ok { version })
     }
 
@@ -763,8 +758,7 @@ impl Daemon {
                     auto_advanced: false,
                     time_pos,
                     duration,
-                })
-                .await;
+                });
                 Ok(DaemonRes::Ok { version })
             } else if !path.is_empty() {
                 self.cmd_play(&path, 0.0).await
@@ -793,7 +787,7 @@ impl Daemon {
         let version = state.version as u32;
         let time_pos = state.time_pos;
         drop(state);
-        self.push_event(DaemonEvent::PlaybackPaused { time_pos }).await;
+        self.push_event(DaemonEvent::PlaybackPaused { time_pos });
         Ok(DaemonRes::Ok { version })
     }
 
@@ -809,7 +803,7 @@ impl Daemon {
         }
         let version = state.version as u32;
         drop(state);
-        self.push_event(DaemonEvent::PlaybackStopped).await;
+        self.push_event(DaemonEvent::PlaybackStopped);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -839,16 +833,14 @@ impl Daemon {
                     self.state.read().await.current_track.as_ref().map(|t| t.path.clone())
                         .unwrap_or_default()
                 );
-                self.push_event(DaemonEvent::QueueIndexChanged { index: idx })
-                    .await;
+                self.push_event(DaemonEvent::QueueIndexChanged { index: idx });
                 return Ok(DaemonRes::Ok { version: self.state.read().await.version as u32 });
             }
         }
         self.crossfade_loaded_for = None;
         let path = track.path.clone();
         let res = self.cmd_play(&path, 0.0).await?;
-        self.push_event(DaemonEvent::QueueIndexChanged { index: idx })
-            .await;
+        self.push_event(DaemonEvent::QueueIndexChanged { index: idx });
         Ok(res)
     }
 
@@ -881,16 +873,14 @@ impl Daemon {
                     self.state.read().await.current_track.as_ref().map(|t| t.path.clone())
                         .unwrap_or_default()
                 );
-                self.push_event(DaemonEvent::QueueIndexChanged { index: idx })
-                    .await;
+                self.push_event(DaemonEvent::QueueIndexChanged { index: idx });
                 return Ok(DaemonRes::Ok { version: self.state.read().await.version as u32 });
             }
         }
         self.crossfade_loaded_for = None;
         let path = track.path.clone();
         let res = self.cmd_play(&path, 0.0).await?;
-        self.push_event(DaemonEvent::QueueIndexChanged { index: idx })
-            .await;
+        self.push_event(DaemonEvent::QueueIndexChanged { index: idx });
         Ok(res)
     }
 
@@ -918,7 +908,7 @@ impl Daemon {
         state.set_volume(volume)?;
         let version = state.version as u32;
         drop(state);
-        self.push_event(DaemonEvent::VolumeChanged { volume }).await;
+        self.push_event(DaemonEvent::VolumeChanged { volume });
         Ok(DaemonRes::Ok { version })
     }
 
@@ -928,8 +918,7 @@ impl Daemon {
         let enabled = state.shuffle;
         let version = state.version as u32;
         drop(state);
-        self.push_event(DaemonEvent::ShuffleChanged { enabled })
-            .await;
+        self.push_event(DaemonEvent::ShuffleChanged { enabled });
         Ok(DaemonRes::Ok { version })
     }
 
@@ -942,8 +931,7 @@ impl Daemon {
         let m = state.repeat;
         let version = state.version as u32;
         drop(state);
-        self.push_event(DaemonEvent::RepeatModeChanged { mode: m })
-            .await;
+        self.push_event(DaemonEvent::RepeatModeChanged { mode: m });
         Ok(DaemonRes::Ok { version })
     }
 
@@ -974,8 +962,7 @@ impl Daemon {
         self.push_event(DaemonEvent::CrossfadeChanged {
             enabled,
             duration_secs,
-        })
-        .await;
+        });
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1002,7 +989,7 @@ impl Daemon {
         state.version += 1;
         let version = state.version as u32;
         drop(state);
-        self.push_event(DaemonEvent::EqPresetChanged { preset }).await;
+        self.push_event(DaemonEvent::EqPresetChanged { preset });
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1040,8 +1027,7 @@ impl Daemon {
                 let queue = state.queue.clone();
                 let cursor = state.queue_cursor;
                 drop(state);
-                self.push_event(DaemonEvent::QueueChanged { queue, cursor })
-                    .await;
+                self.push_event(DaemonEvent::QueueChanged { queue, cursor });
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Remove { index } => {
@@ -1051,8 +1037,7 @@ impl Daemon {
                 let queue = state.queue.clone();
                 let cursor = state.queue_cursor;
                 drop(state);
-                self.push_event(DaemonEvent::QueueChanged { queue, cursor })
-                    .await;
+                self.push_event(DaemonEvent::QueueChanged { queue, cursor });
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Move { from, to } => {
@@ -1062,8 +1047,7 @@ impl Daemon {
                 let queue = state.queue.clone();
                 let cursor = state.queue_cursor;
                 drop(state);
-                self.push_event(DaemonEvent::QueueChanged { queue, cursor })
-                    .await;
+                self.push_event(DaemonEvent::QueueChanged { queue, cursor });
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Add { path, position } => {
@@ -1075,8 +1059,7 @@ impl Daemon {
                     let queue = state.queue.clone();
                     let cursor = state.queue_cursor;
                     drop(state);
-                    self.push_event(DaemonEvent::QueueChanged { queue, cursor })
-                        .await;
+                    self.push_event(DaemonEvent::QueueChanged { queue, cursor });
                     if was_empty {
                         return self.cmd_play(path, 0.0).await;
                     }
@@ -1095,8 +1078,7 @@ impl Daemon {
                     let queue = state.queue.clone();
                     let cursor = state.queue_cursor;
                     drop(state);
-                    self.push_event(DaemonEvent::QueueChanged { queue, cursor })
-                        .await;
+                    self.push_event(DaemonEvent::QueueChanged { queue, cursor });
                     if was_empty {
                         return self.cmd_play(&first_path, 0.0).await;
                     }
@@ -1122,8 +1104,7 @@ impl Daemon {
                     let queue = state.queue.clone();
                     let cursor = state.queue_cursor;
                     drop(state);
-                    self.push_event(DaemonEvent::QueueChanged { queue, cursor })
-                        .await;
+                    self.push_event(DaemonEvent::QueueChanged { queue, cursor });
                     // If queue was empty and stopped, auto-play the first track
                     if was_empty {
                         return self.cmd_play(&first_path, 0.0).await;
@@ -1139,8 +1120,7 @@ impl Daemon {
                 let queue = state.queue.clone();
                 let cursor = state.queue_cursor;
                 drop(state);
-                self.push_event(DaemonEvent::QueueChanged { queue, cursor })
-                    .await;
+                self.push_event(DaemonEvent::QueueChanged { queue, cursor });
                 Ok(DaemonRes::Ok { version })
             }
         }
@@ -1339,6 +1319,21 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok((synced, total)) => DaemonRes::SyncCoversResult { version, synced, total },
+                    Err(e) => DaemonRes::Error { version, message: e },
+                }
+            }
+            gtm_core::ipc::LibraryAction::ExportM3u { playlist_id, path } => {
+                let playlist_id = *playlist_id;
+                let export_path = path.clone();
+                let data_dir = self.config.data_dir.clone();
+                let result = tokio::task::spawn_blocking(move || {
+                    let lib = Library::new(data_dir.to_str().unwrap_or(""))?;
+                    lib.export_m3u(playlist_id, &export_path)
+                })
+                .await
+                .map_err(|e| CoreError::Daemon(e.to_string()))?;
+                match result {
+                    Ok(_) => DaemonRes::Ok { version },
                     Err(e) => DaemonRes::Error { version, message: e },
                 }
             }

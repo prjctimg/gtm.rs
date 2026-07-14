@@ -15,6 +15,7 @@ pub trait Mixer: Send + Sync {
     fn load_active(&mut self, path: &str, start_pos: f64) -> AudioResult<()>;
     fn load_active_decoded(&mut self, source: Box<dyn Source<Item = f32> + Send>, start_pos: f64) -> AudioResult<()>;
     fn load_standby(&mut self, path: &str) -> AudioResult<()>;
+    fn load_standby_decoded(&mut self, source: Box<dyn Source<Item = f32> + Send>) -> AudioResult<()>;
     fn standby_is_loaded(&self) -> bool;
     fn play(&mut self) -> AudioResult<()>;
     fn pause(&mut self) -> AudioResult<()>;
@@ -84,6 +85,9 @@ impl Mixer for AudioMixer {
     }
     fn load_standby(&mut self, path: &str) -> AudioResult<()> {
         self.load_standby(path)
+    }
+    fn load_standby_decoded(&mut self, source: Box<dyn Source<Item = f32> + Send>) -> AudioResult<()> {
+        self.load_standby_decoded(source)
     }
     fn standby_is_loaded(&self) -> bool {
         self.standby_is_loaded()
@@ -244,6 +248,13 @@ impl AudioMixer {
         self.standby().set_volume(0.0);
 
         let source = Self::decode(path)?;
+        self.standby().append(source);
+        Ok(())
+    }
+
+    pub fn load_standby_decoded(&mut self, source: Box<dyn Source<Item = f32> + Send>) -> AudioResult<()> {
+        self.standby().stop();
+        self.standby().set_volume(0.0);
         self.standby().append(source);
         Ok(())
     }
