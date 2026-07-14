@@ -164,6 +164,7 @@ pub struct App {
     prev_status: gtm_core::state::PlaybackStatus,
     prev_volume: u8,
     prev_cover_id: Option<i64>,
+    cover_art_dirty: bool,
 }
 
 enum IpcResult {
@@ -199,6 +200,7 @@ pub enum TuiCommand {
     YtSearch(String),
     YtDownload(String),
     YtResolve(String),
+    SetEqPreset(gtm_core::state::EqPreset),
     Search(String),
     AddFavourite(i64),
     RemoveFavourite(i64),
@@ -285,6 +287,7 @@ impl App {
             prev_status: gtm_core::state::PlaybackStatus::Stopped,
             prev_volume: 100,
             prev_cover_id: None,
+            cover_art_dirty: false,
         })
     }
 
@@ -395,6 +398,7 @@ impl App {
                         self.current_cover = cover;
                         self.last_cover_track_id = cover_tid;
                         self.sync_cover_stateful();
+                        self.cover_art_dirty = true;
                     }
                     IpcResult::LibraryTracks(tracks) => self.tracks_cache = tracks,
                     IpcResult::Playlists(playlists) => self.playlist_cache = playlists,
@@ -515,7 +519,9 @@ impl App {
             let force_render = pos_changed
                 || !self.notifications.is_empty()
                 || frame_count % 10 == 0
-                || is_animating;
+                || is_animating
+                || self.cover_art_dirty;
+            self.cover_art_dirty = false;
             self.last_display_position = self.display_position;
 
             if force_render {
@@ -837,6 +843,11 @@ impl App {
             TuiCommand::YtResolve(u) => {
                 tokio::spawn(async move {
                     if let Err(e) = client.yt_resolve_stream(&u).await { error_handler2(e); }
+                });
+            }
+            TuiCommand::SetEqPreset(preset) => {
+                tokio::spawn(async move {
+                    if let Err(e) = client.set_eq_preset(preset).await { error_handler(e); }
                 });
             }
             TuiCommand::Search(q) => {
@@ -1241,9 +1252,15 @@ impl App {
                             Tab::Settings => {
                                 self.settings_option = self.settings_option.saturating_sub(1);
                             }
+                            Tab::Library => {
+                                self.scroll_offset = self.scroll_offset.saturating_sub(1);
+                                if self.scroll_offset < self.list_scroll {
+                                    self.list_scroll = self.list_scroll.saturating_sub(1);
+                                }
+                                self.fetch_cover_for_scroll_position().await;
+                            }
                             _ => {
                                 self.scroll_offset = self.scroll_offset.saturating_sub(1);
-                                // Auto-scroll: keep selection visible
                                 if self.scroll_offset < self.list_scroll {
                                     self.list_scroll = self.list_scroll.saturating_sub(1);
                                 }
@@ -1262,10 +1279,17 @@ impl App {
                                 let max = self.settings_options_for_category().saturating_sub(1);
                                 self.settings_option = (self.settings_option + 1).min(max);
                             }
+                            Tab::Library => {
+                                let max_list = self.filtered_tracks().len();
+                                self.scroll_offset = (self.scroll_offset + 1).min(max_list.saturating_sub(1));
+                                if self.scroll_offset >= self.list_scroll + self.viewport_items && self.list_scroll + self.viewport_items < max_list {
+                                    self.list_scroll += 1;
+                                }
+                                self.fetch_cover_for_scroll_position().await;
+                            }
                             _ => {
                                 let max_list = self.filtered_tracks().len();
                                 self.scroll_offset = (self.scroll_offset + 1).min(max_list.saturating_sub(1));
-                                // Auto-scroll: keep selection visible
                                 if self.scroll_offset >= self.list_scroll + self.viewport_items && self.list_scroll + self.viewport_items < max_list {
                                     self.list_scroll += 1;
                                 }
@@ -1412,7 +1436,7 @@ impl App {
                     Some(KeyboardAction::Delete) => {}
                     None => {
                         match key.code {
-                            KeyCode::Char('q') | KeyCode::Esc => {
+                            KeyCode::Char('q') => {
                                 if self.show_tag_popup {
                                     self.show_tag_popup = false;
                                 } else if self.browse_detail.is_some() {
@@ -1420,6 +1444,14 @@ impl App {
                                     self.scroll_offset = 0;
                                 } else {
                                     return false;
+                                }
+                            }
+                            KeyCode::Esc => {
+                                if self.show_tag_popup {
+                                    self.show_tag_popup = false;
+                                } else if self.browse_detail.is_some() {
+                                    self.browse_detail = None;
+                                    self.scroll_offset = 0;
                                 }
                             }
                             KeyCode::Char('t') => {
@@ -1542,6 +1574,7 @@ impl App {
                     }
                 }
                 self.clamp_overlay_selection();
+                self.apply_eq_on_navigation().await;
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let has_input = matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::YTSearch) | Some(OverlayId::SearchLibrary) | Some(OverlayId::CommandPalette));
@@ -1562,6 +1595,7 @@ impl App {
                     }
                 }
                 self.clamp_overlay_selection();
+                self.apply_eq_on_navigation().await;
             }
             KeyCode::Enter => {
                 // Dispatch based on overlay type
@@ -1734,7 +1768,21 @@ impl App {
                             self.overlays.close_top();
                         }
                         OverlayId::SoundEffects => {
-                            self.overlays.close_top();
+                            let sel = top.selected;
+                            match sel {
+                                1 => {
+                                    // Reverb toggle
+                                    let new_enabled = !self.state.reverb.enabled;
+                                    let room_size = self.state.reverb.room_size;
+                                    self.state.reverb.enabled = new_enabled;
+                                    let c = self.client.clone();
+                                    tokio::spawn(async move { let _ = c.set_reverb(new_enabled, room_size).await; });
+                                    self.overlays.close_top();
+                                }
+                                _ => {
+                                    self.overlays.close_top();
+                                }
+                            }
                         }
                         _ => {}
                     }
@@ -1766,6 +1814,10 @@ impl App {
                         OverlayId::YTSearch | OverlayId::SearchLibrary | OverlayId::CommandPalette => {
                             top.query.push(c);
                             if top.id == OverlayId::YTSearch {
+                                if c == ' ' {
+                                    self.yt_results_cache.clear();
+                                    self.yt_search_loading = false;
+                                }
                                 self.yt_search_debounce = Some(std::time::Instant::now() + Duration::from_millis(500));
                             }
                         }
@@ -1787,6 +1839,52 @@ impl App {
         if self.current_tab == Tab::Library {
             let _ = tx.send(TuiCommand::RefreshLibrary).await;
             let _ = tx.send(TuiCommand::RefreshPlaylists).await;
+        }
+    }
+
+    async fn apply_eq_on_navigation(&mut self) {
+        if let Some(top) = self.overlays.top() {
+            if top.id == OverlayId::Equalizer {
+                let presets = [
+                    gtm_core::state::EqPreset::Flat,
+                    gtm_core::state::EqPreset::Pop,
+                    gtm_core::state::EqPreset::Rock,
+                    gtm_core::state::EqPreset::Jazz,
+                    gtm_core::state::EqPreset::Classical,
+                    gtm_core::state::EqPreset::Bass,
+                    gtm_core::state::EqPreset::Vocal,
+                    gtm_core::state::EqPreset::Electronic,
+                    gtm_core::state::EqPreset::HipHop,
+                    gtm_core::state::EqPreset::Latin,
+                    gtm_core::state::EqPreset::Acoustic,
+                    gtm_core::state::EqPreset::Podcast,
+                    gtm_core::state::EqPreset::Dance,
+                ];
+                let idx = top.selected.min(presets.len() - 1);
+                self.send_high(TuiCommand::SetEqPreset(presets[idx]));
+                self.state.eq_preset = presets[idx];
+            }
+        }
+    }
+
+    async fn fetch_cover_for_scroll_position(&mut self) {
+        let items = self.filtered_tracks();
+        if let Some(track) = items.get(self.scroll_offset) {
+            let tid = track.id;
+            if self.last_cover_track_id != Some(tid) {
+                self.last_cover_track_id = Some(tid);
+                self.current_cover = None;
+                self.cover_stateful = None;
+                let client2 = self.client.clone();
+                let ipc_tx2 = self.ipc_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(Some(b64)) = client2.get_cover_art(tid).await {
+                        if let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(&b64) {
+                            let _ = ipc_tx2.send(IpcResult::CoverArt(Some(bytes), Some(tid)));
+                        }
+                    }
+                });
+            }
         }
     }
 }

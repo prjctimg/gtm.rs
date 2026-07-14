@@ -224,6 +224,10 @@ impl DaemonClient {
         self.send_ok(DaemonReq::SetEqPreset { preset }).await
     }
 
+    pub async fn set_reverb(&self, enabled: bool, room_size: f32) -> Result<u32> {
+        self.send_ok(DaemonReq::SetReverb { enabled, room_size }).await
+    }
+
     pub async fn crossfade(&self, enabled: bool, duration_secs: u8) -> Result<u32> {
         self.send_ok(DaemonReq::Crossfade {
             enabled,

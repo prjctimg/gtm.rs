@@ -138,6 +138,10 @@ pub enum DaemonEvent {
     EqPresetChanged {
         preset: state::EqPreset,
     },
+    ReverbChanged {
+        enabled: bool,
+        room_size: f32,
+    },
     Custom {
         name: String,
         data: HashMap<String, String>,
@@ -177,6 +181,10 @@ pub enum DaemonReq {
     },
     SetEqPreset {
         preset: state::EqPreset,
+    },
+    SetReverb {
+        enabled: bool,
+        room_size: f32,
     },
 
     // ─── Queue ───

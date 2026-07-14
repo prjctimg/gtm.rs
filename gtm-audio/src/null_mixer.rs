@@ -5,7 +5,7 @@ use rodio::Source;
 
 use crate::backend::{AudioEvent, AudioResult};
 use crate::mixer::Mixer;
-use gtm_core::state::Easing;
+use gtm_core::state::{Easing, EqPreset, ReverbConfig};
 
 /// A silent no-op mixer for environments without audio hardware (CI, testing).
 pub struct NullMixer {
@@ -122,4 +122,7 @@ impl Mixer for NullMixer {
     fn poll(&mut self) -> AudioResult<Option<AudioEvent>> {
         Ok(None)
     }
+
+    fn set_eq_preset(&self, _preset: &EqPreset) {}
+    fn set_reverb(&self, _config: &ReverbConfig) {}
 }

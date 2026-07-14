@@ -56,7 +56,7 @@ use tracing::{error, info, warn};
 
 use gtm_audio::{AudioEvent, AudioMixer, AudioResult, Mixer, NullMixer};
 use gtm_core::ipc::{DaemonEvent, DaemonReq, DaemonRes, QueueAction};
-use gtm_core::state::{DaemonState, EqPreset, PlaybackStatus};
+use gtm_core::state::{DaemonState, EqPreset, PlaybackStatus, ReverbConfig};
 use gtm_core::wire;
 use gtm_core::CoreError;
 
@@ -206,7 +206,7 @@ impl Daemon {
         library_paths: Vec<std::path::PathBuf>,
         data_dir: std::path::PathBuf,
         cache_dir: std::path::PathBuf,
-        req_tx: mpsc::UnboundedSender<(ClientId, DaemonReq, ReplyTx)>,
+        _req_tx: mpsc::UnboundedSender<(ClientId, DaemonReq, ReplyTx)>,
         _event_tx: broadcast::Sender<DaemonEvent>,
     ) {
         if library_paths.is_empty() {
@@ -253,25 +253,7 @@ impl Daemon {
             for track in &tracks {
                 s.queue.push(track.clone());
             }
-            let should_play = s.queue_cursor == 0 && !tracks.is_empty();
-            let first_path = if should_play {
-                Some(tracks[0].path.clone())
-            } else {
-                None
-            };
             drop(s);
-            // Auto-play first track via a synthesized IPC request
-            if let Some(path) = first_path {
-                let (dummy_tx, _) = mpsc::unbounded_channel();
-                let _ = req_tx.send((
-                    0,
-                    DaemonReq::Play {
-                        path,
-                        start_pos: 0.0,
-                    },
-                    dummy_tx,
-                ));
-            }
         }
     }
 
@@ -452,6 +434,7 @@ impl Daemon {
             DaemonReq::YtResolveStream { url } => self.cmd_yt_resolve_stream(url).await,
             DaemonReq::GetStatus => self.cmd_get_status().await,
             DaemonReq::SetEqPreset { preset } => self.cmd_set_eq_preset(*preset).await,
+            DaemonReq::SetReverb { enabled, room_size } => self.cmd_set_reverb(*enabled, *room_size).await,
             DaemonReq::GetCoverArt { track_id } => self.cmd_get_cover_art(*track_id).await,
             DaemonReq::Ping => Ok(DaemonRes::Pong),
             DaemonReq::Quit => {
@@ -989,7 +972,23 @@ impl Daemon {
         state.version += 1;
         let version = state.version as u32;
         drop(state);
+        self.mixer.set_eq_preset(&preset);
         self.push_event(DaemonEvent::EqPresetChanged { preset });
+        Ok(DaemonRes::Ok { version })
+    }
+
+    async fn cmd_set_reverb(
+        &mut self,
+        enabled: bool,
+        room_size: f32,
+    ) -> Result<DaemonRes, CoreError> {
+        let mut state = self.state.write().await;
+        state.reverb = ReverbConfig { enabled, room_size };
+        state.version += 1;
+        let version = state.version as u32;
+        drop(state);
+        self.mixer.set_reverb(&ReverbConfig { enabled, room_size });
+        self.push_event(DaemonEvent::ReverbChanged { enabled, room_size });
         Ok(DaemonRes::Ok { version })
     }
 

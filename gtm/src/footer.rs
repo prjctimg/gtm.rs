@@ -150,21 +150,20 @@ pub fn render_preset(f: &mut Frame, area: Rect, app: &App, preset: &FooterPreset
     }
 }
 
-fn module_color(m: &FooterModule) -> ratatui::style::Color {
-    use ratatui::style::Color;
+fn module_color(m: &FooterModule, theme: &crate::theme::AppTheme) -> ratatui::style::Color {
     match m {
-        FooterModule::Playback => Color::Rgb(0, 255, 200),   // cyan-neon
-        FooterModule::Title => Color::Rgb(255, 200, 0),       // amber
-        FooterModule::Volume => Color::Rgb(255, 100, 255),    // magenta
-        FooterModule::Repeat => Color::Rgb(100, 200, 255),    // sky
-        FooterModule::Shuffle => Color::Rgb(255, 150, 50),    // orange
-        FooterModule::Progress => Color::Rgb(100, 255, 100),  // green
-        FooterModule::Queue => Color::Rgb(200, 150, 255),     // lavender
-        FooterModule::Clock => Color::Rgb(200, 200, 200),     // gray
-        FooterModule::KeyAction => Color::Rgb(255, 255, 100), // yellow
-        FooterModule::Backend => Color::Rgb(150, 200, 255),   // light-blue
-        FooterModule::System => Color::Rgb(200, 200, 200),    // gray
-        FooterModule::Device => Color::Rgb(200, 200, 200),    // gray
+        FooterModule::Playback => theme.syn_function,
+        FooterModule::Title => theme.syn_string,
+        FooterModule::Volume => theme.syn_constant,
+        FooterModule::Repeat => theme.syn_keyword,
+        FooterModule::Shuffle => theme.syn_type,
+        FooterModule::Progress => theme.syn_variable,
+        FooterModule::Queue => theme.syn_comment,
+        FooterModule::Clock => theme.fg_dim,
+        FooterModule::KeyAction => theme.warning,
+        FooterModule::Backend => theme.fg_dim,
+        FooterModule::System => theme.fg_dim,
+        FooterModule::Device => theme.fg_dim,
     }
 }
 
@@ -183,10 +182,10 @@ fn render_modules(modules: &[&FooterModule], app: &App) -> Vec<(String, ratatui:
             FooterModule::KeyAction => render_keyaction(app),
             FooterModule::Backend => render_backend(),
             FooterModule::System => render_system(),
-            FooterModule::Device => render_device(),
+            FooterModule::Device => render_device(app),
         };
         if !text.is_empty() {
-            parts.push((text, module_color(m)));
+            parts.push((text, module_color(m, &app.theme)));
         }
     }
     parts
@@ -292,13 +291,42 @@ fn render_keyaction(app: &App) -> String {
 }
 
 fn render_backend() -> String {
-    "rodio".into()
+    let rust_ver = option_env!("VERGEN_RUSTC_SEMVER").unwrap_or("?");
+    let crate_ver = option_env!("CARGO_PKG_VERSION").unwrap_or("?");
+    format!("rust {} • v{}", rust_ver, crate_ver)
 }
 
 fn render_system() -> String {
-    String::new()
+    let os = std::env::consts::OS;
+    let arch = std::env::consts::ARCH;
+    let cpus = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let mem = read_process_memory_kb();
+    if let Some(kb) = mem {
+        if kb > 1024 * 1024 {
+            format!("{} {} • {}GB {}CPU", os, arch, kb / (1024 * 1024), cpus)
+        } else {
+            format!("{} {} • {}MB {}CPU", os, arch, kb / 1024, cpus)
+        }
+    } else {
+        format!("{} {} • {}CPU", os, arch, cpus)
+    }
 }
 
-fn render_device() -> String {
-    String::new()
+fn read_process_memory_kb() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb: u64 = rest.trim().split_whitespace().next()?.parse().ok()?;
+            return Some(kb);
+        }
+    }
+    None
+}
+
+fn render_device(app: &App) -> String {
+    let track_count = app.tracks_cache.len();
+    let total_dur: u64 = app.tracks_cache.iter().map(|t| t.duration as u64).sum();
+    let hours = total_dur / 3600;
+    let mins = (total_dur % 3600) / 60;
+    format!("{} tracks • {}h{}m", track_count, hours, mins)
 }

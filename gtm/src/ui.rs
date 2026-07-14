@@ -377,25 +377,7 @@ fn render_now_playing(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         .style(Style::default().fg(app.theme.accent));
     f.render_widget(bar_para, right[6]);
 
-    // ── Up Next: upcoming queue items ──
-    if app.queue_cache.len() > 1 {
-        let up_next = vchunks[1];
-        let up_header = Paragraph::new(" UP NEXT")
-            .style(Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD));
-        f.render_widget(up_header, Rect { x: up_next.x, y: up_next.y, width: up_next.width, height: 1 });
 
-        let next_start = app.queue_cursor + 1;
-        let upcoming: Vec<&TrackInfo> = app.queue_cache.iter().skip(next_start).take(5).collect();
-        let mut lines = Vec::new();
-        for (i, t) in upcoming.iter().enumerate() {
-            let label = if t.artist.is_empty() { t.title.clone() } else { format!("{}  {}", t.artist, t.title) };
-            let dur_s = format_duration_short(t.duration as u64);
-            let row = format!("  {:>02}. {:<w$} {:>4}", next_start + i, label, dur_s, w = (up_next.width as usize).saturating_sub(20));
-            lines.push(Line::from(Span::styled(row, Style::default().fg(app.theme.fg))));
-        }
-        let list = Paragraph::new(lines);
-        f.render_widget(list, Rect { x: up_next.x, y: up_next.y + 1, width: up_next.width, height: up_next.height.saturating_sub(1) });
-    }
 }
 
 fn render_cover(
@@ -737,8 +719,8 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     f.render_widget(stats, stats_area);
 }
 
-const SETTINGS_ICONS_NERD: &[&str] = &["\u{f028}", "\u{f16a}", "\u{f144}", "\u{f013}", "\u{f1bc}"];
-const SETTINGS_ICONS_ASCII: &[&str] = &["♫", "YT", "▶", "⚙", "★"];
+const SETTINGS_ICONS_NERD: &[&str] = &["\u{f028}", "\u{f16a}", "\u{f04b}", "\u{f013}", "\u{f1bc}"];
+const SETTINGS_ICONS_ASCII: &[&str] = &["♪", "YT", "▶", "⚙", "★"];
 const SETTINGS_CATEGORIES: &[&str] = &["Audio", "YouTube", "Playback", "System", "Spotify"];
 
 fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -949,27 +931,22 @@ fn render_queue_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let sel = app.overlays.top().map_or(0, |o| o.selected);
 
     let pane_w = area.width as usize;
-    let num_w = 4;
-    let dur_w = 9;
-    let title_w = pane_w.saturating_sub(num_w + dur_w + 3).max(10);
+    let total = app.queue_cache.len();
+    if total == 0 {
+        let p = Paragraph::new("Queue is empty")
+            .style(Style::default().fg(app.theme.fg_dim));
+        f.render_widget(p, area);
+        overlay_help(f, area, " [Esc] Close", app);
+        return;
+    }
 
-    let header_fmt = format!(
-        "{:>w1$}│ {:<w2$} │ {:>w3$}",
-        "#", "Title / Artist", "Duration",
-        w1 = num_w - 1, w2 = title_w, w3 = dur_w - 1
-    );
-    let sep_line = format!(
-        "{:─>w1$}┼{:─>w2$}┼{:─>w3$}",
-        "", "", "",
-        w1 = num_w + 1, w2 = title_w + 2, w3 = dur_w + 1
-    );
+    let visible = area.height as usize;
+    let (scroll_start, scroll_end) = centered_scroll(sel, visible, total);
 
-    let mut lines = vec![
-        Line::from(Span::styled(header_fmt, Style::default().fg(app.theme.fg_dim))),
-        Line::from(Span::styled(sep_line, Style::default().fg(app.theme.fg_dim))),
-    ];
+    let mut lines = Vec::new();
 
-    for (i, track) in app.queue_cache.iter().enumerate() {
+    for i in scroll_start..scroll_end {
+        let track = &app.queue_cache[i];
         let is_current = i == app.queue_cursor;
         let is_sel = i == sel;
         let prefix = if is_current { ">" } else if is_sel { " " } else { " " };
@@ -977,11 +954,7 @@ fn render_queue_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         let dur = format_duration_short(track.duration as u64);
         let label = if track.artist.is_empty() { track.title.clone() } else { format!("{}  {}", track.artist, track.title) };
 
-        let row = format!(
-            "{:<w1$}│ {:<w2$} │ {:>w3$}",
-            num_str, label, dur,
-            w1 = num_w, w2 = title_w, w3 = dur_w
-        );
+        let row = format!("{:>5}  {:<w$}  {:>6}", num_str, label, dur, w = pane_w.saturating_sub(16));
 
         let style = if is_sel {
             Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
@@ -995,14 +968,7 @@ fn render_queue_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     }
 
     let para = Paragraph::new(lines);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Queue ")
-        .border_type(BorderType::Plain);
-
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-    f.render_widget(para, inner);
+    f.render_widget(para, area);
     overlay_help(f, area, " [Enter] Play  [d] Remove from Queue  [Esc] Close  j/k Navigate", app);
 }
 
@@ -1024,16 +990,25 @@ fn render_yt_search_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .style(Style::default().fg(app.theme.fg));
     f.render_widget(search_input, chunks[0]);
 
+    let results_area = chunks[1];
+    let sel = app.overlays.top().map_or(0, |o| o.selected);
+    let total = app.yt_results_cache.len();
+    let visible = results_area.height as usize;
+    let (scroll_start, _) = if total > 0 { centered_scroll(sel, visible, total) } else { (0, 0) };
+    let scroll_end = (scroll_start + visible).min(total);
+
     let items: Vec<ListItem> = app
         .yt_results_cache
         .iter()
         .enumerate()
+        .skip(scroll_start)
+        .take(scroll_end - scroll_start)
         .map(|(i, r)| {
             let dur = format_duration(r.duration as u64);
             let icon = if r.is_playlist { "\u{f01db} " } else { "\u{f008} " };
-            let prefix = if i == app.overlays.top().map_or(0, |o| o.selected) { " > " } else { "   " };
+            let prefix = if i == sel { " > " } else { "   " };
             let content = format!("{prefix}{}{} - {} [{}]", icon, r.channel, r.title, dur);
-            let style = if i == app.overlays.top().map_or(0, |o| o.selected) {
+            let style = if i == sel {
                 Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
             } else {
                 Style::default()
@@ -1048,7 +1023,7 @@ fn render_yt_search_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
             .title(" Results ")
             .border_type(BorderType::Plain),
     );
-    f.render_widget(list, chunks[1]);
+    f.render_widget(list, results_area);
 
     // Help footer
     let help_text = " [Enter] Play / Drill-down  [Ctrl+d] Download  [Ctrl+a] Add to Queue  [Esc] Close  Type to search (auto, 500ms)";
@@ -1083,9 +1058,17 @@ fn render_search_library_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) 
     f.render_widget(search_input, chunks[0]);
 
     let sel = app.overlays.top().map_or(0, |o| o.selected.min(filtered.len().saturating_sub(1)));
+    let results_area = chunks[1];
+    let total = filtered.len();
+    let visible = results_area.height as usize;
+    let (scroll_start, _) = if total > 0 { centered_scroll(sel, visible, total) } else { (0, 0) };
+    let scroll_end = (scroll_start + visible).min(total);
+
     let items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
+        .skip(scroll_start)
+        .take(scroll_end - scroll_start)
         .map(|(i, track)| {
             let prefix = if i == sel { " > " } else { "   " };
             let dur = format_duration(track.duration as u64);
@@ -1106,7 +1089,7 @@ fn render_search_library_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) 
             .border_type(BorderType::Plain),
     );
 
-    f.render_widget(list, chunks[1]);
+    f.render_widget(list, results_area);
     overlay_help(f, area, " [Enter] Play  [Esc] Close  Type to search  j/k Navigate", app);
 }
 
@@ -1453,9 +1436,17 @@ fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App)
     f.render_widget(search_input, chunks[0]);
 
     let sel = app.overlays.top().map_or(0, |o| o.selected.min(filtered.len().saturating_sub(1)));
+    let results_area = chunks[1];
+    let total = filtered.len();
+    let visible = results_area.height as usize;
+    let (scroll_start, _) = if total > 0 { centered_scroll(sel, visible, total) } else { (0, 0) };
+    let scroll_end = (scroll_start + visible).min(total);
+
     let list_items: Vec<ListItem> = filtered
         .iter()
         .enumerate()
+        .skip(scroll_start)
+        .take(scroll_end - scroll_start)
         .map(|(i, (cmd, _score))| {
             let prefix = if i == sel { " > " } else { "   " };
             let style = if i == sel {
@@ -1473,7 +1464,7 @@ fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App)
             .title(" Commands ")
             .border_type(BorderType::Plain),
     );
-    f.render_widget(list, chunks[1]);
+    f.render_widget(list, results_area);
 }
 
 fn render_equalizer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -1495,17 +1486,25 @@ fn render_equalizer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let sel = app.overlays.top().map_or(0, |o| o.selected.min(presets.len() - 1));
 
-    let list_items: Vec<ListItem> = presets.iter().enumerate().map(|(i, (name, _))| {
-        let prefix = if i == sel { " > " } else { "   " };
-        let style = if i == sel {
-            Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
-        } else if *name == app.state.eq_preset.label() {
-            Style::default().fg(app.theme.success)
-        } else {
-            Style::default()
-        };
-        ListItem::new(format!("{prefix}{}", name)).style(style)
-    }).collect();
+    let visible = area.height as usize;
+    let total = presets.len();
+    let (scroll_start, _) = centered_scroll(sel, visible, total);
+    let scroll_end = (scroll_start + visible).min(total);
+
+    let list_items: Vec<ListItem> = presets.iter().enumerate()
+        .skip(scroll_start)
+        .take(scroll_end - scroll_start)
+        .map(|(i, (name, _))| {
+            let prefix = if i == sel { " > " } else { "   " };
+            let style = if i == sel {
+                Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+            } else if *name == app.state.eq_preset.label() {
+                Style::default().fg(app.theme.success)
+            } else {
+                Style::default()
+            };
+            ListItem::new(format!("{prefix}{}", name)).style(style)
+        }).collect();
 
     let list = List::new(list_items).block(
         Block::default()
@@ -1520,24 +1519,34 @@ fn render_sound_effects_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let crossfade_on = app.state.crossfade.as_ref().map(|c| c.enabled).unwrap_or(false);
     let crossfade_dur = app.state.crossfade.as_ref().map(|c| c.duration_secs).unwrap_or(0);
 
+    let reverb_on = app.state.reverb.enabled;
+
     let items = vec![
         format!("Playback Speed:  {:.1}x", app.playback_speed),
-        format!("Reverb:          Off"),
+        format!("Reverb:          {}", if reverb_on { "ON" } else { "OFF" }),
         format!("Crossfade:       {}", if crossfade_on { "ON" } else { "OFF" }),
         format!("Crossfade Dur:   {}s", crossfade_dur),
         format!("EQ Preset:       {}", app.state.eq_preset.label()),
     ];
 
     let sel = app.overlays.top().map_or(0, |o| o.selected.min(items.len() - 1));
-    let list_items: Vec<ListItem> = items.iter().enumerate().map(|(i, s)| {
-        let prefix = if i == sel { " > " } else { "   " };
-        let style = if i == sel {
-            Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
-        } else {
-            Style::default()
-        };
-        ListItem::new(format!("{prefix}{}", s)).style(style)
-    }).collect();
+    let visible = area.height as usize;
+    let total = items.len();
+    let (scroll_start, _) = centered_scroll(sel, visible, total);
+    let scroll_end = (scroll_start + visible).min(total);
+
+    let list_items: Vec<ListItem> = items.iter().enumerate()
+        .skip(scroll_start)
+        .take(scroll_end - scroll_start)
+        .map(|(i, s)| {
+            let prefix = if i == sel { " > " } else { "   " };
+            let style = if i == sel {
+                Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+            } else {
+                Style::default()
+            };
+            ListItem::new(format!("{prefix}{}", s)).style(style)
+        }).collect();
 
     let list = List::new(list_items).block(
         Block::default()
@@ -1550,20 +1559,28 @@ fn render_sound_effects_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
 
 fn render_theme_picker_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let sel = app.overlays.top().map_or(0, |o| o.selected.min(THEMES.len().saturating_sub(1)));
-    let list_items: Vec<ListItem> = THEMES.iter().enumerate().map(|(i, entry)| {
-        let is_active = i == app.theme_index;
-        let prefix = if i == sel { " > " } else { "   " };
-        let check = if is_active { " \u{2713}" } else { "" };
-        let content = format!("{}{}{}", prefix, entry.name, check);
-        let style = if i == sel {
-            Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
-        } else if is_active {
-            Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        ListItem::new(content).style(style)
-    }).collect();
+    let visible = area.height as usize;
+    let total = THEMES.len();
+    let (scroll_start, _) = centered_scroll(sel, visible, total);
+    let scroll_end = (scroll_start + visible).min(total);
+
+    let list_items: Vec<ListItem> = THEMES.iter().enumerate()
+        .skip(scroll_start)
+        .take(scroll_end - scroll_start)
+        .map(|(i, entry)| {
+            let is_active = i == app.theme_index;
+            let prefix = if i == sel { " > " } else { "   " };
+            let check = if is_active { " \u{2713}" } else { "" };
+            let content = format!("{}{}{}", prefix, entry.name, check);
+            let style = if i == sel {
+                Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
+            } else if is_active {
+                Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+            };
+            ListItem::new(content).style(style)
+        }).collect();
 
     let list = List::new(list_items).block(
         Block::default()
