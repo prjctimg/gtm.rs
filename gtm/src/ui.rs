@@ -25,7 +25,7 @@ use gtm_core::track::TrackInfo;
 pub fn run_tui(socket: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = socket
         .map(PathBuf::from)
-        .unwrap_or_else(default_socket);
+        .unwrap_or_else(gtm_core::default_socket_path);
 
     ensure_daemon_running(&socket_path)?;
 
@@ -55,16 +55,6 @@ pub fn run_tui(socket: Option<String>) -> Result<(), Box<dyn std::error::Error>>
 
         res
     })
-}
-
-fn default_socket() -> PathBuf {
-    if let Ok(runtime) = std::env::var("XDG_RUNTIME_DIR") {
-        PathBuf::from(runtime).join("gtmd.socket")
-    } else if let Ok(tmpdir) = std::env::var("TMPDIR") {
-        PathBuf::from(tmpdir).join("gtmd.socket")
-    } else {
-        std::env::temp_dir().join("gtmd.socket")
-    }
 }
 
 fn ensure_daemon_running(socket_path: &std::path::Path) -> Result<(), Box<dyn std::error::Error>> {

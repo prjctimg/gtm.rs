@@ -105,6 +105,10 @@ impl Daemon {
         };
 
         let socket_path = Path::new(&config.socket_path);
+        if let Some(parent) = socket_path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| CoreError::Daemon(format!("create socket dir: {e}")))?;
+        }
         if socket_path.exists() {
             std::fs::remove_file(socket_path)
                 .map_err(|e| CoreError::Daemon(format!("remove stale socket: {e}")))?;
