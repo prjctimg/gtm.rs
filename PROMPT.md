@@ -1,26 +1,30 @@
-## NvChad themes
+## Bugs
 
-Change the themes to use NvChad color schemes. Repurpose the colors used for syntax highlighting for each module as the accent colors for the footer modules.
+- The time shown in the footer is 2 hours behind. Use the system provided time to stay consistent.
+- In Neovim the images appear blocky and in Zellij they don't render at all. Can we include this in the documentation`or at least design around this.
+- The contrast between the footer text and the background isterrible, create a function to ensure that good contrast is maintained i.e using black text on bright backgrounds.
+- Improve the center scrolling on the Library right pane and in overlays so that it is the list that moves up but the highlighter stays stationery.
+- When you press previous/next in the Now Playing tab, the daemon may stop responding though playback and TUI responsiveness remains. Add daemon tolerance so that it restarts the client connection or the client tries to reconnect so that normal behaviour is restored.
+- Remove the list numbers in the Library left pane (we don't need those) and remove the redundant icon right beside the 'Liked' list title. Also change the library tab icon because the current one has a weird 'vertical bar' artifact in dark mode.
 
-Be sure to take note of the background color of each theme and apply it as a background color as well
+## State synchronisation
 
-- Add build information about the host machine e.g (system, rust version used and versions for the symphonia,rodio and ratatui deps)
-- Add information about the memory used by the daemon and CPU count as well.
-- Show the storage usage of tracks and cover images.
+### Track info floating window
 
-## Cleaning the UI
+When the window moves down the list, it briefly shows the cover art and then it disappears, almost as if it got replaced by another frame and was not skipped or preserved.
 
-- The Up next notification is redundant, let's rely on the footer module to tell us the track coming next
-- Remove the redundant 'Title/Artist' and duration column headings (just show one column with no title) and the redundant inner 'Queue' heading inside the queue overlay
+When you play a track, the currently playing track's cover is the only one that gets shown even if you scroll the list.
 
-## Quirks
+### Now Playing tab
 
-- Esc should NOT close the TUI, the only keys that can close the TUI are 'q' and 'Q' (which tells the daemon to save state and kill itself, the TUI doe not wait for the daemon, it fires and quits)
--On cold start, the playback starts automatically (which shouldn'thappen since the user must manually resume) but the TUI hangs and I have to manually kill both processes to use the TUI again
-- The equalizer presets are not being applied as the user navigates the list, even when you pick one,no change is  audible.
--Ensure that the icons have the same size e.g the Settings icon on the settings tab is too small.
--Fix the 'gtm status' command to just show the playback  information instead of dumping raw JSON as a response. Add ANSI color coding to the output.
-- The TUI should update EVERY related widget at once when the track advances automatically to the next (detected when crossfade starts). This includes, track details, elapsed time and the cover art. Always ensure that they are updated when the crossfade begins.
-- When the user moves the highlight in a long scrolling list (overlay or not) apply the same approach we have in the Library right pane so that the highlighted item is always visible.
-- As the user moves up and down the list in the Library, ensure that the album art is updated as well instead of only being updated after we click Enter on the current item.
-- Improve the responsiveness of the youtube search by discarding all previous results when the user types in a whitespace character which means that our query is more specific than the results we previously fetched. Don't show stale results in the list.
+This tab suffers from non deterministic behaviour where sometimes the TUI updates as expected and sometimes it keeps stale even  across TUI restarts.
+The client MUST ALWAYS get track change or crossfade events so that the track details, elapsed time (setting it into the position of the track we are transitioning into AND setting the duration of the track we are transitioning into as the new duration) and the cover art are updated robustly and that there's no data races elsewhere.
+
+## Improved YT search
+
+- Add one playlist entry for every 3 track entries and ensure that the icons between individual tracks and playlist results are different. Ensure that the drill down list loads the playlist entries as expected and that it inherits the keybindings from the parent.
+
+## Improved library 'motions'
+
+- Add the following motions to the library right pane for common CRUD operations. For example 'add to queue','add to playlist' (shows an overlay of playlists available and a default option to create a new one), delete (permanently)/delete (from list),jump to end/start of list, edit track metadata (shows an overlay with tab navigatable fields for the user to modify the desired fields). Allow the user to engage multiselect mode with 'v' and have the Tab key toggle selection and move one position down the list after an item has been selected (better UX, removes manual need to press Down)
+Take inspiration from vim.

@@ -125,7 +125,7 @@ impl Daemon {
         let pulse_listener = UnixListener::bind(pulse_path)
             .map_err(|e| CoreError::Daemon(format!("bind pulse socket: {e}")))?;
 
-        let (event_tx, _) = broadcast::channel::<DaemonEvent>(256);
+        let (event_tx, _) = broadcast::channel::<DaemonEvent>(1024);
         let (req_tx, req_rx) = mpsc::unbounded_channel();
 
         let cache_dir = config.cache_dir.clone();
