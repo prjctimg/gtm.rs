@@ -115,7 +115,7 @@ fn find_gtmd_binary() -> Result<std::path::PathBuf, Box<dyn std::error::Error>> 
 
 // ─── Layout ───
 
-pub fn render(f: &mut ratatui::Frame, app: &mut App, dt: std::time::Duration) {
+pub fn render(f: &mut ratatui::Frame, app: &mut App) {
     let area = f.area();
     // Explicit background fill — the TUI defines its own background
     f.render_widget(
@@ -155,8 +155,7 @@ pub fn render(f: &mut ratatui::Frame, app: &mut App, dt: std::time::Duration) {
         render_hover_popup(f, area, app);
     }
 
-    // Apply tachyonfx animations over the rendered buffer
-    app.effects.process_effects(dt.into(), f.buffer_mut(), area);
+
 }
 
 // ─── Tab Bar ───

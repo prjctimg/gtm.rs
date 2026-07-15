@@ -163,8 +163,6 @@ pub struct App {
     pub is_ready: bool,
     last_queue_cursor: u128,
     last_track_id_display: Option<i64>,
-    pub effects: tachyonfx::EffectManager<&'static str>,
-    pub last_render_time: std::time::Instant,
     prev_tab: Tab,
     prev_track_id: Option<i64>,
     prev_status: gtm_core::state::PlaybackStatus,
@@ -296,8 +294,6 @@ impl App {
             is_ready: false,
             last_queue_cursor: initial_cursor,
             last_track_id_display: None,
-            effects: tachyonfx::EffectManager::default(),
-            last_render_time: std::time::Instant::now(),
             prev_tab: Tab::NowPlaying,
             prev_track_id: None,
             prev_status: gtm_core::state::PlaybackStatus::Stopped,
@@ -500,29 +496,16 @@ impl App {
                 }
             }
 
-            // Detect state changes and trigger animations
-            use ratatui::style::Color;
-            use tachyonfx::{fx, Interpolation};
+            // Detect state changes
             if self.current_tab != self.prev_tab {
                 self.prev_tab = self.current_tab;
-                self.effects.add_effect(
-                    fx::fade_from_fg(Color::Black, (200, Interpolation::QuadOut))
-                );
             }
             let current_tid = self.state.current_track.as_ref().map(|t| t.id);
             if current_tid != self.prev_track_id {
                 self.prev_track_id = current_tid;
-                if self.current_tab == Tab::NowPlaying {
-                    self.effects.add_effect(
-                        fx::coalesce((350, Interpolation::SineOut))
-                    );
-                }
             }
             if self.state.status != self.prev_status {
                 self.prev_status = self.state.status;
-                self.effects.add_effect(
-                    fx::fade_from_fg(Color::DarkGray, (250, Interpolation::SineOut))
-                );
             }
             // Volume changes: update the previous volume tracker without triggering an animation.
             if self.state.volume != self.prev_volume {
@@ -530,11 +513,6 @@ impl App {
             }
             if self.last_cover_track_id != self.prev_cover_id {
                 self.prev_cover_id = self.last_cover_track_id;
-                if self.current_tab == Tab::NowPlaying {
-                    self.effects.add_effect(
-                        fx::fade_from_fg(Color::Black, (180, Interpolation::QuadOut))
-                    );
-                }
             }
 
             // Hover popup: show immediately on scroll when right-pane focused,
@@ -570,19 +548,15 @@ impl App {
                 self.footer_title_scroll = self.footer_title_scroll.wrapping_add(1);
             }
 
-            let is_animating = self.effects.is_running();
             let force_render = pos_changed
                 || !self.notifications.is_empty()
                 || frame_count % 10 == 0
-                || is_animating
                 || self.cover_art_dirty;
             self.cover_art_dirty = false;
             self.last_display_position = self.display_position;
 
             if force_render {
-                let dt = self.last_render_time.elapsed();
-                self.last_render_time = std::time::Instant::now();
-                terminal.draw(|f| ui::render(f, &mut self, dt))?;
+                terminal.draw(|f| ui::render(f, &mut self))?;
                 self.suppress_footer_refresh = false;
             }
 
