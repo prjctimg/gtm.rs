@@ -1459,8 +1459,10 @@ impl App {
                                     let paths: Vec<String> = filtered.iter().map(|t| t.path.clone()).collect();
                                     let path = paths[idx].clone();
                                     let c = self.client.clone();
-                                    tokio::spawn(async move { let _ = c.queue_set(paths, idx as u128).await; });
-                                    self.send_high(TuiCommand::Play(path));
+                                    tokio::spawn(async move {
+                                        let _ = c.queue_set(paths, idx as u128).await;
+                                        let _ = c.play(&path, 0.0).await;
+                                    });
                                 }
                             } else if self.library_category == 2 {
                                 // Albums: select album → show its tracks
@@ -1490,8 +1492,10 @@ impl App {
                                     let paths: Vec<String> = filtered.iter().map(|t| t.path.clone()).collect();
                                     let path = paths[idx].clone();
                                     let c = self.client.clone();
-                                    tokio::spawn(async move { let _ = c.queue_set(paths, idx as u128).await; });
-                                    self.send_high(TuiCommand::Play(path));
+                                    tokio::spawn(async move {
+                                        let _ = c.queue_set(paths, idx as u128).await;
+                                        let _ = c.play(&path, 0.0).await;
+                                    });
                                 }
                             }
                         } else if self.current_tab == Tab::Settings && !self.settings_pane_focus {
