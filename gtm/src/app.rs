@@ -1019,6 +1019,9 @@ impl App {
                         error_handler(e);
                     } else {
                         let _ = ipc_tx.send(IpcResult::Notification("Track deleted".to_string(), NotificationKind::Success));
+                        if let Ok(DaemonRes::Tracks { tracks, .. }) = client.library_get_tracks(None, None).await {
+                            let _ = ipc_tx.send(IpcResult::LibraryTracks(tracks));
+                        }
                     }
                 });
             }
@@ -1028,6 +1031,9 @@ impl App {
                         error_handler(e);
                     } else {
                         let _ = ipc_tx.send(IpcResult::Notification("Removed from playlist".to_string(), NotificationKind::Success));
+                        if let Ok(DaemonRes::Playlists { playlists, .. }) = client.library_get_playlists().await {
+                            let _ = ipc_tx.send(IpcResult::Playlists(playlists));
+                        }
                     }
                 });
             }
@@ -1362,8 +1368,19 @@ impl App {
                     Some(KeyboardAction::ToggleFavourite) => {
                         self.set_last_action("Toggle Favourite");
                         if let Some(ref track) = self.state.current_track {
+                            let track_id = track.id;
+                            let new_fav = !track.favourite;
+                            if let Some(ref mut ct) = self.state.current_track {
+                                ct.favourite = new_fav;
+                            }
+                            for t in &mut self.tracks_cache {
+                                if t.id == track_id {
+                                    t.favourite = new_fav;
+                                    break;
+                                }
+                            }
                             let tx = self.cmd_tx();
-                            let _ = tx.send(TuiCommand::AddFavourite(track.id)).await;
+                            let _ = tx.send(TuiCommand::AddFavourite(track_id)).await;
                             self.notify("Favourite toggled", NotificationKind::Info);
                         }
                     }
@@ -1743,6 +1760,9 @@ impl App {
                             }
                             KeyCode::Char('t') => {
                                 self.show_tag_popup = !self.show_tag_popup;
+                                if self.show_tag_popup {
+                                    self.fetch_cover_for_scroll_position().await;
+                                }
                             }
                             KeyCode::Char('c') if self.current_tab == Tab::Settings => {
                                 // Toggle crossfade in Settings tab
@@ -1844,6 +1864,13 @@ impl App {
             }
             KeyCode::Up | KeyCode::Char('k') => {
                 let has_input = matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::YTSearch) | Some(OverlayId::SearchLibrary) | Some(OverlayId::CommandPalette));
+                let is_metadata = matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::EditMetadata));
+                if is_metadata {
+                    if self.metadata_field_idx > 0 {
+                        self.metadata_field_idx -= 1;
+                    }
+                    return;
+                }
                 if has_input && key.code != KeyCode::Up {
                     // Add 'k' to the query instead of navigating
                     if let Some(top) = self.overlays.top_mut() {
@@ -1865,6 +1892,13 @@ impl App {
             }
             KeyCode::Down | KeyCode::Char('j') => {
                 let has_input = matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::YTSearch) | Some(OverlayId::SearchLibrary) | Some(OverlayId::CommandPalette));
+                let is_metadata = matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::EditMetadata));
+                if is_metadata {
+                    if self.metadata_field_idx < 6 {
+                        self.metadata_field_idx += 1;
+                    }
+                    return;
+                }
                 if has_input && key.code != KeyCode::Down {
                     // Add 'j' to the query instead of navigating
                     if let Some(top) = self.overlays.top_mut() {
@@ -1883,6 +1917,31 @@ impl App {
                 }
                 self.clamp_overlay_selection();
                 self.apply_eq_on_navigation().await;
+            }
+            KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if matches!(self.overlays.top().map(|o| o.id), Some(OverlayId::EditMetadata)) {
+                    if let Some(track_id) = self.metadata_edit_track_id {
+                        let title = self.metadata_fields[0].clone();
+                        let artist = self.metadata_fields[1].clone();
+                        let album = self.metadata_fields[2].clone();
+                        let genre = self.metadata_fields[4].clone();
+                        let year = self.metadata_fields[5].parse::<i32>().ok();
+                        let track_number = self.metadata_fields[6].parse::<i32>().ok();
+                        let client = self.client.clone();
+                        let ipc_tx = self.ipc_tx.clone();
+                        tokio::spawn(async move {
+                            let _ = client.library_update_metadata(
+                                track_id,
+                                Some(title), Some(artist),
+                                Some(album), Some(genre),
+                                year, track_number,
+                            ).await;
+                            let _ = ipc_tx.send(IpcResult::Notification("Metadata saved".to_string(), NotificationKind::Success));
+                        });
+                        self.metadata_edit_track_id = None;
+                    }
+                    self.overlays.close_top();
+                }
             }
             KeyCode::Enter => {
                 // Dispatch based on overlay type
@@ -2078,27 +2137,31 @@ impl App {
                             }
                         }
                         OverlayId::EditMetadata => {
-                            if let Some(track_id) = self.metadata_edit_track_id {
-                                let title = self.metadata_fields[0].clone();
-                                let artist = self.metadata_fields[1].clone();
-                                let album = self.metadata_fields[2].clone();
-                                let genre = self.metadata_fields[4].clone();
-                                let year = self.metadata_fields[5].parse::<i32>().ok();
-                                let track_number = self.metadata_fields[6].parse::<i32>().ok();
-                                let client = self.client.clone();
-                                let ipc_tx = self.ipc_tx.clone();
-                                tokio::spawn(async move {
-                                    let _ = client.library_update_metadata(
-                                        track_id,
-                                        Some(title), Some(artist),
-                                        Some(album), Some(genre),
-                                        year, track_number,
-                                    ).await;
-                                    let _ = ipc_tx.send(IpcResult::Notification("Metadata saved".to_string(), NotificationKind::Success));
-                                });
-                                self.metadata_edit_track_id = None;
+                            if self.metadata_field_idx < 6 {
+                                self.metadata_field_idx += 1;
+                            } else {
+                                if let Some(track_id) = self.metadata_edit_track_id {
+                                    let title = self.metadata_fields[0].clone();
+                                    let artist = self.metadata_fields[1].clone();
+                                    let album = self.metadata_fields[2].clone();
+                                    let genre = self.metadata_fields[4].clone();
+                                    let year = self.metadata_fields[5].parse::<i32>().ok();
+                                    let track_number = self.metadata_fields[6].parse::<i32>().ok();
+                                    let client = self.client.clone();
+                                    let ipc_tx = self.ipc_tx.clone();
+                                    tokio::spawn(async move {
+                                        let _ = client.library_update_metadata(
+                                            track_id,
+                                            Some(title), Some(artist),
+                                            Some(album), Some(genre),
+                                            year, track_number,
+                                        ).await;
+                                        let _ = ipc_tx.send(IpcResult::Notification("Metadata saved".to_string(), NotificationKind::Success));
+                                    });
+                                    self.metadata_edit_track_id = None;
+                                }
+                                self.overlays.close_top();
                             }
-                            self.overlays.close_top();
                         }
                         _ => {}
                     }

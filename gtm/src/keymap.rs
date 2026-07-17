@@ -472,7 +472,7 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Select item",
                 },
             ),
-            // Delete — Del / d
+            // Delete — Del / D (uppercase, with confirmation)
             (
                 KeyCode::Delete.into(),
                 BoundCommand {
@@ -482,7 +482,7 @@ pub fn default_keybindings() -> Keybindings {
                 },
             ),
             (
-                KeyCode::Char('d').into(),
+                KeyCode::Char('D').into(),
                 BoundCommand {
                     action: KeyboardAction::Delete,
                     contexts: vec![KeyContext::List, KeyContext::Normal],
@@ -641,15 +641,8 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Delete from list",
                 },
             ),
-            // gg — jump to start
-            (
-                KeyCode::Char('g').into(),
-                BoundCommand {
-                    action: KeyboardAction::JumpToStart,
-                    contexts: vec![KeyContext::Normal],
-                    description: "Jump to start",
-                },
-            ),
+            // gg — jump to start (handled via pending_motion in app.rs)
+            // g alone is not bound; the app checks for double-press.
             // G (Shift) — jump to end
             (
                 KeyCode::Char('G').into(),

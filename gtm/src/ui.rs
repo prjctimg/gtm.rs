@@ -1639,7 +1639,7 @@ fn render_theme_picker_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(list, area);
 }
 
-fn render_track_info_popup(f: &mut ratatui::Frame, area: Rect, app: &App) {
+fn render_track_info_popup(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let Some(ref track) = app.state.current_track else {
         let p = Paragraph::new("No track playing")
             .alignment(Alignment::Center)
@@ -1663,8 +1663,6 @@ fn render_track_info_popup(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let dur = format_duration(track.duration as u64);
 
     let lines = vec![
-        Line::from(Span::styled(" Track Info", Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD))),
-        Line::from(""),
         Line::from(vec![
             Span::styled(" Title:   ", Style::default().fg(app.theme.fg_dim)),
             Span::styled(&track.title, Style::default().fg(app.theme.fg_bright).add_modifier(Modifier::BOLD)),
@@ -1701,21 +1699,63 @@ fn render_track_info_popup(f: &mut ratatui::Frame, area: Rect, app: &App) {
             Span::styled(" Progress:", Style::default().fg(app.theme.fg_dim)),
             Span::styled(format!(" {} / {}", pos, dur), Style::default().fg(app.theme.fg)),
         ]),
-        Line::from(""),
-        Line::from(Span::styled(" [t] Close  ", Style::default().fg(app.theme.fg_dim))),
     ];
 
-    let p = Paragraph::new(lines)
-        .alignment(Alignment::Left)
-        .style(Style::default().bg(app.theme.overlay_bg));
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" Track Info ")
         .border_type(BorderType::Plain)
         .style(Style::default().bg(app.theme.overlay_bg));
     let inner = block.inner(area);
+    f.render_widget(Clear, area);
     f.render_widget(block, area);
-    f.render_widget(p, inner);
+
+    let has_cover = app.scroll_cover_stateful.is_some() || app.cover_stateful.is_some();
+    if has_cover {
+        let cover_cols = 10u16;
+        let hchunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(cover_cols), Constraint::Length(2), Constraint::Min(0)])
+            .split(inner);
+
+        let cover_area = Rect {
+            x: hchunks[0].x,
+            y: hchunks[0].y,
+            width: hchunks[0].width.min(10),
+            height: hchunks[0].height.min(5),
+        };
+        if let Some(ref mut protocol) = app.scroll_cover_stateful {
+            let image = ratatui_image::StatefulImage::new();
+            f.render_stateful_widget(image, cover_area, protocol);
+        } else if let Some(ref mut protocol) = app.cover_stateful {
+            let image = ratatui_image::StatefulImage::new();
+            f.render_stateful_widget(image, cover_area, protocol);
+        }
+
+        let mut text_lines = vec![
+            Line::from(Span::styled(" Track Info", Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD))),
+            Line::from(""),
+        ];
+        text_lines.extend(lines);
+        text_lines.push(Line::from(""));
+        text_lines.push(Line::from(Span::styled(" [t] Close  ", Style::default().fg(app.theme.fg_dim))));
+
+        let para = Paragraph::new(text_lines)
+            .style(Style::default().bg(app.theme.overlay_bg));
+        f.render_widget(para, hchunks[2]);
+    } else {
+        let mut text_lines = vec![
+            Line::from(Span::styled(" Track Info", Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD))),
+            Line::from(""),
+        ];
+        text_lines.extend(lines);
+        text_lines.push(Line::from(""));
+        text_lines.push(Line::from(Span::styled(" [t] Close  ", Style::default().fg(app.theme.fg_dim))));
+
+        let para = Paragraph::new(text_lines)
+            .style(Style::default().bg(app.theme.overlay_bg));
+        f.render_widget(para, inner);
+    }
 }
 
 /// Return the local time as " HH:MM " using the system clock.
@@ -1979,6 +2019,6 @@ fn render_edit_metadata_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let para = Paragraph::new(lines);
     f.render_widget(para, chunks[0]);
 
-    let help_text = " [Tab] Next field  [Enter] Save  [Esc] Cancel";
+    let help_text = " [j/k] Navigate fields  [Tab] Next  [Enter] Next/Save  [Ctrl+Enter] Save  [Esc] Cancel";
     overlay_help(f, chunks[1], help_text, app);
 }

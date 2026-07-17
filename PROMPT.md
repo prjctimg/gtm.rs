@@ -20,11 +20,12 @@ When you play a track, the currently playing track's cover is the only one that 
 This tab suffers from non deterministic behaviour where sometimes the TUI updates as expected and sometimes it keeps stale even  across TUI restarts.
 The client MUST ALWAYS get track change or crossfade events so that the track details, elapsed time (setting it into the position of the track we are transitioning into AND setting the duration of the track we are transitioning into as the new duration) and the cover art are updated robustly and that there's no data races elsewhere.
 
-## Improved YT search
-
-- Add one playlist entry for every 3 track entries and ensure that the icons between individual tracks and playlist results are different. Ensure that the drill down list loads the playlist entries as expected and that it inherits the keybindings from the parent.
-
 ## Improved library 'motions'
 
 - Add the following motions to the library right pane for common CRUD operations. For example 'add to queue','add to playlist' (shows an overlay of playlists available and a default option to create a new one), delete (permanently)/delete (from list),jump to end/start of list, edit track metadata (shows an overlay with tab navigatable fields for the user to modify the desired fields). Allow the user to engage multiselect mode with 'v' and have the Tab key toggle selection and move one position down the list after an item has been selected (better UX, removes manual need to press Down)
-Take inspiration from vim.
+Take inspiration from vim. These may be assumed to be implemented but none of them seem to be working including the deleting motions.
+
+## Bugs
+
+- Pipe all stderr to a log file instead of letting it pass through to the TUI since it breaks the TUI appearance.
+- Some of the commands are not being executed when you call them from the command palette overlay.
