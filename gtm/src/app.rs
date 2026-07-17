@@ -188,6 +188,7 @@ pub struct App {
     pub metadata_edit_track_id: Option<i64>,
     pub metadata_fields: [String; 7],
     pub metadata_field_idx: usize,
+    pub pending_quit: bool,
 }
 
 enum IpcResult {
@@ -326,6 +327,7 @@ impl App {
             metadata_edit_track_id: None,
             metadata_fields: Default::default(),
             metadata_field_idx: 0,
+            pending_quit: false,
         })
     }
 
@@ -601,7 +603,7 @@ impl App {
             if event::poll(Duration::from_millis(16))? {
                 if let Event::Key(key) = event::read()? {
                     if key.kind == KeyEventKind::Press {
-                        if !self.handle_key(key).await {
+                        if !self.handle_key(key).await || self.pending_quit {
                             break;
                         }
                     }
@@ -1956,15 +1958,15 @@ impl App {
                                     self.send_high(TuiCommand::ToggleMute);
                                 } else if label.starts_with("repeat") {
                                     let new_mode = match self.state.repeat {
-                                        RepeatMode::Off => RepeatMode::All,
-                                        RepeatMode::All => RepeatMode::One,
-                                        RepeatMode::One => RepeatMode::Off,
+                                        RepeatMode::Off => RepeatMode::One,
+                                        RepeatMode::One => RepeatMode::All,
+                                        RepeatMode::All => RepeatMode::Off,
                                     };
                                     self.send_high(TuiCommand::CycleRepeat(new_mode));
                                 } else if label.starts_with("shuffle") {
                                     self.send_high(TuiCommand::ToggleShuffle);
                                 } else if label.starts_with("quit") {
-                                    self.send_high(TuiCommand::Stop);
+                                    self.pending_quit = true;
                                 } else if label.starts_with("tab cycle") {
                                     self.current_tab = match self.current_tab {
                                         Tab::NowPlaying => Tab::Library,
@@ -1981,7 +1983,7 @@ impl App {
                                     self.overlays.open(OverlayId::Queue);
                                 } else if label.starts_with("youtube") {
                                     self.overlays.open(OverlayId::YTSearch);
-                                } else if label.starts_with("library o/l") {
+                                } else if label.starts_with("search lib") {
                                     self.overlays.open(OverlayId::SearchLibrary);
                                 } else if label.starts_with("eq") {
                                     self.overlays.open(OverlayId::Equalizer);
@@ -1995,8 +1997,6 @@ impl App {
                                     self.overlays.open(OverlayId::About);
                                 } else if label.starts_with("search") {
                                     self.overlays.open(OverlayId::SearchLibrary);
-                                } else if label.starts_with("command") {
-                                    self.input_mode = InputMode::Command;
                                 } else if label.starts_with("spotify") {
                                     self.overlays.open(OverlayId::SpotifySearch);
                                 } else if label.starts_with("cmd palette") {
