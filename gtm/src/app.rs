@@ -75,7 +75,7 @@ pub const LIBRARY_CATEGORIES: &[&str] = &[
     "Artists",
     "Playlists",
     "Spotify",
-    "Downloads",
+    "YouTube",
 ];
 
 /// Returns true if the terminal doesn't support image protocols (Neovim, Zellij, etc.).
@@ -183,6 +183,7 @@ pub struct App {
     pub track_popup_visible: bool,
     pub track_popup_track_id: Option<i64>,
     pub track_popup_cover: Option<Vec<u8>>,
+    pub popup_cover_stateful: Option<StatefulProtocol>,
     last_popup_cover_fetch_id: Option<i64>,
 }
 
@@ -319,6 +320,7 @@ impl App {
             track_popup_visible: false,
             track_popup_track_id: None,
             track_popup_cover: None,
+            popup_cover_stateful: None,
             last_popup_cover_fetch_id: None,
         })
     }
@@ -496,6 +498,7 @@ impl App {
                     IpcResult::PopupCoverArt(cover, track_id) => {
                         if !no_image_protocol() && self.track_popup_track_id == Some(track_id) {
                             self.track_popup_cover = cover;
+                            self.sync_popup_cover_stateful();
                         }
                     }
                 }
@@ -571,12 +574,13 @@ impl App {
             self.last_display_position = self.display_position;
 
             if force_render {
-                terminal.draw(|f| ui::render(f, &mut self))?;
-                self.suppress_footer_refresh = false;
+                if terminal.draw(|f| ui::render(f, &mut self)).is_ok() {
+                    self.suppress_footer_refresh = false;
+                }
             }
 
-            if event::poll(Duration::from_millis(16))? {
-                if let Event::Key(key) = event::read()? {
+            if event::poll(Duration::from_millis(16)).unwrap_or(false) {
+                if let Ok(Event::Key(key)) = event::read() {
                     if key.kind == KeyEventKind::Press {
                         if !self.handle_key(key).await || self.pending_quit {
                             break;
@@ -615,6 +619,7 @@ impl App {
             let current_tid = self.state.current_track.as_ref().map(|t| t.id);
             if current_tid == Some(tid) {
                 self.track_popup_cover = self.current_cover.clone();
+                self.sync_popup_cover_stateful();
                 self.last_popup_cover_fetch_id = None;
             } else if self.last_popup_cover_fetch_id != Some(tid) && !no_image_protocol() {
                 self.last_popup_cover_fetch_id = Some(tid);
@@ -642,6 +647,7 @@ impl App {
         self.track_popup_visible = false;
         self.track_popup_track_id = None;
         self.track_popup_cover = None;
+        self.popup_cover_stateful = None;
         self.last_popup_cover_fetch_id = None;
     }
 
@@ -666,6 +672,12 @@ impl App {
         }
         if self.library_category == 1 {
             tracks.retain(|t| t.favourite);
+        } else if self.library_category == 5 {
+            // Spotify: tracks from the spotify audio subdirectory
+            tracks.retain(|t| t.path.contains("/audio/spotify") || t.path.contains("\\audio\\spotify"));
+        } else if self.library_category == 6 {
+            // YouTube: tracks from the youtube audio subdirectory
+            tracks.retain(|t| t.path.contains("/audio/youtube") || t.path.contains("\\audio\\youtube"));
         }
         tracks
     }
@@ -731,6 +743,19 @@ impl App {
                 }
             }
             _ => self.cover_stateful = None,
+        }
+    }
+
+    fn sync_popup_cover_stateful(&mut self) {
+        match (&self.track_popup_cover, &self.cover_picker) {
+            (Some(bytes), Some(picker)) => {
+                if let Ok(img) = image::load_from_memory(bytes) {
+                    self.popup_cover_stateful = Some(picker.new_resize_protocol(img));
+                } else {
+                    self.popup_cover_stateful = None;
+                }
+            }
+            _ => self.popup_cover_stateful = None,
         }
     }
 
@@ -1422,7 +1447,12 @@ impl App {
                     Some(KeyboardAction::MoveUp) => {
                         match self.current_tab {
                             Tab::Library if self.library_pane_focus => {
-                                self.library_category = self.library_category.saturating_sub(1);
+                                let new_cat = self.library_category.saturating_sub(1);
+                                if new_cat != self.library_category {
+                                    self.browse_detail = None;
+                                    self.scroll_offset = 0;
+                                }
+                                self.library_category = new_cat;
                             }
                             Tab::Settings if self.settings_pane_focus => {
                                 self.settings_category = self.settings_category.saturating_sub(1);
@@ -1439,7 +1469,12 @@ impl App {
                     Some(KeyboardAction::MoveDown) => {
                         match self.current_tab {
                             Tab::Library if self.library_pane_focus => {
-                                self.library_category = (self.library_category + 1).min(LIBRARY_CATEGORIES.len() - 1);
+                                let new_cat = (self.library_category + 1).min(LIBRARY_CATEGORIES.len() - 1);
+                                if new_cat != self.library_category {
+                                    self.browse_detail = None;
+                                    self.scroll_offset = 0;
+                                }
+                                self.library_category = new_cat;
                             }
                             Tab::Settings if self.settings_pane_focus => {
                                 self.settings_category = (self.settings_category + 1).min(NUM_SETTINGS_CATEGORIES.saturating_sub(1));

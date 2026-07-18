@@ -6,7 +6,6 @@
 
 use std::path::PathBuf;
 
-use chrono::Timelike;
 use crossterm::terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen};
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
@@ -314,14 +313,14 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             .borders(Borders::ALL)
             .title(format!(" Now Playing  ·  gtm {} ", version))
             .border_type(BorderType::Plain)
-            .border_style(Style::default().fg(app.theme.border));
+            .border_style(Style::default().fg(app.theme.fg));
 
         if app.state.current_track.is_none() {
             let inner = np_block.inner(np_area);
             f.render_widget(np_block, np_area);
             let msg = Paragraph::new("No track playing")
                 .alignment(Alignment::Center)
-                .style(Style::default().fg(app.theme.fg_dim));
+                .style(Style::default().fg(app.theme.fg));
             f.render_widget(msg, inner);
         } else {
             let inner = np_block.inner(np_area);
@@ -351,7 +350,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                     app.theme.fg,
                 );
 
-                let info_area = hchunks[0];
+                let info_area = hchunks[1];
                 let track = app.state.current_track.as_ref().unwrap();
 
                 let info_chunks = Layout::default()
@@ -1193,7 +1192,7 @@ pub fn render_progress_variant(ratio: f64, width: usize, app: &App) -> String {
 }
 
 /// Floating track info popup shown when scrolling in the Library list.
-fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &App) {
+fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App) {
     let track_id = match app.track_popup_track_id {
         Some(id) => id,
         None => return,
@@ -1260,7 +1259,10 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &App) {
             width: COVER_W,
             height: COVER_H.min(split[0].height),
         };
-        if let Some(ref cover_bytes) = app.track_popup_cover {
+        if let Some(ref mut protocol) = app.popup_cover_stateful {
+            let image = StatefulImage::new();
+            f.render_stateful_widget(image, cover_area, protocol);
+        } else if let Some(ref cover_bytes) = app.track_popup_cover {
             render_cover_block(f, cover_area, cover_bytes);
         }
 
@@ -1742,7 +1744,7 @@ fn render_theme_picker_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
 /// Return the local time as " HH:MM " using the system clock.
 pub fn local_time_str() -> String {
     let now = chrono::Local::now();
-    format!(" {:02}:{:02} ", now.hour(), now.minute())
+    format!(" {},{} {} | {} CAT ", now.format("%a"), now.format("%d"), now.format("%B"), now.format("%H:%M"))
 }
 
 fn format_duration(secs: u64) -> String {
