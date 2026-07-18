@@ -48,11 +48,11 @@ pub fn presets() -> Vec<FooterPreset> {
         FooterPreset {
             name: "Default",
             a: vec![FooterModule::Playback],
-            b: vec![FooterModule::Title],
-            c: vec![FooterModule::Volume, FooterModule::EqPreset, FooterModule::Queue],
-            x: vec![],
+            b: vec![FooterModule::Volume, FooterModule::EqPreset],
+            c: vec![FooterModule::Queue],
+            x: vec![FooterModule::Repeat, FooterModule::Shuffle],
             y: vec![FooterModule::KeyAction],
-            z: vec![FooterModule::Clock, FooterModule::SleepTimer, FooterModule::Progress],
+            z: vec![FooterModule::Clock, FooterModule::SleepTimer],
         },
         FooterPreset {
             name: "Minimal",

@@ -489,17 +489,9 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Delete item",
                 },
             ),
-            // Direct tab switching by number — 1 through 3
+            // Direct tab switching by number — 1 through 2
             (
                 KeyCode::Char('1').into(),
-                BoundCommand {
-                    action: KeyboardAction::SwitchTab(Tab::NowPlaying),
-                    contexts: vec![KeyContext::Normal],
-                    description: "Now Playing tab",
-                },
-            ),
-            (
-                KeyCode::Char('2').into(),
                 BoundCommand {
                     action: KeyboardAction::SwitchTab(Tab::Library),
                     contexts: vec![KeyContext::Normal],
@@ -507,7 +499,7 @@ pub fn default_keybindings() -> Keybindings {
                 },
             ),
             (
-                KeyCode::Char('3').into(),
+                KeyCode::Char('2').into(),
                 BoundCommand {
                     action: KeyboardAction::SwitchTab(Tab::Settings),
                     contexts: vec![KeyContext::Normal],
