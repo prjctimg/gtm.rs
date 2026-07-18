@@ -236,7 +236,28 @@ fn render_cover_block(f: &mut ratatui::Frame, area: Rect, cover_bytes: &[u8]) {
     };
     let disp_w = (area.width as u32).max(1);
     let disp_h = (area.height as u32 * 2).max(1);
-    let thumb = image::imageops::resize(&img, disp_w, disp_h, image::imageops::FilterType::CatmullRom);
+
+    // Crop-then-resize: CSS background-size: cover behavior
+    let src_w = img.width() as f64;
+    let src_h = img.height() as f64;
+    let target_ratio = disp_w as f64 / disp_h as f64;
+    let source_ratio = src_w / src_h;
+
+    let cropped = if (source_ratio - target_ratio).abs() < 0.01 {
+        img
+    } else if source_ratio > target_ratio {
+        // Source is wider: crop sides
+        let new_w = (src_h * target_ratio) as u32;
+        let offset = ((src_w as u32 - new_w) / 2).min(img.width() - 1);
+        image::imageops::crop_imm(&img, offset, 0, new_w, img.height()).to_image()
+    } else {
+        // Source is taller: crop top/bottom
+        let new_h = (src_w / target_ratio) as u32;
+        let offset = ((img.height() - new_h) / 2).min(img.height() - 1);
+        image::imageops::crop_imm(&img, 0, offset, img.width(), new_h).to_image()
+    };
+
+    let thumb = image::imageops::resize(&cropped, disp_w, disp_h, image::imageops::FilterType::CatmullRom);
     for y in 0..area.height as u32 {
         let mut spans = Vec::with_capacity(disp_w as usize);
         for x in 0..disp_w {
@@ -333,7 +354,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 // Cover on the LEFT, info on the RIGHT
                 let hchunks = Layout::default()
                     .direction(Direction::Horizontal)
-                    .constraints([Constraint::Length(COVER_W), Constraint::Min(0)])
+                    .constraints([Constraint::Length(COVER_W), Constraint::Length(1), Constraint::Min(0)])
                     .split(inner);
 
                 let cover_area = Rect {
@@ -350,7 +371,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                     app.theme.fg,
                 );
 
-                let info_area = hchunks[1];
+                let info_area = hchunks[2];
                 let track = app.state.current_track.as_ref().unwrap();
 
                 let info_chunks = Layout::default()
@@ -1203,8 +1224,8 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
     };
 
     let has_cover = app.track_popup_cover.is_some();
-    const COVER_W: u16 = 6;
-    const COVER_H: u16 = 6;
+    const COVER_W: u16 = 10;
+    const COVER_H: u16 = 5;
     let text_margin = 2u16;
 
     let popup_w = if has_cover {
@@ -1212,7 +1233,7 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
     } else {
         48u16.min(content_area.width.saturating_sub(4))
     };
-    let popup_h = if has_cover { COVER_H + 2 } else { 7u16 };
+    let popup_h = if has_cover { COVER_H + 2 } else { 6u16 };
     if popup_w < 20 || popup_h > content_area.height {
         return;
     }
@@ -1234,6 +1255,14 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
     let display_album = if track.album.is_empty() { "Unknown" } else { &track.album };
     let dur = format_duration(track.duration as u64);
     let fav = if track.favourite { " \u{2665}" } else { "" };
+
+    let source = if track.path.contains("/audio/spotify") {
+        "Spotify"
+    } else if track.path.contains("/audio/youtube") {
+        "YouTube"
+    } else {
+        "Local"
+    };
 
     let block = Block::default()
         .borders(Borders::ALL)
@@ -1267,9 +1296,24 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
         }
 
         let text_area = split[1];
+        let title_avail = text_area.width.saturating_sub(1) as usize;
+        let animated_title = scroll_text(&display_title, title_avail, app.np_title_scroll, true);
+        let source_label = if use_nerd_fonts() {
+            match source {
+                "Spotify" => " \u{f1bc} Spotify",
+                "YouTube" => " \u{f167} YouTube",
+                _ => " \u{f3b5} Local",
+            }
+        } else {
+            match source {
+                "Spotify" => " ♫ Spotify",
+                "YouTube" => " ▶ YouTube",
+                _ => " ♪ Local",
+            }
+        };
         let lines = vec![
             Line::from(Span::styled(
-                format!(" {}", display_title),
+                format!(" {}", animated_title),
                 Style::default().fg(app.theme.fg_bright).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
@@ -1286,7 +1330,7 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
                 Style::default().fg(app.theme.fg_dim),
             )),
             Line::from(Span::styled(
-                format!(" Path: {}", track.path),
+                format!(" Source: {}", source_label),
                 Style::default().fg(app.theme.fg_dim),
             )),
         ];
@@ -1294,9 +1338,24 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
         f.render_widget(para, text_area);
     } else {
         // Text only (no cover or too narrow)
+        let title_avail = inner.width.saturating_sub(2) as usize;
+        let animated_title = scroll_text(&display_title, title_avail, app.np_title_scroll, true);
+        let source_label = if use_nerd_fonts() {
+            match source {
+                "Spotify" => " \u{f1bc} Spotify",
+                "YouTube" => " \u{f167} YouTube",
+                _ => " \u{f3b5} Local",
+            }
+        } else {
+            match source {
+                "Spotify" => " ♫ Spotify",
+                "YouTube" => " ▶ YouTube",
+                _ => " ♪ Local",
+            }
+        };
         let lines = vec![
             Line::from(Span::styled(
-                format!("  {}", display_title),
+                format!("  {}", animated_title),
                 Style::default().fg(app.theme.fg_bright).add_modifier(Modifier::BOLD),
             )),
             Line::from(Span::styled(
@@ -1313,7 +1372,7 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
                 Style::default().fg(app.theme.fg_dim),
             )),
             Line::from(Span::styled(
-                format!("  Path: {}", track.path),
+                format!("  Source: {}", source_label),
                 Style::default().fg(app.theme.fg_dim),
             )),
         ];
