@@ -146,6 +146,8 @@ pub struct App {
     pub last_cover_track_id: Option<i64>,
     pub cover_picker: Option<Picker>,
     pub cover_stateful: Option<StatefulProtocol>,
+    pub terminal_cols: u16,
+    pub terminal_rows: u16,
     pub cmd_rx: mpsc::Receiver<TuiCommand>,
     cmd_tx: mpsc::Sender<TuiCommand>,
     high_pri_cmd_rx: mpsc::UnboundedReceiver<TuiCommand>,
@@ -290,6 +292,8 @@ impl App {
             last_cover_track_id: None,
             cover_picker: None,
             cover_stateful: None,
+            terminal_cols: 80,
+            terminal_rows: 24,
             cmd_rx,
             cmd_tx,
             high_pri_cmd_rx,
@@ -628,6 +632,8 @@ impl App {
 
             if force_render {
                 let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                self.terminal_cols = cols;
+                self.terminal_rows = rows;
                 if cols < 40 || rows < 10 {
                     let _ = terminal.draw(|f| {
                         let msg = Paragraph::new("Terminal too small (min 40x10)")

@@ -193,7 +193,11 @@ fn render_content(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 fn render_help_bar(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let text = " [Space] Play/Pause  [n/N] Next  [p/P] Prev  [+/-] Volume  [s] Stop  [:] Command Palette  [q] Quit ";
+    let text = if app.terminal_cols < 60 {
+        " [Space] Play  [n] Next  [p] Prev  [+/-] Vol  [:] Cmd  [q] Quit "
+    } else {
+        " [Space] Play/Pause  [n/N] Next  [p/P] Prev  [+/-] Volume  [s] Stop  [:] Command Palette  [q] Quit "
+    };
     let para = Paragraph::new(text)
         .style(Style::default().fg(app.theme.fg_dim));
     f.render_widget(para, area);
@@ -314,22 +318,34 @@ fn centered_scroll(sel: usize, available: usize, total: usize) -> (usize, usize)
 
 fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let version = option_env!("CARGO_PKG_VERSION").unwrap_or("0.1.0");
+    let is_narrow = app.terminal_cols < 60;
+    let np_height: u16 = if is_narrow { 5 } else { 8 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(8), Constraint::Min(1)])
+        .constraints([Constraint::Length(np_height), Constraint::Min(1)])
         .split(area);
 
     let np_area = chunks[0];
 
-    let panes = if app.show_lyrics {
+    let lib_width: u16 = if is_narrow {
+        (app.terminal_cols / 3).max(12)
+    } else {
+        28
+    };
+    let panes = if app.show_lyrics && !is_narrow {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(0), Constraint::Length(28)])
+            .constraints([Constraint::Length(lib_width), Constraint::Min(0), Constraint::Length(lib_width)])
+            .split(chunks[1])
+    } else if app.show_lyrics && is_narrow {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0)])
             .split(chunks[1])
     } else {
         Layout::default()
             .direction(Direction::Horizontal)
-            .constraints([Constraint::Length(28), Constraint::Min(0)])
+            .constraints([Constraint::Length(lib_width), Constraint::Min(0)])
             .split(chunks[1])
     };
 
@@ -743,6 +759,10 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     // ── Right lyrics pane (toggleable) ──
     if app.show_lyrics && panes.len() > 2 {
         render_lyrics_pane(f, panes[2], app);
+    }
+    // In narrow mode with lyrics, show lyrics replacing the library pane
+    if app.show_lyrics && panes.len() == 1 {
+        render_lyrics_pane(f, panes[0], app);
     }
 }
 
