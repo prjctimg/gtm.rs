@@ -1207,44 +1207,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 }
 
 pub fn render_progress_variant(ratio: f64, width: usize, app: &App) -> String {
-    let inner_w = width.saturating_sub(2).max(4);
-    let filled = (ratio.clamp(0.0, 1.0) * inner_w as f64).round() as usize;
-    let mut line = String::with_capacity(width);
-    match app.theme_index % 3 {
-        0 => {
-            // Braille dots variant
-            line.push('⡀');
-            for i in 0..inner_w {
-                if i < filled {
-                    line.push('⣿');
-                } else {
-                    line.push('⣀');
-                }
-            }
-            line.push('⠤');
-        }
-        1 => {
-            // Seek-head line variant
-            line.push('─');
-            for i in 0..inner_w {
-                if i == filled {
-                    line.push('●');
-                } else {
-                    line.push('─');
-                }
-            }
-            line.push('─');
-        }
-        _ => {
-            // Classic bracket variant
-            line.push('[');
-            for i in 0..inner_w {
-                line.push(if i < filled { '█' } else { '░' });
-            }
-            line.push(']');
-        }
-    }
-    line
+    crate::progress::render_progress(ratio, width, app.progress_style)
 }
 
 /// Time-synced lyrics pane on the right side of the library view.
@@ -1700,6 +1663,7 @@ pub const COMMAND_PALETTE_COMMANDS: &[(&str, &str)] = &[
     ("\u{2139} About O/L",    "Alt+A"),
     ("\u{266b} Spotify O/L",  "Alt+S"),
     ("\u{1f4dd} Fetch Lyrics","l"),
+    ("\u{2576} Progress Style","P"),
 ];
 
 fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {

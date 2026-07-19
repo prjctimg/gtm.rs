@@ -46,21 +46,23 @@ struct Prefs {
     transparent_bg: bool,
     #[serde(default)]
     footer_preset: usize,
+    #[serde(default)]
+    progress_style: crate::progress::ProgressStyle,
 }
 
 fn load_prefs() -> Prefs {
     let path = prefs_path();
     let s = match std::fs::read_to_string(path) {
         Ok(s) => s,
-        Err(_) => return Prefs { theme_index: 0, transparent_bg: false, footer_preset: 0 },
+        Err(_) => return Prefs { theme_index: 0, transparent_bg: false, footer_preset: 0, progress_style: crate::progress::ProgressStyle::default() },
     };
     if let Ok(p) = serde_json::from_str::<Prefs>(&s) {
         return p;
     }
     if let Ok(idx) = serde_json::from_str::<usize>(&s) {
-        return Prefs { theme_index: idx.min(crate::theme::THEMES.len().saturating_sub(1)), transparent_bg: false, footer_preset: 0 };
+        return Prefs { theme_index: idx.min(crate::theme::THEMES.len().saturating_sub(1)), transparent_bg: false, footer_preset: 0, progress_style: crate::progress::ProgressStyle::default() };
     }
-    Prefs { theme_index: 0, transparent_bg: false, footer_preset: 0 }
+    Prefs { theme_index: 0, transparent_bg: false, footer_preset: 0, progress_style: crate::progress::ProgressStyle::default() }
 }
 
 fn save_prefs(prefs: &Prefs) {
@@ -175,6 +177,7 @@ pub struct App {
     pub cached_footer_spans: Option<(Vec<ratatui::text::Span<'static>>, ratatui::style::Color, ratatui::style::Color)>,
     last_event_time: std::time::Instant,
     pub multiselect_mode: bool,
+    pub progress_style: crate::progress::ProgressStyle,
     pub selected_indices: std::collections::HashSet<usize>,
     pending_motion: Option<char>,
     pub pending_playlist_track_ids: Vec<i64>,
@@ -321,6 +324,7 @@ impl App {
             cached_footer_spans: None,
             last_event_time: std::time::Instant::now(),
             multiselect_mode: false,
+            progress_style: crate::progress::ProgressStyle::Braille,
             selected_indices: std::collections::HashSet::new(),
             pending_motion: None,
             pending_playlist_track_ids: Vec::new(),
@@ -1495,7 +1499,12 @@ impl App {
                             theme_index: self.theme_index,
                             transparent_bg: self.transparent_bg,
                             footer_preset: self.footer_preset,
+                            progress_style: self.progress_style,
                         });
+                    }
+                    Some(KeyboardAction::CycleProgressStyle) => {
+                        self.progress_style = self.progress_style.next();
+                        self.notify(&format!("Progress: {}", self.progress_style.name()), NotificationKind::Info);
                     }
                     Some(KeyboardAction::FocusLeft) => {
                         match self.current_tab {
@@ -1677,7 +1686,7 @@ impl App {
                                 3 => match opt {
                                     1 => { // Transparent BG toggle
                                         self.transparent_bg = !self.transparent_bg;
-                                        save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset });
+                                        save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, progress_style: self.progress_style });
                                     }
                                     2 => { // Sync Covers
                                         let ipc_tx = self.ipc_tx.clone();
@@ -1701,7 +1710,7 @@ impl App {
                                     3 => { // Footer Preset cycle
                                         self.footer_preset = (self.footer_preset + 1) % footer::num_presets();
                                         let name = footer::presets()[self.footer_preset].name;
-                                        save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset });
+                                        save_prefs(&Prefs { theme_index: self.theme_index, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, progress_style: self.progress_style });
                                         self.notify(format!("Footer: {}", name), NotificationKind::Info);
                                     }
                                     _ => {}
@@ -1973,7 +1982,7 @@ impl App {
                         let idx = top.selected.min(THEMES.len().saturating_sub(1));
                         self.theme = (THEMES[idx].builder)();
                         self.theme_index = idx;
-                        save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset });
+                        save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, progress_style: self.progress_style });
                     }
                 }
                 self.clamp_overlay_selection();
@@ -2001,7 +2010,7 @@ impl App {
                         let idx = top.selected.min(THEMES.len().saturating_sub(1));
                         self.theme = (THEMES[idx].builder)();
                         self.theme_index = idx;
-                        save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset });
+                        save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, progress_style: self.progress_style });
                     }
                 }
                 self.clamp_overlay_selection();
@@ -2153,6 +2162,9 @@ impl App {
                                 } else if label.starts_with("fetch lyrics") {
                                     self.show_lyrics = true;
                                     self.send_high(TuiCommand::FetchLyrics);
+                                } else if label.starts_with("progress style") {
+                                    self.progress_style = self.progress_style.next();
+                                    self.notify(&format!("Progress: {}", self.progress_style.name()), crate::app::NotificationKind::Info);
                                 }
                             }
                             self.overlays.close_top();
@@ -2185,7 +2197,7 @@ impl App {
                             let idx = top.selected.min(THEMES.len().saturating_sub(1));
                             self.theme = (THEMES[idx].builder)();
                             self.theme_index = idx;
-                            save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset });
+                            save_prefs(&Prefs { theme_index: idx, transparent_bg: self.transparent_bg, footer_preset: self.footer_preset, progress_style: self.progress_style });
                             self.overlays.close_top();
                         }
                         OverlayId::SearchLibrary => {
