@@ -12,7 +12,9 @@ use gtm_core::client::DaemonClient;
 use gtm_core::ipc::DaemonRes;
 use gtm_core::state::{DaemonState, Easing, PlaybackStatus, RepeatMode, Tab};
 use gtm_core::track::{Playlist, TrackInfo, YTSearchResult};
+use ratatui::layout::Alignment;
 use ratatui::Terminal;
+use ratatui::widgets::Paragraph;
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use tokio::sync::mpsc;
@@ -625,7 +627,14 @@ impl App {
             self.last_display_position = self.display_position;
 
             if force_render {
-                if terminal.draw(|f| ui::render(f, &mut self)).is_ok() {
+                let (cols, rows) = crossterm::terminal::size().unwrap_or((80, 24));
+                if cols < 40 || rows < 10 {
+                    let _ = terminal.draw(|f| {
+                        let msg = Paragraph::new("Terminal too small (min 40x10)")
+                            .alignment(Alignment::Center);
+                        f.render_widget(msg, f.area());
+                    });
+                } else if terminal.draw(|f| ui::render(f, &mut self)).is_ok() {
                     self.suppress_footer_refresh = false;
                 }
             }
@@ -977,10 +986,6 @@ impl App {
                         .arg("--extract-audio")
                         .arg("--audio-format")
                         .arg("mp3")
-                        .arg("--embed-thumbnail")
-                        .arg("--convert-thumbnails")
-                        .arg("jpg")
-                        .arg("--write-thumbnail")
                         .arg("-o")
                         .arg(template.to_string_lossy().as_ref())
                         .arg(&url)
