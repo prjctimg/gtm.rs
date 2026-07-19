@@ -317,7 +317,6 @@ fn centered_scroll(sel: usize, available: usize, total: usize) -> (usize, usize)
 }
 
 fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
-    let version = option_env!("CARGO_PKG_VERSION").unwrap_or("0.1.0");
     let is_narrow = app.terminal_cols < 60;
     let np_height: u16 = if is_narrow { 5 } else { 8 };
     let chunks = Layout::default()
@@ -355,7 +354,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     {
         let np_block = Block::default()
             .borders(Borders::ALL)
-            .title(format!(" Now Playing  ·  gtm {} ", version))
+            .title(" Now Playing ")
             .border_type(BorderType::Plain)
             .border_style(Style::default().fg(app.theme.fg));
 
