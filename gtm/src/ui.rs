@@ -1677,31 +1677,30 @@ fn render_sleep_timer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(list, area);
 }
 
-pub const COMMAND_PALETTE_COMMANDS: &[&str] = &[
-    "Play/Pause   [Space]",
-    "Next Track   [n]",
-    "Prev Track   [p]",
-    "Volume Up    [+]",
-    "Volume Down  [-]",
-    "Mute Toggle  [m]",
-    "Repeat       [r]",
-    "Shuffle      [S]",
-    "Quit         [Q]",
-    "Tab Cycle    [Tab]",
-    "Library      [1]",
-    "Settings     [2]",
-    "Search       [/]",
-    "Queue O/L    [Alt+Q]",
-    "YouTube O/L  [Alt+Y]",
-    "Search Lib   [Alt+F]",
-    "EQ O/L       [Alt+E]",
-    "SleepTimer   [Alt+Z]",
-    "ThemePicker  [Alt+C]",
-    "Sound FX O/L [Alt+X]",
-    "About O/L    [Alt+A]",
-    "Spotify O/L  [Alt+S]",
-    "Fetch Lyrics [l]",
-    "Cmd Palette  [Alt+P]",
+pub const COMMAND_PALETTE_COMMANDS: &[(&str, &str)] = &[
+    ("\u{25b6} Play/Pause",   "Space"),
+    ("\u{23ed} Next Track",   "n"),
+    ("\u{23ee} Prev Track",   "p"),
+    ("\u{1f50a} Volume Up",   "+"),
+    ("\u{1f509} Volume Down", "-"),
+    ("\u{1f507} Mute Toggle", "m"),
+    ("\u{1f501} Repeat",      "r"),
+    ("\u{1f500} Shuffle",     "S"),
+    ("\u{23f9} Quit",         "Q"),
+    ("\u{2192} Tab Cycle",    "Tab"),
+    ("\u{1f3b5} Library",     "1"),
+    ("\u{2699} Settings",     "2"),
+    ("\u{1f50d} Search",      "/"),
+    ("\u{1f4cb} Queue O/L",   "Alt+Q"),
+    ("\u{25b6} YouTube O/L",  "Alt+Y"),
+    ("\u{1f50e} Search Lib",  "Alt+F"),
+    ("\u{1f39a} EQ O/L",      "Alt+E"),
+    ("\u{23f0} SleepTimer",   "Alt+Z"),
+    ("\u{1f3a8} ThemePicker", "Alt+C"),
+    ("\u{1f508} Sound FX O/L","Alt+X"),
+    ("\u{2139} About O/L",    "Alt+A"),
+    ("\u{266b} Spotify O/L",  "Alt+S"),
+    ("\u{1f4dd} Fetch Lyrics","l"),
 ];
 
 fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -1709,11 +1708,11 @@ fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App)
 
     let query = app.overlays.top().map_or(String::new(), |o| o.query.clone());
     let q = query.to_lowercase();
-    let mut filtered: Vec<(&&str, usize)> = if q.is_empty() {
+    let mut filtered: Vec<(&(&str, &str), usize)> = if q.is_empty() {
         commands.iter().map(|c| (c, 0)).collect()
     } else {
         commands.iter().filter_map(|c| {
-            let lower = c.to_lowercase();
+            let lower = c.0.to_lowercase();
             // Fuzzy subsequence match: each char in q must appear in order
             let mut qi = 0usize;
             for ch in lower.chars() {
@@ -1731,10 +1730,19 @@ fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App)
     // Sort by score descending (longer match = better)
     filtered.sort_by(|a, b| b.1.cmp(&a.1));
 
+    let palette_width = (area.width as f32 * 0.5).min(60.0) as u16;
+    let x_offset = (area.width.saturating_sub(palette_width)) / 2;
+    let palette_area = Rect {
+        x: area.x + x_offset,
+        y: area.y,
+        width: palette_width,
+        height: area.height,
+    };
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(3), Constraint::Min(0)])
-        .split(area);
+        .split(palette_area);
 
     let search_input = Paragraph::new(format!(" > {}_", query))
         .style(Style::default().fg(app.theme.fg));
@@ -1752,14 +1760,17 @@ fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App)
         .enumerate()
         .skip(scroll_start)
         .take(scroll_end - scroll_start)
-        .map(|(i, (cmd, _score))| {
+        .map(|(i, ((name, key), _score))| {
             let prefix = if i == sel { " > " } else { "   " };
             let style = if i == sel {
                 Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
             } else {
                 Style::default()
             };
-            ListItem::new(format!("{prefix}{}", cmd)).style(style)
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{prefix}{name}"), style),
+                Span::styled(format!("  [{key}]", key = key), Style::default().fg(app.theme.fg_dim)),
+            ])).style(style)
         })
         .collect();
 
