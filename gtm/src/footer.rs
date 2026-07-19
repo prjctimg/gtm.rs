@@ -115,13 +115,7 @@ fn build_groups<'a>(preset: &'a FooterPreset, app: &App) -> Vec<FooterGroup<'a>>
     let mode_bg = app.theme.border;
     let mut groups = Vec::new();
 
-    // Group 1: Time (far left)
-    groups.push(FooterGroup {
-        modules: vec![&FooterModule::Clock],
-        bg: app.theme.fg_dim,
-    });
-
-    // Group 2: Playback + Volume + EqPreset (status)
+    // Group 1: Playback + Volume + EqPreset (status)
     let mut status = Vec::new();
     for m in preset.a.iter().chain(preset.b.iter()).chain(preset.c.iter()) {
         if matches!(m, FooterModule::Playback | FooterModule::Volume | FooterModule::EqPreset) {
@@ -132,7 +126,7 @@ fn build_groups<'a>(preset: &'a FooterPreset, app: &App) -> Vec<FooterGroup<'a>>
         groups.push(FooterGroup { modules: status, bg: status_bg });
     }
 
-    // Group 3: Repeat + Shuffle (mode)
+    // Group 2: Repeat + Shuffle (mode)
     let mut mode = Vec::new();
     for m in preset.x.iter().chain(preset.y.iter()).chain(preset.z.iter()) {
         if matches!(m, FooterModule::Repeat | FooterModule::Shuffle) {
@@ -143,7 +137,7 @@ fn build_groups<'a>(preset: &'a FooterPreset, app: &App) -> Vec<FooterGroup<'a>>
         groups.push(FooterGroup { modules: mode, bg: mode_bg });
     }
 
-    // Group 4: Queue
+    // Group 3: Queue
     let mut queue = Vec::new();
     for m in preset.a.iter().chain(preset.b.iter()).chain(preset.c.iter()) {
         if matches!(m, FooterModule::Queue) {
@@ -154,7 +148,7 @@ fn build_groups<'a>(preset: &'a FooterPreset, app: &App) -> Vec<FooterGroup<'a>>
         groups.push(FooterGroup { modules: queue, bg: mode_bg });
     }
 
-    // Group 5: KeyAction + SleepTimer (misc)
+    // Group 4: KeyAction + SleepTimer (misc)
     let mut misc = Vec::new();
     for m in preset.x.iter().chain(preset.y.iter()).chain(preset.z.iter()) {
         if matches!(m, FooterModule::KeyAction | FooterModule::SleepTimer) {
@@ -164,6 +158,12 @@ fn build_groups<'a>(preset: &'a FooterPreset, app: &App) -> Vec<FooterGroup<'a>>
     if !misc.is_empty() {
         groups.push(FooterGroup { modules: misc, bg: app.theme.fg_dim });
     }
+
+    // Group 5: Clock (far right)
+    groups.push(FooterGroup {
+        modules: vec![&FooterModule::Clock],
+        bg: app.theme.fg_dim,
+    });
 
     groups
 }

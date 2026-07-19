@@ -283,10 +283,10 @@ fn render_cover_block(f: &mut ratatui::Frame, area: Rect, cover_bytes: &[u8]) {
 
 const LIBRARY_ICONS_NERD: &[&str] = &[
     "\u{f001}", "\u{f004}", "\u{f025}", "\u{f007}",
-    "\u{f03a}", "\u{f1bc}", "\u{f019}",
+    "\u{f03a}", "\u{f1bc}", "\u{f167}",
 ];
 
-const LIBRARY_ICONS_ASCII: &[&str] = &["♫", "♥", "▤", "♪", "≡", "☊", "↓"];
+const LIBRARY_ICONS_ASCII: &[&str] = &["♫", "♥", "▤", "♪", "≡", "☊", "▶"];
 
 fn use_nerd_fonts() -> bool {
     match std::env::var("GTM_NERD_FONTS") {
@@ -321,10 +321,17 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     let np_area = chunks[0];
 
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(28), Constraint::Min(0)])
-        .split(chunks[1]);
+    let panes = if app.show_lyrics {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(28), Constraint::Min(0), Constraint::Length(28)])
+            .split(chunks[1])
+    } else {
+        Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Length(28), Constraint::Min(0)])
+            .split(chunks[1])
+    };
 
     let left_focus = app.library_pane_focus;
 
@@ -411,13 +418,14 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 ]));
                 f.render_widget(artist_para, info_chunks[1]);
 
-                // Row 2: Album
-                let display_album = if track.album.is_empty() { "Unknown" } else { &track.album };
-                let album_para = Paragraph::new(Line::from(vec![
-                    Span::styled("Album: ", Style::default().fg(app.theme.fg)),
-                    Span::styled(display_album, Style::default().fg(app.theme.fg_bright)),
-                ]));
-                f.render_widget(album_para, info_chunks[2]);
+                // Row 2: Album (hide when empty)
+                if !track.album.is_empty() {
+                    let album_para = Paragraph::new(Line::from(vec![
+                        Span::styled("Album: ", Style::default().fg(app.theme.fg)),
+                        Span::styled(&track.album, Style::default().fg(app.theme.fg_bright)),
+                    ]));
+                    f.render_widget(album_para, info_chunks[2]);
+                }
 
                 // Row 3: Progress bar + timestamps
                 let dur = track.duration;
@@ -453,13 +461,16 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 ]));
                 f.render_widget(title_para, Rect { x: inner.x, y: inner.y, width: inner.width, height: 1 });
 
-                let display_album = if track.album.is_empty() { "Unknown" } else { &track.album };
-                let album_para = Paragraph::new(Line::from(vec![
-                    Span::styled("Album: ", Style::default().fg(app.theme.fg)),
-                    Span::styled(display_album, Style::default().fg(app.theme.fg_bright)),
-                ]));
-                let album_area = Rect { x: inner.x, y: inner.y + 1, width: inner.width, height: 1 };
-                f.render_widget(album_para, album_area);
+                let mut row_offset = 1u16;
+                if !track.album.is_empty() {
+                    let album_para = Paragraph::new(Line::from(vec![
+                        Span::styled("Album: ", Style::default().fg(app.theme.fg)),
+                        Span::styled(&track.album, Style::default().fg(app.theme.fg_bright)),
+                    ]));
+                    let album_area = Rect { x: inner.x, y: inner.y + row_offset, width: inner.width, height: 1 };
+                    f.render_widget(album_para, album_area);
+                    row_offset += 1;
+                }
 
                 let dur = track.duration;
                 let pos = app.display_position;
@@ -472,7 +483,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 let bar_with_ts = format!("{} {}", bar, ts_str);
                 let bar_para = Paragraph::new(bar_with_ts)
                     .style(Style::default().fg(app.theme.accent));
-                let bar_area = Rect { x: inner.x, y: inner.y + 2, width: inner.width, height: 1 };
+                let bar_area = Rect { x: inner.x, y: inner.y + row_offset, width: inner.width, height: 1 };
                 f.render_widget(bar_para, bar_area);
             }
         }
@@ -728,6 +739,11 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let inner = right_block.inner(panes[1]);
     f.render_widget(right_block, panes[1]);
     f.render_widget(right_para, inner);
+
+    // ── Right lyrics pane (toggleable) ──
+    if app.show_lyrics && panes.len() > 2 {
+        render_lyrics_pane(f, panes[2], app);
+    }
 }
 
 const SETTINGS_ICONS_NERD: &[&str] = &["\u{f028}", "\u{f16a}", "\u{f04b}", "\u{f013}", "\u{f1bc}"];
@@ -1212,6 +1228,65 @@ pub fn render_progress_variant(ratio: f64, width: usize, app: &App) -> String {
     line
 }
 
+/// Time-synced lyrics pane on the right side of the library view.
+fn render_lyrics_pane(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Lyrics ")
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(app.theme.border));
+
+    let inner = block.inner(area);
+    f.render_widget(block, area);
+
+    let Some(ref lyrics) = app.current_lyrics else {
+        let msg = Paragraph::new("Press [l] to search")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(app.theme.fg_dim));
+        f.render_widget(msg, inner);
+        return;
+    };
+
+    if lyrics.lines.is_empty() {
+        let msg = Paragraph::new("No lyrics found")
+            .alignment(Alignment::Center)
+            .style(Style::default().fg(app.theme.fg_dim));
+        f.render_widget(msg, inner);
+        return;
+    }
+
+    let total = lyrics.lines.len();
+    let visible = inner.height as usize;
+    let current = app.lyrics_scroll;
+    let scroll_start = if total <= visible {
+        0
+    } else if current >= visible / 2 {
+        (current - visible / 2).min(total - visible)
+    } else {
+        0
+    };
+    let scroll_end = (scroll_start + visible).min(total);
+
+    let mut lines = Vec::new();
+    for i in scroll_start..scroll_end {
+        let line_text = &lyrics.lines[i].text;
+        let is_current = i == current;
+        let style = if is_current {
+            Style::default()
+                .fg(app.theme.fg_bright)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(app.theme.fg_dim)
+        };
+        lines.push(Line::from(Span::styled(
+            format!(" {} ", line_text),
+            style,
+        )));
+    }
+    let para = Paragraph::new(lines);
+    f.render_widget(para, inner);
+}
+
 /// Floating track info popup shown when scrolling in the Library list.
 fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App) {
     let track_id = match app.track_popup_track_id {
@@ -1252,7 +1327,7 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
         track.title.clone()
     };
     let display_artist = if track.artist.is_empty() { "Unknown" } else { &track.artist };
-    let display_album = if track.album.is_empty() { "Unknown" } else { &track.album };
+    let has_album = !track.album.is_empty();
     let dur = format_duration(track.duration as u64);
     let fav = if track.favourite { " \u{2665}" } else { "" };
 
@@ -1320,10 +1395,11 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
                 format!(" {}", display_artist),
                 Style::default().fg(app.theme.fg),
             )),
-            Line::from(Span::styled(
-                format!(" {}", display_album),
-                Style::default().fg(app.theme.fg),
-            )),
+            Line::from(if has_album {
+                Span::styled(format!(" {}", track.album), Style::default().fg(app.theme.fg))
+            } else {
+                Span::raw("")
+            }),
             Line::from(""),
             Line::from(Span::styled(
                 format!(" Duration: {}", dur),
@@ -1362,10 +1438,11 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
                 format!("  {}", display_artist),
                 Style::default().fg(app.theme.fg),
             )),
-            Line::from(Span::styled(
-                format!("  {}", display_album),
-                Style::default().fg(app.theme.fg),
-            )),
+            Line::from(if has_album {
+                Span::styled(format!("  {}", track.album), Style::default().fg(app.theme.fg))
+            } else {
+                Span::raw("")
+            }),
             Line::from(""),
             Line::from(Span::styled(
                 format!("  Duration: {}", dur),
@@ -1603,6 +1680,7 @@ pub const COMMAND_PALETTE_COMMANDS: &[&str] = &[
     "Sound FX O/L [Alt+X]",
     "About O/L    [Alt+A]",
     "Spotify O/L  [Alt+S]",
+    "Fetch Lyrics [l]",
     "Cmd Palette  [Alt+P]",
 ];
 
@@ -1800,10 +1878,10 @@ fn render_theme_picker_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_widget(list, area);
 }
 
-/// Return the local time as " HH:MM " using the system clock.
+/// Return the local time using the system clock and timezone.
 pub fn local_time_str() -> String {
     let now = chrono::Local::now();
-    format!(" {},{} {} | {} CAT ", now.format("%a"), now.format("%d"), now.format("%B"), now.format("%H:%M"))
+    format!(" {},{} {} | {} {} ", now.format("%a"), now.format("%d"), now.format("%B"), now.format("%H:%M"), now.format("%Z"))
 }
 
 fn format_duration(secs: u64) -> String {

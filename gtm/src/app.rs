@@ -185,12 +185,19 @@ pub struct App {
     pub track_popup_cover: Option<Vec<u8>>,
     pub popup_cover_stateful: Option<StatefulProtocol>,
     last_popup_cover_fetch_id: Option<i64>,
+    pub current_lyrics: Option<gtm_core::track::LrcData>,
+    pub lyrics_scroll: usize,
+    last_lyrics_track_id: Option<i64>,
+    pub show_lyrics: bool,
+    pub lyrics_manual_scroll: bool,
+    pub lyrics_last_scroll_time: std::time::Instant,
 }
 
 enum IpcResult {
     RefreshDone(DaemonState, Option<Vec<u8>>, Option<i64>),
     CoverArt(Option<Vec<u8>>, Option<i64>),
     PopupCoverArt(Option<Vec<u8>>, i64),
+    Lyrics(Option<gtm_core::track::LrcData>),
     LibraryTracks(Vec<TrackInfo>),
     Playlists(Vec<Playlist>),
     Queue(Vec<TrackInfo>, usize),
@@ -232,6 +239,7 @@ pub enum TuiCommand {
     RefreshYt,
     RemoveTrack(i64),
     RemoveFromPlaylist(i64, i64),
+    FetchLyrics,
 }
 
 impl App {
@@ -322,6 +330,12 @@ impl App {
             track_popup_cover: None,
             popup_cover_stateful: None,
             last_popup_cover_fetch_id: None,
+            current_lyrics: None,
+            lyrics_scroll: 0,
+            last_lyrics_track_id: None,
+            show_lyrics: false,
+            lyrics_manual_scroll: false,
+            lyrics_last_scroll_time: std::time::Instant::now(),
         })
     }
 
@@ -445,6 +459,18 @@ impl App {
                         }
                     });
                 }
+                // Auto-fetch lyrics if lyrics pane is visible
+                if self.show_lyrics {
+                    let client3 = self.client.clone();
+                    let ipc_tx3 = self.ipc_tx.clone();
+                    self.current_lyrics = None;
+                    self.lyrics_scroll = 0;
+                    tokio::spawn(async move {
+                        if let Ok(lyrics) = client3.get_lyrics(tid).await {
+                            let _ = ipc_tx3.send(IpcResult::Lyrics(lyrics));
+                        }
+                    });
+                }
             }
 
             while let Ok(result) = self.ipc_rx.try_recv() {
@@ -501,6 +527,10 @@ impl App {
                             self.sync_popup_cover_stateful();
                         }
                     }
+                    IpcResult::Lyrics(lyrics) => {
+                        self.current_lyrics = lyrics;
+                        self.lyrics_scroll = 0;
+                    }
                 }
             }
 
@@ -554,6 +584,27 @@ impl App {
             let raw_pos = raw_pos.max(self.display_position - 0.5);
             // EMA smoothing
             self.display_position = self.display_position * 0.85 + raw_pos * 0.15;
+
+            // Auto-scroll lyrics to current playback position
+            if !self.lyrics_manual_scroll
+                && self.show_lyrics
+                && self.state.status == PlaybackStatus::Playing
+            {
+                if let Some(ref lyrics) = self.current_lyrics {
+                    if !lyrics.lines.is_empty() {
+                        let pos = self.display_position;
+                        let mut current_idx = 0;
+                        for (i, line) in lyrics.lines.iter().enumerate() {
+                            if line.timestamp <= pos {
+                                current_idx = i;
+                            } else {
+                                break;
+                            }
+                        }
+                        self.lyrics_scroll = current_idx;
+                    }
+                }
+            }
 
             // Dirty-render: skip redraw if position hasn't changed meaningfully
             // to reduce CPU usage.  Always render every 10th frame as a safety net.
@@ -1072,6 +1123,17 @@ impl App {
                     }
                 });
             }
+            TuiCommand::FetchLyrics => {
+                let track_id = self.state.current_track.as_ref().map(|t| t.id).unwrap_or(0);
+                if track_id == 0 { return; }
+                let client2 = self.client.clone();
+                let ipc_tx2 = self.ipc_tx.clone();
+                tokio::spawn(async move {
+                    if let Ok(lyrics) = client2.get_lyrics(track_id).await {
+                        let _ = ipc_tx2.send(IpcResult::Lyrics(lyrics));
+                    }
+                });
+            }
         };
     }
 
@@ -1435,6 +1497,13 @@ impl App {
                             Tab::Library => self.library_pane_focus = false,
                             Tab::Settings => self.settings_pane_focus = false,
                         }
+                    }
+                    Some(KeyboardAction::FetchLyrics) => {
+                        self.show_lyrics = !self.show_lyrics;
+                        if self.show_lyrics && self.current_lyrics.is_none() {
+                            self.send_high(TuiCommand::FetchLyrics);
+                        }
+                        self.dismiss_track_popup();
                     }
                     Some(KeyboardAction::EnterFilter) => {
                         self.input_mode = InputMode::Searching;
@@ -2068,6 +2137,9 @@ impl App {
                                     self.overlays.open(OverlayId::SearchLibrary);
                                 } else if label.starts_with("spotify") {
                                     self.overlays.open(OverlayId::SpotifySearch);
+                                } else if label.starts_with("fetch lyrics") {
+                                    self.show_lyrics = true;
+                                    self.send_high(TuiCommand::FetchLyrics);
                                 } else if label.starts_with("cmd palette") {
                                     // Already here — just close
                                 }
