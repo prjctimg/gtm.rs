@@ -132,7 +132,6 @@ pub struct App {
     pub yt_results_cache: Vec<gtm_core::track::YTSearchResult>,
     pub volume_input: String,
     pub playlist_cache: Vec<gtm_core::track::Playlist>,
-    pub error_message: Option<String>,
     pub status_message: Option<String>,
     pub notifications: Vec<Notification>,
     pub crossfade_duration: u8,
@@ -277,7 +276,6 @@ impl App {
             yt_results_cache: Vec::new(),
             volume_input: String::new(),
             playlist_cache: Vec::new(),
-            error_message: None,
             status_message: None,
             notifications: Vec::new(),
             crossfade_duration: 7,
@@ -522,7 +520,9 @@ impl App {
                             expires_at: std::time::Instant::now() + Duration::from_secs(5),
                         });
                     }
-                    IpcResult::Error(e) => self.error_message = Some(e),
+                    IpcResult::Error(e) => {
+                        self.notify(e, NotificationKind::Error);
+                    }
                     IpcResult::PopupCoverArt(cover, track_id) => {
                         if !no_image_protocol() && self.track_popup_track_id == Some(track_id) {
                             self.track_popup_cover = cover;

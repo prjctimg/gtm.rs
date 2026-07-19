@@ -419,10 +419,13 @@ impl Daemon {
     async fn dispatch(&mut self, _client_id: ClientId, req: DaemonReq, reply_tx: ReplyTx) {
         let res = match self.handle_request(&req).await {
             Ok(res) => res,
-            Err(e) => DaemonRes::Error {
-                version: self.state.read().await.version as u32,
-                message: e.to_string(),
-            },
+            Err(e) => {
+                warn!("command {:?} failed: {e}", req);
+                DaemonRes::Error {
+                    version: self.state.read().await.version as u32,
+                    message: e.to_string(),
+                }
+            }
         };
         let _ = reply_tx.send(res);
     }
