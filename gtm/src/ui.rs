@@ -1605,38 +1605,106 @@ fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_sleep_timer_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let presets = [5u64, 10, 15, 30, 60];
-    let sel = app.overlays.top().map_or(0, |o| o.selected.min(presets.len() - 1));
+    let inner = area;
 
-    let mut items: Vec<ListItem> = presets
-        .iter()
-        .enumerate()
-        .map(|(i, mins)| {
-            let label = if *mins == 1 { "minute" } else { "minutes" };
-            let prefix = if i == sel { " > " } else { "   " };
-            let content = format!("{prefix}{} {}", mins, label);
-            let style = if i == sel {
-                Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg)
-            } else {
-                Style::default()
-            };
-            ListItem::new(content).style(style)
-        })
-        .collect();
-
-    if let Some(remaining) = app.sleep_timer_remaining {
-        let status = format!(" Active: {} min remaining", remaining);
-        items.push(ListItem::new(status).style(Style::default().fg(app.theme.success)));
-        items.push(ListItem::new(" [Esc] Cancel timer").style(Style::default().fg(app.theme.fg_dim)));
+    if app.sleep_timer_input_mode {
+        let label = Paragraph::new(Line::from(vec![
+            Span::styled(" Enter minutes: ", Style::default().fg(app.theme.fg_dim)),
+            Span::styled(&app.sleep_timer_input_buf, Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD)),
+            Span::raw("_"),
+        ]));
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Sleep Timer — Manual Input ")
+            .border_type(BorderType::Plain)
+            .border_style(Style::default().fg(app.theme.border));
+        f.render_widget(label.block(block), inner);
+        return;
     }
 
-    let list = List::new(items).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Sleep Timer ")
-            .border_type(BorderType::Plain),
-    );
-    f.render_widget(list, area);
+    let mins = app.sleep_timer_minutes;
+    let is_active = app.sleep_timer_remaining.is_some();
+
+    let mut lines: Vec<Line> = Vec::new();
+
+    // Current value
+    lines.push(Line::from(vec![
+        Span::styled(format!("  Timer: {} minutes", mins), Style::default().fg(app.theme.fg).add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(""));
+
+    // Slider
+    let slider_w = inner.width.saturating_sub(4) as u32;
+    let pos = if slider_w > 0 { ((mins as f32 / 180.0) * slider_w as f32) as u32 } else { 0 };
+    let filled: String = "─".repeat(pos as usize);
+    let empty: String = "─".repeat((slider_w.saturating_sub(pos + 1)) as usize);
+    lines.push(Line::from(vec![
+        Span::styled("  ", Style::default()),
+        Span::styled(filled, Style::default().fg(app.theme.success)),
+        Span::styled("●", Style::default().fg(app.theme.accent).add_modifier(Modifier::BOLD)),
+        Span::styled(empty, Style::default().fg(app.theme.fg_dim)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  0m", Style::default().fg(app.theme.fg_dim)),
+        Span::styled(format!("{:.0}m", 180.0), Style::default().fg(app.theme.fg_dim)),
+    ]));
+    lines.push(Line::from(""));
+
+    // Quick options
+    let quick_opts = [5u32, 10, 15, 30, 60, 90, 120];
+    let sel = app.overlays.top().map_or(0, |o| o.selected.min(quick_opts.len() - 1));
+    let mut spans: Vec<Span> = vec![Span::styled("  ", Style::default())];
+    for (i, &m) in quick_opts.iter().enumerate() {
+        let style = if i == sel {
+            Style::default().fg(app.theme.selection_fg).bg(app.theme.selection_bg).add_modifier(Modifier::BOLD)
+        } else if m == mins {
+            Style::default().fg(app.theme.accent)
+        } else {
+            Style::default().fg(app.theme.fg_dim)
+        };
+        spans.push(Span::styled(format!("[{}m] ", m), style));
+    }
+    lines.push(Line::from(spans));
+    lines.push(Line::from(""));
+
+    // Active status
+    if is_active {
+        if let Some(remaining) = app.sleep_timer_remaining {
+            let r_mins = remaining / 60;
+            let r_secs = remaining % 60;
+            lines.push(Line::from(Span::styled(
+                format!("  Active: {:02}:{:02} remaining", r_mins, r_secs),
+                Style::default().fg(app.theme.success).add_modifier(Modifier::BOLD),
+            )));
+        }
+    }
+    lines.push(Line::from(""));
+
+    // Controls
+    lines.push(Line::from(Span::styled(
+        "  h/- Decrease  l/+ Increase  i: Input  Enter: Set",
+        Style::default().fg(app.theme.fg_dim),
+    )));
+    if is_active {
+        lines.push(Line::from(Span::styled(
+            "  c: Cancel Timer  Esc: Close",
+            Style::default().fg(app.theme.fg_dim),
+        )));
+    } else {
+        lines.push(Line::from(Span::styled(
+            "  Esc: Close",
+            Style::default().fg(app.theme.fg_dim),
+        )));
+    }
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Sleep Timer ")
+        .border_type(BorderType::Plain)
+        .border_style(Style::default().fg(app.theme.border));
+
+    let paragraph = Paragraph::new(lines).block(block);
+    f.render_widget(paragraph, inner);
 }
 
 pub const COMMAND_PALETTE_COMMANDS: &[(&str, &str)] = &[
