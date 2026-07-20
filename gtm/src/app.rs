@@ -181,6 +181,7 @@ pub struct App {
     last_event_time: std::time::Instant,
     pub multiselect_mode: bool,
     pub progress_style: crate::progress::ProgressStyle,
+    pub visualizer: crate::visualizer::AudioVisualizer,
     pub selected_indices: std::collections::HashSet<usize>,
     pending_motion: Option<char>,
     pub pending_playlist_track_ids: Vec<i64>,
@@ -333,6 +334,7 @@ impl App {
             last_event_time: std::time::Instant::now(),
             multiselect_mode: false,
             progress_style: crate::progress::ProgressStyle::Braille,
+            visualizer: crate::visualizer::AudioVisualizer::new(),
             selected_indices: std::collections::HashSet::new(),
             pending_motion: None,
             pending_playlist_track_ids: Vec::new(),
@@ -1546,6 +1548,11 @@ impl App {
                         self.progress_style = self.progress_style.next();
                         self.notify(&format!("Progress: {}", self.progress_style.name()), NotificationKind::Info);
                     }
+                    Some(KeyboardAction::ToggleVisualizer) => {
+                        self.visualizer.toggle();
+                        let state = if self.visualizer.is_enabled() { "ON" } else { "OFF" };
+                        self.notify(&format!("Visualizer: {}", state), NotificationKind::Info);
+                    }
                     Some(KeyboardAction::FocusLeft) => {
                         match self.current_tab {
                             Tab::Library => self.library_pane_focus = true,
@@ -2289,6 +2296,10 @@ impl App {
                                 } else if label.starts_with("progress style") {
                                     self.progress_style = self.progress_style.next();
                                     self.notify(&format!("Progress: {}", self.progress_style.name()), crate::app::NotificationKind::Info);
+                                } else if label.starts_with("visualizer") {
+                                    self.visualizer.toggle();
+                                    let state = if self.visualizer.is_enabled() { "ON" } else { "OFF" };
+                                    self.notify(&format!("Visualizer: {}", state), crate::app::NotificationKind::Info);
                                 }
                             }
                             self.overlays.close_top();

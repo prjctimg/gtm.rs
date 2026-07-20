@@ -318,13 +318,23 @@ fn centered_scroll(sel: usize, available: usize, total: usize) -> (usize, usize)
 
 fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     let is_narrow = app.terminal_cols < 60;
+    let show_vis = app.visualizer.is_enabled() && app.terminal_cols >= 80;
     let np_height: u16 = if is_narrow { 5 } else { 8 };
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Length(np_height), Constraint::Min(1)])
         .split(area);
 
-    let np_area = chunks[0];
+    // Split Now Playing area to include visualizer if enabled
+    let (np_area, vis_area) = if show_vis {
+        let h = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Min(0), Constraint::Length(app.terminal_cols / 4)])
+            .split(chunks[0]);
+        (h[0], Some(h[1]))
+    } else {
+        (chunks[0], None)
+    };
 
     let lib_width: u16 = if is_narrow {
         (app.terminal_cols / 3).max(12)
@@ -501,6 +511,21 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
                 let bar_area = Rect { x: inner.x, y: inner.y + row_offset, width: inner.width, height: 1 };
                 f.render_widget(bar_para, bar_area);
             }
+        }
+    }
+
+    // ── Visualizer (right of Now Playing) ──
+    if let Some(vis_a) = vis_area {
+        app.visualizer.tick(app.state.status == gtm_core::state::PlaybackStatus::Playing, vis_a.width);
+        let vis_block = Block::default()
+            .borders(Borders::ALL)
+            .title(" Visualizer ")
+            .border_type(BorderType::Plain)
+            .border_style(Style::default().fg(app.theme.fg_dim));
+        let vis_inner = vis_block.inner(vis_a);
+        f.render_widget(vis_block, vis_a);
+        if let Some(lines) = app.visualizer.render(vis_inner) {
+            f.render_widget(lines, vis_inner);
         }
     }
 
@@ -1732,6 +1757,7 @@ pub const COMMAND_PALETTE_COMMANDS: &[(&str, &str)] = &[
     ("\u{266b} Spotify O/L",  "Alt+S"),
     ("\u{1f4dd} Fetch Lyrics","l"),
     ("\u{2576} Progress Style","P"),
+    ("\u{1f3b6} Visualizer",   "Ctrl+V"),
 ];
 
 fn render_command_palette_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {

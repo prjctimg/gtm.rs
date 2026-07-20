@@ -118,6 +118,7 @@ pub enum KeyboardAction {
     ToggleHelp,
     CycleFooterPreset,
     CycleProgressStyle,
+    ToggleVisualizer,
     Custom(String),
 }
 
@@ -673,6 +674,15 @@ pub fn default_keybindings() -> Keybindings {
                     action: KeyboardAction::CycleProgressStyle,
                     contexts: vec![KeyContext::Normal],
                     description: "Cycle progress style",
+                },
+            ),
+            // Ctrl+V — toggle visualizer
+            (
+                KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
+                BoundCommand {
+                    action: KeyboardAction::ToggleVisualizer,
+                    contexts: vec![KeyContext::Normal],
+                    description: "Toggle visualizer",
                 },
             ),
         ],
