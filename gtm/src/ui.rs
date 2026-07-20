@@ -833,7 +833,7 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
          2 => {
             let crossfade_on = app.state.crossfade.as_ref().map(|c| c.enabled).unwrap_or(false);
             let crossfade_dur = app.state.crossfade.as_ref().map(|c| c.duration_secs).unwrap_or(0);
-            let easing = app.state.crossfade.as_ref().map(|c| format!("{:?}", c.easing)).unwrap_or_else(|| "N/A".into());
+            let easing = app.state.crossfade.as_ref().map(|c| c.easing.name()).unwrap_or("N/A");
             vec![
                 format!("Repeat          [ {:?}       ▶ ]", app.state.repeat),
                 format!("Shuffle         [ {} ]", if app.state.shuffle { "●   On " } else { "○   Off" }),
@@ -897,7 +897,7 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
             lines.push(Line::from(Span::styled(if cf_on { " Crossfade: On. Press Enter to toggle off or use C to change duration." } else { " Crossfade: Off. Press Enter to toggle on." }, Style::default().fg(app.theme.fg))));
         }
         (2, 3) => {
-            let easing = app.state.crossfade.as_ref().map(|c| format!("{:?}", c.easing)).unwrap_or_else(|| "N/A".into());
+            let easing = app.state.crossfade.as_ref().map(|c| c.easing.name()).unwrap_or("N/A");
             lines.push(Line::from(Span::styled(format!(" Easing: Press Enter to cycle (current: {}). Controls crossfade volume curve.", easing), Style::default().fg(app.theme.fg))));
         }
         (2, 4) => {

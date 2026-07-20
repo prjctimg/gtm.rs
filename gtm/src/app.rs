@@ -1710,7 +1710,9 @@ impl App {
                                             Easing::Smoothstep => Easing::Logarithmic,
                                             Easing::Logarithmic => Easing::SlowFadeInFastFadeOut,
                                             Easing::SlowFadeInFastFadeOut => Easing::FastFadeInSlowFadeOut,
-                                            Easing::FastFadeInSlowFadeOut => Easing::Linear,
+                                            Easing::FastFadeInSlowFadeOut => Easing::EqualPower,
+                                            Easing::EqualPower => Easing::Exponential,
+                                            Easing::Exponential => Easing::Linear,
                                         };
                                         let _ = tx.send(TuiCommand::SetCrossfadeEasing(next)).await;
                                         if let Some(ref mut cf) = self.state.crossfade { cf.easing = next; }
