@@ -1025,6 +1025,7 @@ impl App {
                         .arg("--extract-audio")
                         .arg("--audio-format")
                         .arg("mp3")
+                        .arg("--restrict-filenames")
                         .arg("-o")
                         .arg(template.to_string_lossy().as_ref())
                         .arg(&url)
