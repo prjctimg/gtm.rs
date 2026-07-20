@@ -915,6 +915,7 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 "Theme           [ Cyberdeck  ▶ ]".to_string(),
                 format!("Transparent BG  [ {} ]", if app.transparent_bg { "●" } else { "○" }),
                 "Sync Covers     [ Enter  ▶ ]".to_string(),
+                "Sync Lyrics     [ Enter  ▶ ]".to_string(),
                 format!("Footer Preset   [ {:>8} ▶ ]", preset_name),
             ]
         },
@@ -970,7 +971,8 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
         (3, 0) => lines.push(Line::from(Span::styled(" Theme: Press Enter to open the Theme Picker overlay (Alt+C).", Style::default().fg(app.theme.fg)))),
         (3, 1) => lines.push(Line::from(Span::styled(" Transparent BG: Press Enter to toggle. When on, overlay backgrounds become transparent.", Style::default().fg(app.theme.fg)))),
         (3, 2) => lines.push(Line::from(Span::styled(" Sync Covers: Download missing cover art from Deezer for all library tracks.", Style::default().fg(app.theme.fg)))),
-        (3, 3) => lines.push(Line::from(Span::styled(" Footer Preset: Press Enter to cycle (Default, Minimal, Full). Also toggled via Alt+F.", Style::default().fg(app.theme.fg)))),
+        (3, 3) => lines.push(Line::from(Span::styled(" Sync Lyrics: Fetch and save lyrics files alongside all library tracks.", Style::default().fg(app.theme.fg)))),
+        (3, 4) => lines.push(Line::from(Span::styled(" Footer Preset: Press Enter to cycle (Default, Minimal, Full). Also toggled via Alt+F.", Style::default().fg(app.theme.fg)))),
         (4, 0) => lines.push(Line::from(Span::styled(" Spotify: Integration status — requires daemon restart.", Style::default().fg(app.theme.fg)))),
         _ => {}
     }
@@ -1276,9 +1278,15 @@ fn render_lyrics_pane(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
     f.render_widget(block, area);
 
     let Some(ref lyrics) = app.current_lyrics else {
-        let msg = Paragraph::new("Press [l] to search")
+        let msg_text = if app.lyrics_fetching {
+            let spinner = braille_spinner(app.scroll_offset);
+            format!("Fetching lyrics... {}", spinner)
+        } else {
+            "Press [l] to search".to_string()
+        };
+        let msg = Paragraph::new(msg_text)
             .alignment(Alignment::Center)
-            .style(Style::default().fg(app.theme.fg_dim));
+            .style(Style::default().fg(if app.lyrics_fetching { app.theme.accent } else { app.theme.fg_dim }));
         f.render_widget(msg, inner);
         return;
     };
