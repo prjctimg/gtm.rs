@@ -1565,6 +1565,14 @@ impl App {
                             Tab::Settings => self.settings_pane_focus = false,
                         }
                     }
+                    Some(KeyboardAction::Back) => {
+                        if self.browse_detail.is_some() {
+                            self.browse_detail = None;
+                            self.scroll_offset = 0;
+                        } else if !self.library_pane_focus && self.current_tab == Tab::Library {
+                            self.library_pane_focus = true;
+                        }
+                    }
                     Some(KeyboardAction::FetchLyrics) => {
                         self.show_lyrics = !self.show_lyrics;
                         if self.show_lyrics && self.current_lyrics.is_none() {

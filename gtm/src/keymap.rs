@@ -486,6 +486,15 @@ pub fn default_keybindings() -> Keybindings {
                     description: "Select item",
                 },
             ),
+            // Back — Backspace (go back in library drill-down / move focus left)
+            (
+                KeyCode::Backspace.into(),
+                BoundCommand {
+                    action: KeyboardAction::Back,
+                    contexts: vec![KeyContext::Normal],
+                    description: "Go back",
+                },
+            ),
             // Delete — Del / D (uppercase, with confirmation)
             (
                 KeyCode::Delete.into(),
