@@ -566,7 +566,7 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             .border_style(Style::default().fg(app.theme.fg_dim));
         let vis_inner = vis_block.inner(vis_a);
         f.render_widget(vis_block, vis_a);
-        if let Some(lines) = app.visualizer.render(vis_inner) {
+        if let Some(lines) = app.visualizer.render(vis_inner, &app.theme) {
             f.render_widget(lines, vis_inner);
         }
     }
