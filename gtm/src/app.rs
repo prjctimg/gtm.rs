@@ -1253,7 +1253,23 @@ impl App {
                     presets.len().saturating_sub(1)
                 }
                 OverlayId::SleepTimer => 4,
-                OverlayId::ThemePicker => THEMES.len().saturating_sub(1),
+                OverlayId::ThemePicker => {
+                    let q = top.query.to_lowercase();
+                    if q.is_empty() {
+                        THEMES.len()
+                    } else {
+                        THEMES.iter().filter(|entry| {
+                            let lower = entry.name.to_lowercase();
+                            let mut qi = 0usize;
+                            for ch in lower.chars() {
+                                if qi < q.len() && ch == q.as_bytes()[qi] as char {
+                                    qi += 1;
+                                }
+                            }
+                            qi == q.len()
+                        }).count()
+                    }.saturating_sub(1)
+                }
                 OverlayId::CommandPalette => {
                     let commands = crate::ui::COMMAND_PALETTE_COMMANDS;
                     let q = top.query.to_lowercase();
@@ -2346,7 +2362,7 @@ impl App {
                                 } else if label.starts_with("sleeptimer") {
                                     self.overlays.open(OverlayId::SleepTimer);
                                 } else if label.starts_with("themepicker") {
-                                    self.overlays.open(OverlayId::ThemePicker);
+                                    self.overlays.open_with_selection(OverlayId::ThemePicker, self.theme_index);
                                 } else if label.starts_with("sound fx") {
                                     self.overlays.open(OverlayId::SoundEffects);
                                 } else if label.starts_with("about") {
@@ -2491,7 +2507,7 @@ impl App {
             KeyCode::Char(c) => {
                 if let Some(top) = self.overlays.top_mut() {
                     match top.id {
-                        OverlayId::YTSearch | OverlayId::SearchLibrary | OverlayId::CommandPalette => {
+                        OverlayId::YTSearch | OverlayId::SearchLibrary | OverlayId::CommandPalette | OverlayId::ThemePicker => {
                             top.query.push(c);
                             if top.id == OverlayId::YTSearch {
                                 if c == ' ' {
