@@ -170,7 +170,9 @@ impl DaemonClient {
                 response_tx: Some(tx),
             })
             .map_err(|_| CoreError::Daemon("IPC worker died".into()))?;
-        rx.await
+        tokio::time::timeout(Duration::from_secs(5), rx)
+            .await
+            .map_err(|_| CoreError::Daemon("IPC response timeout".into()))?
             .map_err(|_| CoreError::Daemon("IPC worker response dropped".into()))?
     }
 

@@ -78,7 +78,7 @@ fn ensure_daemon_running(socket_path: &std::path::Path) -> Result<(), Box<dyn st
             let _ = stream.write_all(ping.as_bytes());
             // Try to read a response with a short timeout to detect stale sockets
             stream
-                .set_read_timeout(Some(std::time::Duration::from_millis(250)))
+                .set_read_timeout(Some(std::time::Duration::from_millis(100)))
                 .ok();
             let mut buf = [0u8; 256];
             if stream.read(&mut buf).ok().unwrap_or(0) > 0 {
