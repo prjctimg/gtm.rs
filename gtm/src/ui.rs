@@ -1916,7 +1916,7 @@ fn render_about_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {
 
     let p = Paragraph::new(lines).alignment(Alignment::Left);
     f.render_widget(p, inner);
-    overlay_help(f, inner, " [Esc] Close  [q] Quit gtm", app);
+    overlay_help(f, inner, " [Esc] Close", app);
 }
 
 fn render_help_overlay(f: &mut ratatui::Frame, area: Rect, app: &App) {

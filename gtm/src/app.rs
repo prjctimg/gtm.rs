@@ -1243,7 +1243,26 @@ impl App {
                         }).count()
                     }.saturating_sub(1)
                 }
-                OverlayId::Equalizer => 12,
+                OverlayId::Equalizer => {
+                    let presets = [
+                        gtm_core::state::EqPreset::Flat,
+                        gtm_core::state::EqPreset::Pop,
+                        gtm_core::state::EqPreset::Rock,
+                        gtm_core::state::EqPreset::Jazz,
+                        gtm_core::state::EqPreset::Classical,
+                        gtm_core::state::EqPreset::Bass,
+                        gtm_core::state::EqPreset::Vocal,
+                        gtm_core::state::EqPreset::Electronic,
+                        gtm_core::state::EqPreset::HipHop,
+                        gtm_core::state::EqPreset::Latin,
+                        gtm_core::state::EqPreset::Acoustic,
+                        gtm_core::state::EqPreset::Podcast,
+                        gtm_core::state::EqPreset::Dance,
+                        gtm_core::state::EqPreset::Headphones,
+                        gtm_core::state::EqPreset::Speaker,
+                    ];
+                    presets.len().saturating_sub(1)
+                }
                 OverlayId::SleepTimer => 4,
                 OverlayId::ThemePicker => THEMES.len().saturating_sub(1),
                 OverlayId::CommandPalette => {
@@ -1498,11 +1517,11 @@ impl App {
                     }
                     Some(KeyboardAction::SeekForward) => {
                         self.set_last_action("Seek Forward");
-                        let pos = self.display_position + 5.0;
+                        let pos = (self.display_position + 5.0).min(self.state.duration);
                         self.send_high(TuiCommand::Seek(pos));
                     }
                     Some(KeyboardAction::SeekBackward) => {
-                        self.set_last_action("Seek Backward");
+                        self.set_last_action("SeekBackward");
                         let pos = (self.display_position - 5.0).max(0.0);
                         self.send_high(TuiCommand::Seek(pos));
                     }
