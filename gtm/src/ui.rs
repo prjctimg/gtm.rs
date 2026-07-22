@@ -361,11 +361,12 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
             .split(area);
         (h[0], None, Some(h[1]))
     } else if show_vis {
+        let vis_w = area.width / 3;
         let h = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(0),
-                Constraint::Length(app.terminal_cols / 4),
+                Constraint::Length(vis_w),
             ])
             .split(area);
         (h[0], Some(h[1]), None)
@@ -379,11 +380,12 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         .split(left_area);
 
     let (np_area, vis_area) = if show_vis && !full_height_lyrics {
+        let vis_w = app.terminal_cols / 3;
         let h = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([
                 Constraint::Min(0),
-                Constraint::Length(app.terminal_cols / 4),
+                Constraint::Length(vis_w),
             ])
             .split(chunks[0]);
         (h[0], Some(h[1]))
@@ -1653,12 +1655,9 @@ fn render_track_popup(f: &mut ratatui::Frame, content_area: Rect, app: &mut App)
     const COVER_H: u16 = 5;
     let text_margin = 2u16;
 
-    let popup_w = if has_cover {
-        (COVER_W + 1 + 38 + text_margin).min(content_area.width.saturating_sub(2))
-    } else {
-        48u16.min(content_area.width.saturating_sub(4))
-    };
-    let popup_h = if has_cover { COVER_H + 2 } else { 6u16 };
+    // Fixed dimensions to prevent layout shift when cover loads/unloads.
+    let popup_w = (COVER_W + 1 + 38 + text_margin).min(content_area.width.saturating_sub(2));
+    let popup_h = COVER_H + 2;
     if popup_w < 20 || popup_h > content_area.height {
         return;
     }
