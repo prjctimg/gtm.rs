@@ -41,7 +41,7 @@ impl DaemonClient {
     pub async fn connect(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_owned();
         let mut last_err = None;
-        for i in 0..5 {
+        for i in 0..10 {
             match UnixStream::connect(&path).await {
                 Ok(stream) => {
                     let (reader, writer) = stream.into_split();
@@ -87,12 +87,14 @@ impl DaemonClient {
                 }
                 Err(e) => {
                     last_err = Some(e);
-                    tokio::time::sleep(Duration::from_millis(30 * (i + 1))).await;
+                    // Exponential backoff: 50ms, 100ms, 150ms, ... up to 500ms
+                    let delay = (50 * (i + 1)).min(500);
+                    tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
             }
         }
         Err(CoreError::Daemon(format!(
-            "connect to {} failed after 5 retries: {}",
+            "connect to {} failed after 10 retries: {}",
             path.display(),
             last_err.map(|e| e.to_string()).unwrap_or_default()
         )))
@@ -549,7 +551,7 @@ struct IpcWorker {
     next_id: u64,
 }
 
-const MAX_CONSECUTIVE_FAILURES: u32 = 3;
+const MAX_CONSECUTIVE_FAILURES: u32 = 5;
 
 impl IpcWorker {
     async fn run(mut self) {
@@ -557,11 +559,11 @@ impl IpcWorker {
         loop {
             // Health check: only force reconnect after MAX_CONSECUTIVE_FAILURES
             // timeouts, to tolerate brief daemon stalls during prev/next.
-            if self.last_event_time.elapsed() > Duration::from_secs(10) {
+            if self.last_event_time.elapsed() > Duration::from_secs(30) {
                 self.consecutive_failures += 1;
                 if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
                     crate::log::log(&format!(
-                        "IPC worker: no events for 10s ({} consecutive), forcing reconnect",
+                        "IPC worker: no events for 30s ({} consecutive), forcing reconnect",
                         self.consecutive_failures
                     ));
                     self.fail_all_pending("daemon not responding");
@@ -569,7 +571,7 @@ impl IpcWorker {
                     self.consecutive_failures = 0;
                 } else {
                     crate::log::log(&format!(
-                        "IPC worker: no events for 10s ({}/{} failures), waiting",
+                        "IPC worker: no events for 30s ({}/{} failures), waiting",
                         self.consecutive_failures, MAX_CONSECUTIVE_FAILURES
                     ));
                 }
