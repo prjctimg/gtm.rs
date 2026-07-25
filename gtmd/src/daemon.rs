@@ -67,7 +67,7 @@ use gtm_audio::PulseAudioMixer;
 #[cfg(feature = "pulseaudio")]
 use crate::config::AudioBackendKind;
 use gtm_core::ipc::{DaemonEvent, DaemonReq, DaemonRes, QueueAction, WireReq, WireRes};
-use gtm_core::state::{DaemonState, EqPreset, PlaybackStatus, ReverbConfig};
+use gtm_core::state::{DaemonState, EqPreset, PlaybackStatus, ReverbConfig, SavedState};
 use gtm_core::wire;
 use gtm_core::CoreError;
 
@@ -104,7 +104,17 @@ pub struct Daemon {
 
 impl Daemon {
     pub fn new(config: DaemonConfig) -> Result<Self, CoreError> {
-        let state = Arc::new(RwLock::new(DaemonState::new()));
+        let mut initial_state = DaemonState::new();
+
+        // Load persisted state if available
+        if !config.test_mode {
+            if let Some(saved) = SavedState::load(&config.state_file) {
+                info!("loaded saved state from {}", config.state_file.display());
+                saved.apply_to(&mut initial_state);
+            }
+        }
+
+        let state = Arc::new(RwLock::new(initial_state));
 
         let mixer: Box<dyn Mixer> = if config.test_mode {
             Box::new(NullMixer::new())
@@ -530,6 +540,23 @@ impl Daemon {
 
     fn push_event(inner: &DaemonInner, event: DaemonEvent) {
         let _ = inner.event_tx.send(event);
+    }
+
+    /// Save persistent state to disk. Non-blocking and failure-tolerant.
+    fn save_state(inner: &DaemonInner) {
+        if inner.config.test_mode {
+            return;
+        }
+        let state_file = inner.config.state_file.clone();
+        let state = inner.state.clone();
+        tokio::spawn(async move {
+            let s = state.read().await;
+            let saved = SavedState::from_state(&s);
+            drop(s);
+            if let Err(e) = saved.save(&state_file) {
+                warn!("failed to save state: {e}");
+            }
+        });
     }
 
     /// Process an audio event from the mixer backend.
@@ -1052,6 +1079,7 @@ impl Daemon {
         let version = state.version as u32;
         drop(state);
         Self::push_event(inner, DaemonEvent::VolumeChanged { volume });
+        Self::save_state(inner);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1062,6 +1090,7 @@ impl Daemon {
         let version = state.version as u32;
         drop(state);
         Self::push_event(inner, DaemonEvent::ShuffleChanged { enabled });
+        Self::save_state(inner);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1075,6 +1104,7 @@ impl Daemon {
         let version = state.version as u32;
         drop(state);
         Self::push_event(inner, DaemonEvent::RepeatModeChanged { mode: m });
+        Self::save_state(inner);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1086,6 +1116,7 @@ impl Daemon {
         drop(state);
         let vol = if muted { 0 } else { inner.state.read().await.volume };
         inner.mixer.lock().await.set_volume(vol)?;
+        Self::save_state(inner);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1102,6 +1133,7 @@ impl Daemon {
             enabled,
             duration_secs,
         });
+        Self::save_state(inner);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1116,6 +1148,7 @@ impl Daemon {
         state.version += 1;
         let version = state.version as u32;
         drop(state);
+        Self::save_state(inner);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1130,6 +1163,7 @@ impl Daemon {
         drop(state);
         inner.mixer.lock().await.set_eq_preset(&preset);
         Self::push_event(inner, DaemonEvent::EqPresetChanged { preset });
+        Self::save_state(inner);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1144,6 +1178,7 @@ impl Daemon {
         drop(state);
         inner.mixer.lock().await.set_eq_enabled(enabled);
         Self::push_event(inner, DaemonEvent::EqEnabledChanged { enabled });
+        Self::save_state(inner);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1159,6 +1194,7 @@ impl Daemon {
         drop(state);
         inner.mixer.lock().await.set_reverb(&ReverbConfig { enabled, room_size });
         Self::push_event(inner, DaemonEvent::ReverbChanged { enabled, room_size });
+        Self::save_state(inner);
         Ok(DaemonRes::Ok { version })
     }
 
@@ -1246,6 +1282,7 @@ impl Daemon {
                 let cursor = state.queue_cursor;
                 drop(state);
                 Self::push_event(inner, DaemonEvent::QueueChanged { queue, cursor });
+                Self::save_state(inner);
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Remove { index } => {
@@ -1256,6 +1293,7 @@ impl Daemon {
                 let cursor = state.queue_cursor;
                 drop(state);
                 Self::push_event(inner, DaemonEvent::QueueChanged { queue, cursor });
+                Self::save_state(inner);
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Move { from, to } => {
@@ -1266,6 +1304,7 @@ impl Daemon {
                 let cursor = state.queue_cursor;
                 drop(state);
                 Self::push_event(inner, DaemonEvent::QueueChanged { queue, cursor });
+                Self::save_state(inner);
                 return Ok(DaemonRes::Ok { version });
             }
             QueueAction::Add { path, position } => {
@@ -1282,6 +1321,7 @@ impl Daemon {
                         let _ = Self::cmd_play(inner, path, 0.0, false).await;
                     }
                 }
+                Self::save_state(inner);
                 let version = inner.state.read().await.version as u32;
                 Ok(DaemonRes::Ok { version })
             }
@@ -1301,6 +1341,7 @@ impl Daemon {
                         let _ = Self::cmd_play(inner, &first_path, 0.0, false).await;
                     }
                 }
+                Self::save_state(inner);
                 let version = inner.state.read().await.version as u32;
                 Ok(DaemonRes::Ok { version })
             }
@@ -1327,6 +1368,7 @@ impl Daemon {
                         return Self::cmd_play(inner, &first_path, 0.0, false).await;
                     }
                 }
+                Self::save_state(inner);
                 let version = inner.state.read().await.version as u32;
                 Ok(DaemonRes::Ok { version })
             }
@@ -1338,6 +1380,7 @@ impl Daemon {
                 let cursor = state.queue_cursor;
                 drop(state);
                 Self::push_event(inner, DaemonEvent::QueueChanged { queue, cursor });
+                Self::save_state(inner);
                 Ok(DaemonRes::Ok { version })
             }
         }
