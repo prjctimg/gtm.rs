@@ -482,11 +482,11 @@ impl App {
                 self.client.seed_clock_from_state(&self.state).await;
             }
 
-            // Force a state refresh if no events received for 8s while playing
-            // to prevent stale Now Playing tab.  Increased from 5s to tolerate
-            // brief daemon stalls during rapid prev/next.
-            if self.state.status == PlaybackStatus::Playing
-                && self.last_event_time.elapsed() > Duration::from_secs(8)
+            // Force a state refresh if no events received for 8s to prevent
+            // stale state from broadcast lag. Works in all playback states,
+            // not just Playing, to catch lag when paused/stopped too.
+            if self.last_event_time.elapsed() > Duration::from_secs(8)
+                && self.client.is_connected()
             {
                 let c = self.client.clone();
                 let ipc_tx2 = self.ipc_tx.clone();
