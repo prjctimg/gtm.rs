@@ -483,8 +483,7 @@ impl Daemon {
                     event = event_rx.recv() => {
                         match event {
                             Ok(event) => {
-                                let wire_event = event.to_wire_event();
-                                let line = match serde_json::to_string(&wire_event) {
+                                let line = match serde_json::to_string(&event) {
                                     Ok(s) => s + "\n",
                                     Err(e) => {
                                         warn!("serialize event: {e}");
