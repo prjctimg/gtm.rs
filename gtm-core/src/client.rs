@@ -50,6 +50,9 @@ impl DaemonClient {
                         Arc::new(Mutex::new(Vec::new()));
                     let connected = Arc::new(AtomicBool::new(true));
 
+                    let heartbeat_at = Arc::new(std::sync::Mutex::new(Instant::now()));
+                    let hb_pulse = heartbeat_at.clone();
+
                     let worker = IpcWorker {
                         reader,
                         writer,
@@ -59,6 +62,7 @@ impl DaemonClient {
                         buf: Vec::with_capacity(4096),
                         socket_path: path.clone(),
                         last_event_time: Instant::now(),
+                        last_heartbeat_at: heartbeat_at,
                         consecutive_failures: 0,
                         pending: HashMap::new(),
                         next_id: 0,
@@ -73,7 +77,7 @@ impl DaemonClient {
                     };
                     let events_pulse = events.clone();
                     tokio::spawn(async move {
-                        pulse_reader(&pulse_path, events_pulse).await;
+                        pulse_reader(&pulse_path, events_pulse, hb_pulse).await;
                     });
 
                     return Ok(Self {
@@ -555,17 +559,33 @@ struct IpcWorker {
     buf: Vec<u8>,
     socket_path: std::path::PathBuf,
     last_event_time: Instant,
+    last_heartbeat_at: Arc<std::sync::Mutex<Instant>>,
     consecutive_failures: u32,
     pending: HashMap<u64, oneshot::Sender<Result<DaemonRes>>>,
     next_id: u64,
 }
 
 const MAX_CONSECUTIVE_FAILURES: u32 = 5;
+const HEARTBEAT_TIMEOUT_SECS: u64 = 30;
 
 impl IpcWorker {
     async fn run(mut self) {
         let mut tmp = [0u8; 4096];
         loop {
+            // Heartbeat check: if no heartbeat received within timeout,
+            // the daemon or connection is stale — force reconnect immediately.
+            if self.last_heartbeat_at.lock().unwrap().elapsed() > Duration::from_secs(HEARTBEAT_TIMEOUT_SECS) {
+                crate::log::log(&format!(
+                    "IPC worker: no heartbeat for {}s, forcing reconnect",
+                    HEARTBEAT_TIMEOUT_SECS,
+                ));
+                self.fail_all_pending("heartbeat timeout");
+                self.reconnect().await;
+                *self.last_heartbeat_at.lock().unwrap() = Instant::now();
+                self.last_event_time = Instant::now();
+                continue;
+            }
+
             // Health check: only force reconnect after MAX_CONSECUTIVE_FAILURES
             // timeouts, to tolerate brief daemon stalls during prev/next.
             if self.last_event_time.elapsed() > Duration::from_secs(30) {
@@ -726,6 +746,9 @@ impl IpcWorker {
             return true;
         }
         if let Ok(event) = serde_json::from_slice::<DaemonEvent>(&line) {
+            if matches!(event, DaemonEvent::Heartbeat) {
+                *self.last_heartbeat_at.lock().unwrap() = Instant::now();
+            }
             let mut events = self.events.lock().await;
             events.push(event);
         }
@@ -738,7 +761,11 @@ impl IpcWorker {
 /// Continuously reads bincode-encoded DaemonEvent frames from the pulse
 /// socket and pushes them into the shared event queue. Reconnects
 /// automatically on failure with exponential backoff.
-async fn pulse_reader(pulse_path: &std::path::Path, events: Arc<Mutex<Vec<DaemonEvent>>>) {
+async fn pulse_reader(
+    pulse_path: &std::path::Path,
+    events: Arc<Mutex<Vec<DaemonEvent>>>,
+    last_heartbeat_at: Arc<std::sync::Mutex<Instant>>,
+) {
     let mut buf = Vec::with_capacity(4096);
     let mut attempt = 0u32;
     loop {
@@ -787,6 +814,9 @@ async fn pulse_reader(pulse_path: &std::path::Path, events: Arc<Mutex<Vec<Daemon
                     }
                 };
                 buf.drain(..consumed as usize);
+                if frame.events.iter().any(|e| matches!(e, DaemonEvent::Heartbeat)) {
+                    *last_heartbeat_at.lock().unwrap() = Instant::now();
+                }
                 let mut evs = events.lock().await;
                 evs.extend(frame.events);
             }

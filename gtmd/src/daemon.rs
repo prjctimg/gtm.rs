@@ -269,6 +269,16 @@ impl Daemon {
             Self::background_scan(bg_state, bg_lib_paths, bg_data_dir, bg_cache_dir, bg_req_tx, bg_event_tx, bg_health).await;
         });
 
+        // Periodic heartbeat so clients can detect stale connections
+        let hb_event_tx = self.inner.event_tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            loop {
+                interval.tick().await;
+                let _ = hb_event_tx.send(DaemonEvent::Heartbeat);
+            }
+        });
+
         let mut poll_interval = tokio::time::interval(Duration::from_millis(16));
         loop {
             tokio::select! {
