@@ -523,12 +523,14 @@ impl Daemon {
             loop {
                 match event_rx.recv().await {
                     Ok(event) => {
-                        let wire_event = event.to_wire_event();
-                        let json = serde_json::to_string(&wire_event).unwrap_or_default();
-                        if writer.write_all(json.as_bytes()).await.is_err()
-                            || writer.write_all(b"\n").await.is_err()
-                            || writer.flush().await.is_err()
-                        {
+                        let frame = match wire::encode(&[event]) {
+                            Ok(f) => f,
+                            Err(e) => {
+                                warn!("pulse encode event: {e}");
+                                continue;
+                            }
+                        };
+                        if writer.write_all(&frame).await.is_err() {
                             break;
                         }
                     }
