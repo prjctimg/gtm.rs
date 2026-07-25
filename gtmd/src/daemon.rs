@@ -512,14 +512,12 @@ impl Daemon {
             loop {
                 match event_rx.recv().await {
                     Ok(event) => {
-                        let frame = match wire::encode(&[event]) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                warn!("pulse encode event: {e}");
-                                continue;
-                            }
-                        };
-                        if writer.write_all(&frame).await.is_err() {
+                        let wire_event = event.to_wire_event();
+                        let json = serde_json::to_string(&wire_event).unwrap_or_default();
+                        if writer.write_all(json.as_bytes()).await.is_err()
+                            || writer.write_all(b"\n").await.is_err()
+                            || writer.flush().await.is_err()
+                        {
                             break;
                         }
                     }
@@ -612,7 +610,34 @@ impl Daemon {
     }
 
     fn push_event(inner: &DaemonInner, event: DaemonEvent) {
-        let _ = inner.event_tx.send(event);
+        let wire_event = WireEvent {
+            event: match &event {
+                DaemonEvent::PlaybackStarted { .. } => "playback_started",
+                DaemonEvent::PlaybackPaused { .. } => "playback_paused",
+                DaemonEvent::PlaybackStopped => "playback_stopped",
+                DaemonEvent::TrackEnded => "track_ended",
+                DaemonEvent::PositionChanged { .. } => "position_changed",
+                DaemonEvent::DurationChanged { .. } => "duration_changed",
+                DaemonEvent::VolumeChanged { .. } => "volume_changed",
+                DaemonEvent::MetadataChanged { .. } => "metadata_changed",
+                DaemonEvent::QueueChanged { .. } => "queue_changed",
+                DaemonEvent::QueueIndexChanged { .. } => "queue_index_changed",
+                DaemonEvent::RepeatModeChanged { .. } => "repeat_mode_changed",
+                DaemonEvent::ShuffleChanged { .. } => "shuffle_changed",
+                DaemonEvent::CrossfadeChanged { .. } => "crossfade_changed",
+                DaemonEvent::SleepTimerTick { .. } => "sleep_timer_tick",
+                DaemonEvent::SleepTimerExpired => "sleep_timer_expired",
+                DaemonEvent::EqPresetChanged { .. } => "eq_preset_changed",
+                DaemonEvent::EqEnabledChanged { .. } => "eq_enabled_changed",
+                DaemonEvent::ReverbChanged { .. } => "reverb_changed",
+                DaemonEvent::Custom { .. } => "custom",
+                DaemonEvent::Heartbeat => "heartbeat",
+            }
+                .to_string(),
+            data: serde_json::to_value(&event)
+                .unwrap_or_else(|_| serde_json::json!({})),
+        };
+        let _ = inner.event_tx.send(wire_event);
     }
 
     /// Save persistent state to disk. Non-blocking and failure-tolerant.
