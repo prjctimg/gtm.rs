@@ -650,8 +650,10 @@ impl IpcWorker {
 
     async fn reconnect(&mut self) {
         self.connected.store(false, Ordering::Release);
-        for i in 0..30 {
-            tokio::time::sleep(Duration::from_millis(200 * (i + 1))).await;
+        let mut attempt = 0u32;
+        loop {
+            let delay_ms = (100u64 * 2u64.saturating_pow(attempt.min(10))).min(10_000);
+            tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             match tokio::net::UnixStream::connect(&self.socket_path).await {
                 Ok(stream) => {
                     let (reader, writer) = stream.into_split();
@@ -659,15 +661,21 @@ impl IpcWorker {
                     self.writer = writer;
                     self.buf.clear();
                     self.connected.store(true, Ordering::Release);
-                    crate::log::log("IPC worker reconnected");
+                    crate::log::log(&format!(
+                        "IPC worker reconnected after {attempt} attempts"
+                    ));
                     return;
                 }
                 Err(e) => {
-                    crate::log::log(&format!("IPC worker reconnect attempt {i} failed: {e}"));
+                    attempt += 1;
+                    if attempt % 10 == 0 {
+                        crate::log::log(&format!(
+                            "IPC worker reconnect attempt {attempt} failed: {e}"
+                        ));
+                    }
                 }
             }
         }
-        crate::log::log("IPC worker: giving up after 30 reconnect attempts");
     }
 
     async fn read_with_timeout(&mut self, tmp: &mut [u8; 4096]) -> Result<bool> {
