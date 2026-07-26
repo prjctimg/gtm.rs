@@ -111,7 +111,7 @@ pub fn run(socket: Option<String>, json: bool, cmd: &CliCommand) {
             } => {
                 let dur = duration_secs.unwrap_or(7);
                 client
-                    .crossfade(*enabled, dur)
+                    .crossfade(*enabled, dur, None)
                     .await
                     .map(|v| format!("ok version={v}"))
                     .map_err(|e| e.to_string())
@@ -299,19 +299,43 @@ pub fn run(socket: Option<String>, json: bool, cmd: &CliCommand) {
                         gtm_core::state::PlaybackStatus::Paused => "\x1b[33m⏸ Paused\x1b[0m",
                         gtm_core::state::PlaybackStatus::Stopped => "\x1b[31m⏹ Stopped\x1b[0m",
                     };
-                    let track_str = state.current_track.as_ref().map(|t| {
-                        let title = if t.title.is_empty() {
-                            std::path::Path::new(&t.path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Unknown".into())
-                        } else {
-                            t.title.clone()
-                        };
-                        if t.artist.is_empty() { title } else { format!("{} — {}", t.artist, title) }
-                    }).unwrap_or_else(|| "No track".into());
+                    let track_str = state
+                        .current_track
+                        .as_ref()
+                        .map(|t| {
+                            let title = if t.title.is_empty() {
+                                std::path::Path::new(&t.path)
+                                    .file_stem()
+                                    .map(|s| s.to_string_lossy().to_string())
+                                    .unwrap_or_else(|| "Unknown".into())
+                            } else {
+                                t.title.clone()
+                            };
+                            if t.artist.is_empty() {
+                                title
+                            } else {
+                                format!("{} — {}", t.artist, title)
+                            }
+                        })
+                        .unwrap_or_else(|| "No track".into());
                     let vol_str = format!("\x1b[36m{}%\x1b[0m", state.volume);
                     let repeat_str = format!("{:?}", state.repeat);
-                    let shuffle_str = if state.shuffle { "\x1b[32mOn\x1b[0m" } else { "Off" };
-                    let queue_str = format!("{} tracks, cursor {}/{}", state.queue.len(), state.queue_cursor + 1, state.queue.len().max(1));
-                    let mute_str = if state.mute { "\x1b[33mMuted\x1b[0m" } else { "Unmuted" };
+                    let shuffle_str = if state.shuffle {
+                        "\x1b[32mOn\x1b[0m"
+                    } else {
+                        "Off"
+                    };
+                    let queue_str = format!(
+                        "{} tracks, cursor {}/{}",
+                        state.queue.len(),
+                        state.queue_cursor + 1,
+                        state.queue.len().max(1)
+                    );
+                    let mute_str = if state.mute {
+                        "\x1b[33mMuted\x1b[0m"
+                    } else {
+                        "Unmuted"
+                    };
                     Ok(format!(
                         "\x1b[1mPlayback:\x1b[0m  {}\n\
                          \x1b[1mTrack:\x1b[0m    {}\n\
@@ -319,7 +343,13 @@ pub fn run(socket: Option<String>, json: bool, cmd: &CliCommand) {
                          \x1b[1mRepeat:\x1b[0m   {}\n\
                          \x1b[1mShuffle:\x1b[0m  {}\n\
                          \x1b[1mQueue:\x1b[0m    {}",
-                        status_str, track_str, vol_str, mute_str, repeat_str, shuffle_str, queue_str
+                        status_str,
+                        track_str,
+                        vol_str,
+                        mute_str,
+                        repeat_str,
+                        shuffle_str,
+                        queue_str
                     ))
                 }
             }

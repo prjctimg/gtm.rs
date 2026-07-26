@@ -68,13 +68,13 @@ impl TestReader {
             }
             // Need more data from the socket.
             let mut tmp = [0u8; 8192];
-            let n = self
-                .stream
-                .read(&mut tmp)
-                .await
-                .expect("read from socket");
+            let n = self.stream.read(&mut tmp).await.expect("read from socket");
             if n == 0 {
-                panic!("connection closed before response (buf contains {} bytes: {:?})", self.buf.len(), &self.buf[..self.buf.len().min(32)]);
+                panic!(
+                    "connection closed before response (buf contains {} bytes: {:?})",
+                    self.buf.len(),
+                    &self.buf[..self.buf.len().min(32)]
+                );
             }
             self.buf.extend_from_slice(&tmp[..n]);
         }
@@ -142,9 +142,7 @@ async fn daemon_handle() -> (tokio::task::JoinHandle<()>, DaemonConfig) {
     (handle, config)
 }
 
-async fn connect(
-    socket_path: &PathBuf,
-) -> (TestReader, tokio::net::unix::OwnedWriteHalf) {
+async fn connect(socket_path: &PathBuf) -> (TestReader, tokio::net::unix::OwnedWriteHalf) {
     let stream = UnixStream::connect(socket_path).await.unwrap();
     let (reader_half, writer_half) = stream.into_split();
     (TestReader::new(reader_half), writer_half)

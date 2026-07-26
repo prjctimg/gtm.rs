@@ -30,7 +30,9 @@ fn state_dir() -> PathBuf {
         }
     }
     if let Ok(user) = std::env::var("USER") {
-        let p = PathBuf::from("/tmp").join(format!("gtm-{}", user)).join("gtm");
+        let p = PathBuf::from("/tmp")
+            .join(format!("gtm-{}", user))
+            .join("gtm");
         if let Some(parent) = p.parent() {
             if parent.exists() {
                 let _ = std::fs::create_dir_all(&p);
