@@ -413,68 +413,91 @@ impl Daemon {
         let event_rx = inner.event_tx.subscribe();
         let (reply_tx, mut reply_rx) = mpsc::unbounded_channel::<(u64, DaemonRes)>();
 
+        // Cancellation token: any one of reader/writer/watchdog cancelling it
+        // causes the other two to shut down within one select cycle.
+        let token = tokio::sync::CancellationToken::new();
+
         // Reader task: JSON lines → req_tx
         let r_tx = reply_tx.clone();
         let inner_clone = inner.clone();
+        let token_reader = token.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(reader);
             let mut line = String::new();
             loop {
-                line.clear();
-                match reader.read_line(&mut line).await {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        let trimmed = line.trim();
-                        if trimmed.is_empty() {
-                            continue;
-                        }
-                        if trimmed.len() > 1_048_576 {
-                            // protocol.md: "Lines exceeding this limit MUST be
-                            // rejected and the connection closed."
-                            warn!("client {client_id}: line too long ({} bytes), disconnecting", trimmed.len());
-                            break;
-                        }
-                        let wire_req: WireReq = match serde_json::from_str(trimmed) {
-                            Ok(r) => r,
+                tokio::select! {
+                    _ = token_reader.cancelled() => break,
+                    result = reader.read_line(&mut line) => {
+                        match result {
+                            Ok(0) => break,
+                            Ok(_) => {
+                                let trimmed = line.trim();
+                                if trimmed.is_empty() {
+                                    continue;
+                                }
+                                if trimmed.len() > 1_048_576 {
+                                    // protocol.md: "Lines exceeding this limit MUST be
+                                    // rejected and the connection closed."
+                                    warn!("client {client_id}: line too long ({} bytes), disconnecting", trimmed.len());
+                                    break;
+                                }
+                                let wire_req: WireReq = match serde_json::from_str(trimmed) {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        // protocol.md: "If the daemon receives malformed
+                                        // JSON, it MUST close the connection."
+                                        warn!("client {client_id} malformed JSON, closing: {e}");
+                                        break;
+                                    }
+                                };
+                                let daemon_req = match DaemonReq::parse_cmd(&wire_req.cmd, wire_req.params.clone()) {
+                                    Ok(r) => r,
+                                    Err(e) if e.starts_with("unknown command:") => {
+                                        // protocol.md: unknown `cmd` → error response, keep alive.
+                                        let _ = r_tx.send((wire_req.id, DaemonRes::Error {
+                                            version: PROTOCOL_VERSION,
+                                            message: e,
+                                        }));
+                                        continue;
+                                    }
+                                    Err(e) => {
+                                        // Params parsed wrong for a known `cmd`: recoverable.
+                                        let _ = r_tx.send((wire_req.id, DaemonRes::Error {
+                                            version: PROTOCOL_VERSION,
+                                            message: format!("invalid params for {}: {}", wire_req.cmd, e),
+                                        }));
+                                        continue;
+                                    }
+                                };
+                                if req_tx.send((client_id, wire_req.id, daemon_req, r_tx.clone())).is_err() {
+                                    break;
+                                }
+                            }
                             Err(e) => {
-                                // protocol.md: "If the daemon receives malformed
-                                // JSON, it MUST close the connection."
-                                warn!("client {client_id} malformed JSON, closing: {e}");
+                                warn!("client {client_id} read error: {e}");
                                 break;
                             }
-                        };
-                        let daemon_req = match DaemonReq::parse_cmd(&wire_req.cmd, wire_req.params.clone()) {
-                            Ok(r) => r,
-                            Err(e) if e.starts_with("unknown command:") => {
-                                // protocol.md: unknown `cmd` → error response, keep alive.
-                                let _ = r_tx.send((wire_req.id, DaemonRes::Error {
-                                    version: PROTOCOL_VERSION,
-                                    message: e,
-                                }));
-                                continue;
-                            }
-                            Err(e) => {
-                                // Params parsed wrong for a known `cmd`: recoverable.
-                                let _ = r_tx.send((wire_req.id, DaemonRes::Error {
-                                    version: PROTOCOL_VERSION,
-                                    message: format!("invalid params for {}: {}", wire_req.cmd, e),
-                                }));
-                                continue;
-                            }
-                        };
-                        if req_tx.send((client_id, wire_req.id, daemon_req, r_tx.clone())).is_err() {
-                            break;
                         }
-                    }
-                    Err(e) => {
-                        warn!("client {client_id} read error: {e}");
-                        break;
                     }
                 }
             }
+            token.cancel();
             // Clean up auth state on disconnect
             inner_clone.client_auth.lock().await.remove(&client_id);
             info!("client {client_id} disconnected");
+        });
+
+        // Watchdog task: enforce 10 s handshake deadline.
+        // Closed as soon as the reader exits (reader cancels `token`
+        // on any exit path, so this task is woken and exits via the
+        // cancelled branch above).
+        let token_watchdog = token.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            if !*inner.client_auth.lock().await.get(&client_id).unwrap_or(&true) {
+                warn!("client {client_id}: handshake timeout");
+                token_watchdog.cancel();
+            }
         });
 
         // Writer task: responses + broadcast events → socket
@@ -483,6 +506,7 @@ impl Daemon {
             let mut event_rx = event_rx;
             loop {
                 tokio::select! {
+                    _ = token.cancelled() => break,
                     res = reply_rx.recv() => {
                         match res {
                             Some((id, response)) => {
