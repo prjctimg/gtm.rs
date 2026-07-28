@@ -442,6 +442,7 @@ impl Daemon {
                             Ok(_) => {
                                 let trimmed = line.trim();
                                 if trimmed.is_empty() {
+                                    line.clear();
                                     continue;
                                 }
                                 if trimmed.len() > 1_048_576 {
@@ -467,6 +468,7 @@ impl Daemon {
                                             version: PROTOCOL_VERSION,
                                             message: e,
                                         }));
+                                        line.clear();
                                         continue;
                                     }
                                     Err(e) => {
@@ -475,12 +477,14 @@ impl Daemon {
                                             version: PROTOCOL_VERSION,
                                             message: format!("invalid params for {}: {}", wire_req.cmd, e),
                                         }));
+                                        line.clear();
                                         continue;
                                     }
                                 };
                                 if req_tx.send((client_id, wire_req.id, daemon_req, r_tx.clone())).is_err() {
                                     break;
                                 }
+                                line.clear();
                             }
                             Err(e) => {
                                 warn!("client {client_id} read error: {e}");
