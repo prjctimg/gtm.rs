@@ -307,7 +307,6 @@ impl Daemon {
         let mut save_interval = tokio::time::interval(Duration::from_secs(60));
         loop {
             tokio::select! {
-                biased;
                 _ = poll_interval.tick() => {
                     let result = { self.inner.mixer.lock().await.poll() };
                     Self::handle_audio_event(&self.inner, result).await;

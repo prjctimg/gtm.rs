@@ -811,6 +811,8 @@ impl IpcWorker {
                     self.reader = reader;
                     self.writer = writer;
                     self.buf.clear();
+                    self.pending.clear();
+                    self.next_id = 0;
                     self.connected.store(true, Ordering::Release);
                     crate::log::log(&format!("IPC worker reconnected after {attempt} attempts"));
                     self.handshake_sent = false;
@@ -861,31 +863,40 @@ impl IpcWorker {
 
         // Read the response with a short timeout
         let mut tmp = [0u8; 4096];
-        tokio::time::timeout(Duration::from_secs(5), self.reader.read(&mut tmp))
+        let n = tokio::time::timeout(Duration::from_secs(5), self.reader.read(&mut tmp))
             .await
             .map_err(|_| CoreError::Daemon("handshake response timeout".into()))?
             .map_err(|e| CoreError::Daemon(format!("read handshake response: {e}")))?;
 
-        // Parse and verify the response
-        let data = &tmp[..];
-        if let Some(pos) = data.iter().position(|&b| b == b'\n') {
-            let line = &data[..pos];
-            if let Ok(wire_res) = serde_json::from_slice::<WireRes>(line) {
-                if wire_res.ok == Some(true) {
-                    self.handshake_sent = true;
-                    self.authenticated.store(true, Ordering::Release);
-                    *self.last_heartbeat_at.lock().unwrap() = Instant::now();
-                    crate::log::log("IPC worker post-reconnect handshake OK");
-                    return Ok(());
-                } else {
-                    return Err(CoreError::Daemon(format!(
-                        "handshake rejected: {:?}",
-                        wire_res.error
-                    )));
-                }
-            }
+        // Parse the first complete line as the handshake response.
+        // Preserve any remaining data in self.buf so broadcast events that
+        // arrived in the same TCP segment are not silently dropped.
+        let data = &tmp[..n];
+        let pos = data.iter().position(|&b| b == b'\n')
+            .ok_or_else(|| CoreError::Daemon("malformed handshake response".into()))?;
+
+        let line = &data[..pos];
+        if pos + 1 < n {
+            self.buf.extend_from_slice(&data[pos + 1..n]);
         }
-        Err(CoreError::Daemon("malformed handshake response".into()))
+
+        let wire_res = serde_json::from_slice::<WireRes>(line)
+            .map_err(|_| CoreError::Daemon("malformed handshake response".into()))?;
+
+        match wire_res.ok {
+            Some(true) => {
+                self.handshake_sent = true;
+                self.authenticated.store(true, Ordering::Release);
+                *self.last_heartbeat_at.lock().unwrap() = Instant::now();
+                crate::log::log("IPC worker post-reconnect handshake OK");
+                Ok(())
+            }
+            Some(false) => Err(CoreError::Daemon(format!(
+                "handshake rejected: {:?}",
+                wire_res.error
+            ))),
+            _ => Err(CoreError::Daemon("malformed handshake response".into())),
+        }
     }
 
     async fn read_with_timeout(&mut self, tmp: &mut [u8; 4096]) -> Result<bool> {
