@@ -135,8 +135,8 @@ impl DaemonClient {
                 }
                 Err(e) => {
                     last_err = Some(e);
-                    // Exponential backoff: 50ms, 100ms, 150ms, ... up to 500ms
-                    let delay = (50 * (i + 1)).min(500);
+                    // Exponential backoff: 50ms, 100ms, 200ms, ... up to 5s
+                    let delay = 50u64.saturating_mul(1u64 << i).min(5000);
                     tokio::time::sleep(Duration::from_millis(delay)).await;
                 }
             }
@@ -230,9 +230,9 @@ impl DaemonClient {
             .map_err(|_| CoreError::Daemon("IPC worker response dropped".into()))?
     }
 
-    async fn send_ok(&self, req: DaemonReq) -> Result<u32> {
+    async fn send_ok(&self, req: DaemonReq) -> Result<()> {
         match self.send_raw(req).await? {
-            DaemonRes::Ok { version } => Ok(version),
+            DaemonRes::Ok => Ok(()),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
             _ => Err(CoreError::Daemon("unexpected response".into())),
         }
@@ -240,7 +240,7 @@ impl DaemonClient {
 
     // ─── Playback ───
 
-    pub async fn play(&self, path: &str, start_pos: f64) -> Result<u32> {
+    pub async fn play(&self, path: &str, start_pos: f64) -> Result<()> {
         self.send_ok(DaemonReq::Play {
             path: path.into(),
             start_pos,
@@ -248,57 +248,57 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn play_pause(&self) -> Result<u32> {
+    pub async fn play_pause(&self) -> Result<()> {
         self.send_ok(DaemonReq::PlayPause).await
     }
 
-    pub async fn pause(&self) -> Result<u32> {
+    pub async fn pause(&self) -> Result<()> {
         self.send_ok(DaemonReq::Pause).await
     }
 
-    pub async fn stop(&self) -> Result<u32> {
+    pub async fn stop(&self) -> Result<()> {
         self.send_ok(DaemonReq::Stop).await
     }
 
-    pub async fn next(&self) -> Result<u32> {
+    pub async fn next(&self) -> Result<()> {
         self.send_ok(DaemonReq::Next).await
     }
 
-    pub async fn prev(&self) -> Result<u32> {
+    pub async fn prev(&self) -> Result<()> {
         self.send_ok(DaemonReq::Prev).await
     }
 
-    pub async fn seek(&self, position_secs: f64) -> Result<u32> {
+    pub async fn seek(&self, position_secs: f64) -> Result<()> {
         *self.base_pos.lock().await = position_secs;
         *self.base_time.lock().await = Some(Instant::now());
         self.send_ok(DaemonReq::Seek { position_secs }).await
     }
 
-    pub async fn set_volume(&self, volume: u8) -> Result<u32> {
+    pub async fn set_volume(&self, volume: u8) -> Result<()> {
         self.send_ok(DaemonReq::SetVolume { volume }).await
     }
 
-    pub async fn toggle_shuffle(&self) -> Result<u32> {
+    pub async fn toggle_shuffle(&self) -> Result<()> {
         self.send_ok(DaemonReq::ToggleShuffle).await
     }
 
-    pub async fn cycle_repeat(&self, mode: RepeatMode) -> Result<u32> {
+    pub async fn cycle_repeat(&self, mode: RepeatMode) -> Result<()> {
         self.send_ok(DaemonReq::CycleRepeat { mode }).await
     }
 
-    pub async fn toggle_mute(&self) -> Result<u32> {
+    pub async fn toggle_mute(&self) -> Result<()> {
         self.send_ok(DaemonReq::ToggleMute).await
     }
 
-    pub async fn set_eq_preset(&self, preset: EqPreset) -> Result<u32> {
+    pub async fn set_eq_preset(&self, preset: EqPreset) -> Result<()> {
         self.send_ok(DaemonReq::SetEqPreset { preset }).await
     }
 
-    pub async fn set_eq_enabled(&self, enabled: bool) -> Result<u32> {
+    pub async fn set_eq_enabled(&self, enabled: bool) -> Result<()> {
         self.send_ok(DaemonReq::SetEqEnabled { enabled }).await
     }
 
-    pub async fn set_reverb(&self, enabled: bool, room_size: f32) -> Result<u32> {
+    pub async fn set_reverb(&self, enabled: bool, room_size: f32) -> Result<()> {
         self.send_ok(DaemonReq::SetReverb { enabled, room_size })
             .await
     }
@@ -308,7 +308,7 @@ impl DaemonClient {
         enabled: bool,
         duration_secs: u8,
         easing: Option<state::Easing>,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         self.send_ok(DaemonReq::Crossfade {
             enabled,
             duration_secs,
@@ -317,7 +317,7 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn set_loudness_mode(&self, mode: state::LoudnessMode) -> Result<u32> {
+    pub async fn set_loudness_mode(&self, mode: state::LoudnessMode) -> Result<()> {
         self.send_ok(DaemonReq::SetLoudnessMode { mode }).await
     }
 
@@ -325,16 +325,16 @@ impl DaemonClient {
         &self,
         track_ids: Option<Vec<i64>>,
         force: Option<bool>,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         self.send_ok(DaemonReq::ScanLoudness { track_ids, force })
             .await
     }
 
-    pub async fn set_pre_gain(&self, pre_gain_db: f32) -> Result<u32> {
+    pub async fn set_pre_gain(&self, pre_gain_db: f32) -> Result<()> {
         self.send_ok(DaemonReq::SetPreGain { pre_gain_db }).await
     }
 
-    pub async fn set_gapless(&self, enabled: bool) -> Result<u32> {
+    pub async fn set_gapless(&self, enabled: bool) -> Result<()> {
         self.send_ok(DaemonReq::SetGapless { enabled }).await
     }
 
@@ -343,7 +343,7 @@ impl DaemonClient {
         enabled: bool,
         min_queue_remaining: Option<u32>,
         max_history: Option<u32>,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         self.send_ok(DaemonReq::SetDynamicMode {
             enabled,
             min_queue_remaining,
@@ -359,7 +359,7 @@ impl DaemonClient {
         session_token: Option<String>,
         min_play_secs: Option<u32>,
         min_play_pct: Option<f32>,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         self.send_ok(DaemonReq::SetScrobble {
             enabled,
             api_key,
@@ -370,15 +370,15 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn organize_library(&self, dry_run: Option<bool>) -> Result<u32> {
+    pub async fn organize_library(&self, dry_run: Option<bool>) -> Result<()> {
         self.send_ok(DaemonReq::OrganizeLibrary { dry_run }).await
     }
 
-    pub async fn set_sleep_timer(&self, minutes: u32) -> Result<u32> {
+    pub async fn set_sleep_timer(&self, minutes: u32) -> Result<()> {
         self.send_ok(DaemonReq::SetSleepTimer { minutes }).await
     }
 
-    pub async fn cancel_sleep_timer(&self) -> Result<u32> {
+    pub async fn cancel_sleep_timer(&self) -> Result<()> {
         self.send_ok(DaemonReq::CancelSleepTimer).await
     }
 
@@ -391,7 +391,7 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn queue_add(&self, path: &str, position: Option<u128>) -> Result<u32> {
+    pub async fn queue_add(&self, path: &str, position: Option<u128>) -> Result<()> {
         self.send_ok(DaemonReq::Queue {
             action: QueueAction::Add {
                 path: path.into(),
@@ -401,42 +401,42 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn queue_add_many(&self, paths: Vec<String>) -> Result<u32> {
+    pub async fn queue_add_many(&self, paths: Vec<String>) -> Result<()> {
         self.send_ok(DaemonReq::Queue {
             action: QueueAction::AddMany { paths },
         })
         .await
     }
 
-    pub async fn queue_add_dir(&self, path: &str) -> Result<u32> {
+    pub async fn queue_add_dir(&self, path: &str) -> Result<()> {
         self.send_ok(DaemonReq::Queue {
             action: QueueAction::AddFolder { path: path.into() },
         })
         .await
     }
 
-    pub async fn queue_clear(&self) -> Result<u32> {
+    pub async fn queue_clear(&self) -> Result<()> {
         self.send_ok(DaemonReq::Queue {
             action: QueueAction::Clear,
         })
         .await
     }
 
-    pub async fn queue_rm(&self, index: u128) -> Result<u32> {
+    pub async fn queue_rm(&self, index: u128) -> Result<()> {
         self.send_ok(DaemonReq::Queue {
             action: QueueAction::Remove { index },
         })
         .await
     }
 
-    pub async fn queue_move(&self, from: u128, to: u128) -> Result<u32> {
+    pub async fn queue_move(&self, from: u128, to: u128) -> Result<()> {
         self.send_ok(DaemonReq::Queue {
             action: QueueAction::Move { from, to },
         })
         .await
     }
 
-    pub async fn queue_set(&self, paths: Vec<String>, start_idx: u128) -> Result<u32> {
+    pub async fn queue_set(&self, paths: Vec<String>, start_idx: u128) -> Result<()> {
         self.send_ok(DaemonReq::Queue {
             action: QueueAction::Set { paths, start_idx },
         })
@@ -445,7 +445,7 @@ impl DaemonClient {
 
     // ─── Library ───
 
-    pub async fn library_scan(&self, path: &str) -> Result<u32> {
+    pub async fn library_scan(&self, path: &str) -> Result<()> {
         self.send_ok(DaemonReq::Library {
             action: LibraryAction::Scan { path: path.into() },
         })
@@ -470,14 +470,14 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn library_create_playlist(&self, name: &str) -> Result<u32> {
+    pub async fn library_create_playlist(&self, name: &str) -> Result<()> {
         self.send_ok(DaemonReq::Library {
             action: LibraryAction::CreatePlaylist { name: name.into() },
         })
         .await
     }
 
-    pub async fn library_delete_playlist(&self, id: i64) -> Result<u32> {
+    pub async fn library_delete_playlist(&self, id: i64) -> Result<()> {
         self.send_ok(DaemonReq::Library {
             action: LibraryAction::DeletePlaylist { id },
         })
@@ -488,7 +488,7 @@ impl DaemonClient {
         &self,
         playlist_id: i64,
         track_ids: Vec<i64>,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         self.send_ok(DaemonReq::Library {
             action: LibraryAction::AddToPlaylist {
                 playlist_id,
@@ -498,14 +498,14 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn library_import_m3u(&self, path: &str) -> Result<u32> {
+    pub async fn library_import_m3u(&self, path: &str) -> Result<()> {
         self.send_ok(DaemonReq::Library {
             action: LibraryAction::ImportM3u { path: path.into() },
         })
         .await
     }
 
-    pub async fn library_export_m3u(&self, playlist_id: i64, path: &str) -> Result<u32> {
+    pub async fn library_export_m3u(&self, playlist_id: i64, path: &str) -> Result<()> {
         self.send_ok(DaemonReq::Library {
             action: LibraryAction::ExportM3u {
                 playlist_id,
@@ -540,7 +540,7 @@ impl DaemonClient {
         &self,
         playlist_id: i64,
         track_id: i64,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         self.send_ok(DaemonReq::Library {
             action: LibraryAction::RemoveFromPlaylist {
                 playlist_id,
@@ -550,7 +550,7 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn library_remove_track(&self, id: i64) -> Result<u32> {
+    pub async fn library_remove_track(&self, id: i64) -> Result<()> {
         self.send_ok(DaemonReq::Library {
             action: LibraryAction::RemoveTrack { id },
         })
@@ -566,7 +566,7 @@ impl DaemonClient {
         genre: Option<String>,
         year: Option<i32>,
         track_number: Option<i32>,
-    ) -> Result<u32> {
+    ) -> Result<()> {
         self.send_ok(DaemonReq::Library {
             action: LibraryAction::UpdateMetadata {
                 track_id,
@@ -594,11 +594,11 @@ impl DaemonClient {
         self.send_raw(DaemonReq::GetFavourites).await
     }
 
-    pub async fn add_favourite(&self, track_id: i64) -> Result<u32> {
+    pub async fn add_favourite(&self, track_id: i64) -> Result<()> {
         self.send_ok(DaemonReq::AddFavourite { track_id }).await
     }
 
-    pub async fn remove_favourite(&self, track_id: i64) -> Result<u32> {
+    pub async fn remove_favourite(&self, track_id: i64) -> Result<()> {
         self.send_ok(DaemonReq::RemoveFavourite { track_id }).await
     }
 
@@ -616,7 +616,7 @@ impl DaemonClient {
         self.send_raw(DaemonReq::YtSearchPoll).await
     }
 
-    pub async fn yt_search_cancel(&self) -> Result<u32> {
+    pub async fn yt_search_cancel(&self) -> Result<()> {
         self.send_ok(DaemonReq::YtSearchCancel).await
     }
 
@@ -645,7 +645,7 @@ impl DaemonClient {
         }
     }
 
-    pub async fn quit(&self) -> Result<u32> {
+    pub async fn quit(&self) -> Result<()> {
         self.send_ok(DaemonReq::Quit).await
     }
 

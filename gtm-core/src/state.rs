@@ -85,6 +85,12 @@ pub struct DynamicModeConfig {
     pub enabled: bool,
     pub min_queue_remaining: u32,
     pub max_history: u32,
+    #[serde(default = "default_cooldown_weight")]
+    pub cooldown_weight: f32,
+}
+
+fn default_cooldown_weight() -> f32 {
+    0.1
 }
 
 impl Default for DynamicModeConfig {
@@ -93,6 +99,7 @@ impl Default for DynamicModeConfig {
             enabled: false,
             min_queue_remaining: 3,
             max_history: 50,
+            cooldown_weight: 0.1,
         }
     }
 }

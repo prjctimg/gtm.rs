@@ -26,7 +26,7 @@ use ratatui_image::StatefulImage;
 pub fn run_tui(socket: Option<String>) -> Result<(), Box<dyn std::error::Error>> {
     let socket_path = socket
         .map(PathBuf::from)
-        .unwrap_or_else(gtm_core::default_socket_path);
+        .unwrap_or_else(gtm_core::resolve_command_socket);
 
     // Redirect stderr to log file so diagnostic messages don't break the TUI
     let _original_stderr = gtm_core::log::redirect_stderr_to_log();

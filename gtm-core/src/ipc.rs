@@ -260,13 +260,7 @@ impl DaemonReq {
             DaemonReq::ToggleShuffle => "toggle_shuffle",
             DaemonReq::CycleRepeat { .. } => "cycle_repeat",
             DaemonReq::ToggleMute => "toggle_mute",
-            DaemonReq::Crossfade { easing, .. } => {
-                if easing.is_some() {
-                    "crossfade"
-                } else {
-                    "crossfade"
-                }
-            }
+            DaemonReq::Crossfade { .. } => "crossfade",
             DaemonReq::SetLoudnessMode { .. } => "set_loudness_mode",
             DaemonReq::ScanLoudness { .. } => "scan_loudness",
             DaemonReq::SetPreGain { .. } => "set_pre_gain",
@@ -734,9 +728,14 @@ pub enum DaemonEvent {
     #[serde(rename = "loudness_mode_changed")]
     LoudnessModeChanged { mode: state::LoudnessMode },
     #[serde(rename = "loudness_scan_progress")]
-    LoudnessScanProgress { scanned: usize, total: usize },
+    LoudnessScanProgress {
+        tracks_remaining: u32,
+        tracks_total: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        current_track: Option<TrackInfo>,
+    },
     #[serde(rename = "loudness_scan_done")]
-    LoudnessScanDone { scanned: usize },
+    LoudnessScanDone { scanned: u32, failed: u32 },
     #[serde(rename = "pre_gain_changed")]
     PreGainChanged { pre_gain_db: f32 },
     #[serde(rename = "gapless_changed")]
@@ -750,7 +749,10 @@ pub enum DaemonEvent {
     #[serde(rename = "scrobble_config_changed")]
     ScrobbleConfigChanged { enabled: bool },
     #[serde(rename = "library_organized")]
-    LibraryOrganized { moves: usize },
+    LibraryOrganized {
+        moves_succeeded: u32,
+        moves_failed: u32,
+    },
     #[serde(rename = "sleep_timer_tick")]
     SleepTimerTick { remaining_secs: u32 },
     #[serde(rename = "sleep_timer_expired")]
@@ -770,205 +772,50 @@ pub enum DaemonEvent {
     Heartbeat,
 }
 
-impl DaemonEvent {
-    pub fn to_wire_event(&self) -> WireEvent {
-        match self {
-            DaemonEvent::PlaybackStarted {
-                track,
-                auto_advanced,
-                time_pos,
-                duration,
-            } => WireEvent::new(
-                "playback_started",
-                serde_json::json!({
-                    "track": track,
-                    "auto_advanced": auto_advanced,
-                    "time_pos": time_pos,
-                    "duration": duration,
-                }),
-            ),
-            DaemonEvent::PlaybackPaused { time_pos } => WireEvent::new(
-                "playback_paused",
-                serde_json::json!({ "time_pos": time_pos }),
-            ),
-            DaemonEvent::PlaybackStopped => {
-                WireEvent::new("playback_stopped", serde_json::json!({}))
-            }
-            DaemonEvent::TrackEnded => WireEvent::new("track_ended", serde_json::json!({})),
-            DaemonEvent::PositionChanged { time_pos } => WireEvent::new(
-                "position_changed",
-                serde_json::json!({ "time_pos": time_pos }),
-            ),
-            DaemonEvent::DurationChanged { duration } => WireEvent::new(
-                "duration_changed",
-                serde_json::json!({ "duration": duration }),
-            ),
-            DaemonEvent::VolumeChanged { volume } => {
-                WireEvent::new("volume_changed", serde_json::json!({ "volume": volume }))
-            }
-            DaemonEvent::MetadataChanged { detail } => {
-                WireEvent::new("metadata_changed", serde_json::json!({ "detail": detail }))
-            }
-            DaemonEvent::QueueChanged { queue, cursor } => WireEvent::new(
-                "queue_changed",
-                serde_json::json!({ "queue": queue, "cursor": cursor }),
-            ),
-            DaemonEvent::QueueIndexChanged { index } => {
-                WireEvent::new("queue_index_changed", serde_json::json!({ "index": index }))
-            }
-            DaemonEvent::RepeatModeChanged { mode } => {
-                WireEvent::new("repeat_mode_changed", serde_json::json!({ "mode": mode }))
-            }
-            DaemonEvent::ShuffleChanged { enabled } => {
-                WireEvent::new("shuffle_changed", serde_json::json!({ "enabled": enabled }))
-            }
-            DaemonEvent::CrossfadeChanged {
-                enabled,
-                duration_secs,
-                easing,
-            } => {
-                let mut data = serde_json::json!({
-                    "enabled": enabled,
-                    "duration_secs": duration_secs,
-                });
-                if let Some(e) = easing {
-                    if let serde_json::Value::Object(obj) = &mut data {
-                        obj.insert("easing".into(), serde_json::to_value(e).unwrap());
-                    }
-                }
-                WireEvent::new("crossfade_changed", data)
-            }
-            DaemonEvent::LoudnessModeChanged { mode } => {
-                WireEvent::new("loudness_mode_changed", serde_json::json!({ "mode": mode }))
-            }
-            DaemonEvent::LoudnessScanProgress { scanned, total } => WireEvent::new(
-                "loudness_scan_progress",
-                serde_json::json!({ "scanned": scanned, "total": total }),
-            ),
-            DaemonEvent::LoudnessScanDone { scanned } => WireEvent::new(
-                "loudness_scan_done",
-                serde_json::json!({ "scanned": scanned }),
-            ),
-            DaemonEvent::PreGainChanged { pre_gain_db } => WireEvent::new(
-                "pre_gain_changed",
-                serde_json::json!({ "pre_gain_db": pre_gain_db }),
-            ),
-            DaemonEvent::GaplessChanged { enabled } => {
-                WireEvent::new("gapless_changed", serde_json::json!({ "enabled": enabled }))
-            }
-            DaemonEvent::DynamicModeChanged {
-                enabled,
-                min_queue_remaining,
-                max_history,
-            } => WireEvent::new(
-                "dynamic_mode_changed",
-                serde_json::json!({
-                    "enabled": enabled,
-                    "min_queue_remaining": min_queue_remaining,
-                    "max_history": max_history,
-                }),
-            ),
-            DaemonEvent::ScrobbleConfigChanged { enabled } => WireEvent::new(
-                "scrobble_config_changed",
-                serde_json::json!({ "enabled": enabled }),
-            ),
-            DaemonEvent::LibraryOrganized { moves } => {
-                WireEvent::new("library_organized", serde_json::json!({ "moves": moves }))
-            }
-            DaemonEvent::SleepTimerTick { remaining_secs } => WireEvent::new(
-                "sleep_timer_tick",
-                serde_json::json!({ "remaining_secs": remaining_secs }),
-            ),
-            DaemonEvent::SleepTimerExpired => {
-                WireEvent::new("sleep_timer_expired", serde_json::json!({}))
-            }
-            DaemonEvent::EqPresetChanged { preset } => {
-                WireEvent::new("eq_preset_changed", serde_json::json!({ "preset": preset }))
-            }
-            DaemonEvent::EqEnabledChanged { enabled } => WireEvent::new(
-                "eq_enabled_changed",
-                serde_json::json!({ "enabled": enabled }),
-            ),
-            DaemonEvent::ReverbChanged { enabled, room_size } => WireEvent::new(
-                "reverb_changed",
-                serde_json::json!({
-                    "enabled": enabled,
-                    "room_size": room_size,
-                }),
-            ),
-            DaemonEvent::Custom { name, data } => {
-                let mut map = serde_json::json!({ "name": name });
-                if let serde_json::Value::Object(obj) = &mut map {
-                    for (k, v) in data {
-                        obj.insert(k.clone(), serde_json::Value::String(v.clone()));
-                    }
-                }
-                WireEvent::new("custom", map)
-            }
-            DaemonEvent::Heartbeat => WireEvent::new("heartbeat", serde_json::json!({})),
-        }
-    }
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum DaemonRes {
-    Ok {
-        version: u32,
-    },
+    Ok,
     Value {
-        version: u32,
         value: Value,
     },
     Tracks {
-        version: u32,
         tracks: Vec<TrackInfo>,
     },
     QueueState {
-        version: u32,
         queue: Vec<TrackInfo>,
         cursor: u128,
     },
     Status {
-        version: u32,
         state: Box<DaemonState>,
     },
     Playlists {
-        version: u32,
         playlists: Vec<Playlist>,
     },
     YtSearchResults {
-        version: u32,
         results: Vec<YTSearchResult>,
     },
     StreamInfo {
-        version: u32,
         info: Box<StreamInfo>,
     },
     Lyrics {
-        version: u32,
         lyrics: Option<LrcData>,
     },
     CoverArt {
-        version: u32,
         data: Option<String>,
     },
     SyncCoversResult {
-        version: u32,
         synced: usize,
         total: usize,
     },
     SyncLyricsResult {
-        version: u32,
         synced: usize,
         total: usize,
     },
     Pong,
     HealthReport {
-        version: u32,
         report: Box<HealthReport>,
     },
     EqPresets {
-        version: u32,
         presets: Vec<String>,
     },
     Handshake {
@@ -977,7 +824,6 @@ pub enum DaemonRes {
         daemon_version: String,
     },
     Error {
-        version: u32,
         message: String,
     },
 }
@@ -985,52 +831,31 @@ pub enum DaemonRes {
 impl DaemonRes {
     /// Serialize this typed response into a `WireRes` for the command socket.
     pub fn to_wire(self, id: u64) -> WireRes {
-        let _version = match &self {
-            DaemonRes::Ok { version } => *version,
-            DaemonRes::Value { version, .. } => *version,
-            DaemonRes::Tracks { version, .. } => *version,
-            DaemonRes::QueueState { version, .. } => *version,
-            DaemonRes::Status { version, .. } => *version,
-            DaemonRes::Playlists { version, .. } => *version,
-            DaemonRes::YtSearchResults { version, .. } => *version,
-            DaemonRes::StreamInfo { version, .. } => *version,
-            DaemonRes::Lyrics { version, .. } => *version,
-            DaemonRes::CoverArt { version, .. } => *version,
-            DaemonRes::SyncCoversResult { version, .. } => *version,
-            DaemonRes::SyncLyricsResult { version, .. } => *version,
-            DaemonRes::HealthReport { version, .. } => *version,
-            DaemonRes::EqPresets { version, .. } => *version,
-            DaemonRes::Handshake { version, .. } => *version,
-            DaemonRes::Error { version, .. } => *version,
-            DaemonRes::Pong => 0,
-        };
-
         let data = match self {
-            DaemonRes::Ok { .. } => None,
-            DaemonRes::Value { value, .. } => Some(value),
-            DaemonRes::Tracks { tracks, .. } => Some(serde_json::json!({ "tracks": tracks })),
-            // Spec `queue` `list` action: `{"id":N,"ok":true,"queue":[...],"cursor":0}`.
-            DaemonRes::QueueState { queue, cursor, .. } => {
+            DaemonRes::Ok => None,
+            DaemonRes::Value { value } => Some(value),
+            DaemonRes::Tracks { tracks } => Some(serde_json::json!({ "tracks": tracks })),
+            DaemonRes::QueueState { queue, cursor } => {
                 Some(serde_json::json!({ "queue": queue, "cursor": cursor }))
             }
-            DaemonRes::Status { state, .. } => Some(serde_json::json!({ "state": state })),
-            DaemonRes::Playlists { playlists, .. } => {
+            DaemonRes::Status { state } => Some(serde_json::json!({ "state": state })),
+            DaemonRes::Playlists { playlists } => {
                 Some(serde_json::json!({ "playlists": playlists }))
             }
-            DaemonRes::YtSearchResults { results, .. } => {
+            DaemonRes::YtSearchResults { results } => {
                 Some(serde_json::json!({ "results": results }))
             }
-            DaemonRes::StreamInfo { info, .. } => Some(serde_json::json!({ "info": info })),
-            DaemonRes::Lyrics { lyrics, .. } => Some(serde_json::json!({ "lyrics": lyrics })),
-            DaemonRes::CoverArt { data, .. } => Some(serde_json::json!({ "data": data })),
-            DaemonRes::SyncCoversResult { synced, total, .. } => {
+            DaemonRes::StreamInfo { info } => Some(serde_json::json!({ "info": info })),
+            DaemonRes::Lyrics { lyrics } => Some(serde_json::json!({ "lyrics": lyrics })),
+            DaemonRes::CoverArt { data } => Some(serde_json::json!({ "data": data })),
+            DaemonRes::SyncCoversResult { synced, total } => {
                 Some(serde_json::json!({ "synced": synced, "total": total }))
             }
-            DaemonRes::SyncLyricsResult { synced, total, .. } => {
+            DaemonRes::SyncLyricsResult { synced, total } => {
                 Some(serde_json::json!({ "synced": synced, "total": total }))
             }
-            DaemonRes::HealthReport { report, .. } => Some(serde_json::json!({ "report": report })),
-            DaemonRes::EqPresets { presets, .. } => Some(serde_json::json!({ "presets": presets })),
+            DaemonRes::HealthReport { report } => Some(serde_json::json!({ "report": report })),
+            DaemonRes::EqPresets { presets } => Some(serde_json::json!({ "presets": presets })),
             DaemonRes::Handshake {
                 version,
                 daemon,
@@ -1040,7 +865,7 @@ impl DaemonRes {
                 "daemon": daemon,
                 "daemon_version": daemon_version,
             })),
-            DaemonRes::Error { message, .. } => return WireRes::err(id, message),
+            DaemonRes::Error { message } => return WireRes::err(id, message),
             DaemonRes::Pong => None,
         };
 
@@ -1048,17 +873,13 @@ impl DaemonRes {
     }
 
     /// Reconstruct a typed `DaemonRes` from a parsed `WireRes` keyed by the
-    /// `cmd` string of the request that produced it. The wire format itself
-    /// does not echo `cmd` (`protocol.md` § Wire Format: Responses), so the
-    /// caller tracks the originating `cmd` and supplies it here.
+    /// `cmd` string of the request that produced it.
     pub fn from_wire(cmd: &str, wire: &WireRes) -> Self {
         match (wire.ok, &wire.error) {
             (Some(false), Some(msg)) => DaemonRes::Error {
-                version: PROTOCOL_VERSION,
                 message: msg.clone(),
             },
             (Some(false), None) => DaemonRes::Error {
-                version: PROTOCOL_VERSION,
                 message: "unknown error".into(),
             },
             (Some(true), _) => {
@@ -1066,14 +887,12 @@ impl DaemonRes {
                 Self::ok_from_data(cmd, data)
             }
             _ => DaemonRes::Error {
-                version: PROTOCOL_VERSION,
                 message: "malformed response".into(),
             },
         }
     }
 
     fn ok_from_data(cmd: &str, data: Value) -> Self {
-        let v = PROTOCOL_VERSION;
         match cmd {
             "handshake" => {
                 #[derive(Deserialize)]
@@ -1088,121 +907,78 @@ impl DaemonRes {
                         daemon: d.daemon,
                         daemon_version: d.daemon_version,
                     },
-                    Err(_) => DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    },
+                    Err(_) => DaemonRes::Value { value: data },
                 }
             }
             "get_status" => match serde_json::from_value::<Box<DaemonState>>(
                 data.get("state").cloned().unwrap_or(Value::Null),
             ) {
-                Ok(state) => DaemonRes::Status { version: v, state },
-                Err(_) => DaemonRes::Value {
-                    version: v,
-                    value: data,
-                },
+                Ok(state) => DaemonRes::Status { state },
+                Err(_) => DaemonRes::Value { value: data },
             },
             "queue" => {
                 let queue = data.get("queue").cloned().unwrap_or(Value::Null);
                 let cursor = data.get("cursor").and_then(|c| c.as_u64()).unwrap_or(0) as u128;
                 match serde_json::from_value::<Vec<TrackInfo>>(queue) {
-                    Ok(queue) => DaemonRes::QueueState {
-                        version: v,
-                        queue,
-                        cursor,
-                    },
-                    Err(_) => DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    },
+                    Ok(queue) => DaemonRes::QueueState { queue, cursor },
+                    Err(_) => DaemonRes::Value { value: data },
                 }
             }
             "search" | "get_favourites" | "library" => {
                 let tracks = data.get("tracks").cloned().unwrap_or(Value::Null);
                 match serde_json::from_value::<Vec<TrackInfo>>(tracks) {
-                    Ok(tracks) => DaemonRes::Tracks { version: v, tracks },
-                    Err(_) => DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    },
+                    Ok(tracks) => DaemonRes::Tracks { tracks },
+                    Err(_) => DaemonRes::Value { value: data },
                 }
             }
             "yt_search_poll" => {
                 let results = data.get("results").cloned().unwrap_or(Value::Null);
                 match serde_json::from_value::<Vec<YTSearchResult>>(results) {
-                    Ok(results) => DaemonRes::YtSearchResults {
-                        version: v,
-                        results,
-                    },
-                    Err(_) => DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    },
+                    Ok(results) => DaemonRes::YtSearchResults { results },
+                    Err(_) => DaemonRes::Value { value: data },
                 }
             }
             "yt_resolve_stream" => {
                 let info = data.get("info").cloned().unwrap_or(Value::Null);
                 match serde_json::from_value::<Box<StreamInfo>>(info) {
-                    Ok(info) => DaemonRes::StreamInfo { version: v, info },
-                    Err(_) => DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    },
+                    Ok(info) => DaemonRes::StreamInfo { info },
+                    Err(_) => DaemonRes::Value { value: data },
                 }
             }
             "get_cover_art" => {
                 let d = data.get("data").cloned().unwrap_or(Value::Null);
                 match serde_json::from_value::<Option<String>>(d) {
-                    Ok(data) => DaemonRes::CoverArt { version: v, data },
-                    Err(_) => DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    },
+                    Ok(data) => DaemonRes::CoverArt { data },
+                    Err(_) => DaemonRes::Value { value: data },
                 }
             }
             "get_lyrics" => {
                 let lyrics = data.get("lyrics").cloned().unwrap_or(Value::Null);
                 match serde_json::from_value::<Option<LrcData>>(lyrics) {
-                    Ok(lyrics) => DaemonRes::Lyrics { version: v, lyrics },
-                    Err(_) => DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    },
+                    Ok(lyrics) => DaemonRes::Lyrics { lyrics },
+                    Err(_) => DaemonRes::Value { value: data },
                 }
             }
             "check_health" => {
                 let report = data.get("report").cloned().unwrap_or(Value::Null);
                 match serde_json::from_value::<Box<HealthReport>>(report) {
-                    Ok(report) => DaemonRes::HealthReport { version: v, report },
-                    Err(_) => DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    },
+                    Ok(report) => DaemonRes::HealthReport { report },
+                    Err(_) => DaemonRes::Value { value: data },
                 }
             }
             "list_eq_presets" => {
                 let presets = data.get("presets").cloned().unwrap_or(Value::Null);
                 match serde_json::from_value::<Vec<String>>(presets) {
-                    Ok(presets) => DaemonRes::EqPresets {
-                        version: v,
-                        presets,
-                    },
-                    Err(_) => DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    },
+                    Ok(presets) => DaemonRes::EqPresets { presets },
+                    Err(_) => DaemonRes::Value { value: data },
                 }
             }
             "ping" => DaemonRes::Pong,
             _ => {
                 if data.is_null() {
-                    DaemonRes::Ok { version: v }
+                    DaemonRes::Ok
                 } else {
-                    DaemonRes::Value {
-                        version: v,
-                        value: data,
-                    }
+                    DaemonRes::Value { value: data }
                 }
             }
         }

@@ -88,18 +88,6 @@ pub fn resolve_pid_file() -> PathBuf {
     state_dir().join("gtmd.pid")
 }
 
-/// Return the default daemon socket path (alias for resolve_command_socket).
-///
-/// Resolution order:
-/// 1. `$XDG_RUNTIME_DIR/gtm/gtmd.sock`
-/// 2. `/tmp/gtm-$USER/gtm/gtmd.sock`
-/// 3. `$TMPDIR/gtm/gtmd.sock`
-/// 4. Termux fallback: `$PREFIX/tmp/gtm/gtmd.sock`
-/// 5. `$HOME/.gtm/gtm/gtmd.sock`
-pub fn default_socket_path() -> PathBuf {
-    resolve_command_socket()
-}
-
 /// Return Termux-specific music library paths (if any exist).
 ///
 /// On Termux this includes `/sdcard/Music` (via `$HOME/storage/shared/Music`)
