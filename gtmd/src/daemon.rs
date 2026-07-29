@@ -135,6 +135,14 @@ struct DaemonInner {
     health: Arc<HealthTracker>,
     /// Per-client authentication state: true = handshake completed
     client_auth: tokio::sync::Mutex<HashMap<ClientId, bool>>,
+    /// Channel for internal requests (e.g., auto-advance from audio events)
+    /// that bypass client authentication and are processed sequentially
+    /// alongside client requests to prevent state mutation races.
+    internal_req_tx: mpsc::UnboundedSender<DaemonReq>,
+    /// Serialises all handle_request calls (both spawned client dispatch
+    /// and internal commands) so that only one state mutation runs at a
+    /// time, preventing races between concurrent IPC commands and auto-advance.
+    cmd_lock: tokio::sync::Mutex<()>,
 }
 
 pub struct Daemon {
@@ -143,6 +151,7 @@ pub struct Daemon {
     pulse_listener: UnixListener,
     req_tx: mpsc::UnboundedSender<(ClientId, u64, DaemonReq, ReplyTx)>,
     req_rx: mpsc::UnboundedReceiver<(ClientId, u64, DaemonReq, ReplyTx)>,
+    internal_req_rx: mpsc::UnboundedReceiver<DaemonReq>,
     next_client_id: ClientId,
 }
 
@@ -202,6 +211,7 @@ impl Daemon {
 
         let (event_tx, _) = broadcast::channel::<DaemonEvent>(1024);
         let (req_tx, req_rx) = mpsc::unbounded_channel();
+        let (internal_req_tx, internal_req_rx) = mpsc::unbounded_channel();
 
         let cache_dir = config.cache_dir.clone();
         let audio_backend_name = match config.audio_backend {
@@ -222,6 +232,8 @@ impl Daemon {
             sleep_cancel: Arc::new(AtomicBool::new(false)),
             health: Arc::new(HealthTracker::new(audio_backend_name)),
             client_auth: tokio::sync::Mutex::new(HashMap::new()),
+            internal_req_tx,
+            cmd_lock: tokio::sync::Mutex::new(()),
         });
 
         Ok(Self {
@@ -230,6 +242,7 @@ impl Daemon {
             pulse_listener,
             req_tx,
             req_rx,
+            internal_req_rx,
             next_client_id: 0,
         })
     }
@@ -341,6 +354,12 @@ impl Daemon {
                         Err(e) => {
                             error!("pulse accept failed: {e}");
                         }
+                    }
+                }
+                Some(req) = self.internal_req_rx.recv() => {
+                    let _lock = self.inner.cmd_lock.lock().await;
+                    if let Err(e) = Self::handle_request(&self.inner, &req, 0, true).await {
+                        warn!("internal command {:?} failed: {e}", req);
                     }
                 }
                 Some((client_id, request_id, req, reply_tx)) = self.req_rx.recv() => {
@@ -649,6 +668,7 @@ impl Daemon {
             return;
         }
 
+        let _lock = inner.cmd_lock.lock().await;
         let res = match Self::handle_request(&inner, &req, client_id, authenticated).await {
             Ok(res) => res,
             Err(e) => {
@@ -983,10 +1003,8 @@ impl Daemon {
                     state.time_pos = 0.0;
                     state.current_track = None;
                     drop(state);
-                    let res = Self::cmd_next(inner).await;
-                    if res.is_err() || inner.state.read().await.status == PlaybackStatus::Stopped {
-                        Self::push_event(inner, DaemonEvent::TrackEnded);
-                    }
+                    Self::push_event(inner, DaemonEvent::TrackEnded);
+                    let _ = inner.internal_req_tx.send(DaemonReq::Next);
                 }
             }
             AudioEvent::Error(msg) => {
@@ -1870,9 +1888,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(tracks) => DaemonRes::Tracks { tracks },
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::GetTracks { filter: _, sort: _ } => {
@@ -1885,9 +1901,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(tracks) => DaemonRes::Tracks { tracks },
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::GetPlaylists => {
@@ -1900,9 +1914,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(playlists) => DaemonRes::Playlists { playlists },
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::CreatePlaylist { name } => {
@@ -1919,9 +1931,7 @@ impl Daemon {
                         let playlists = vec![playlist];
                         DaemonRes::Playlists { playlists }
                     }
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::DeletePlaylist { id } => {
@@ -1935,9 +1945,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(_) => DaemonRes::Ok,
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::AddToPlaylist {
@@ -1958,9 +1966,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(_) => DaemonRes::Ok,
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::ImportM3u { path } => {
@@ -1977,9 +1983,7 @@ impl Daemon {
                         let playlists = vec![playlist];
                         DaemonRes::Playlists { playlists }
                     }
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::GetRecent { count } => {
@@ -1993,9 +1997,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(tracks) => DaemonRes::Tracks { tracks },
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::SyncCovers => {
@@ -2045,13 +2047,8 @@ impl Daemon {
                 .await
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
-                    Ok((synced, total)) => DaemonRes::SyncCoversResult {
-                        synced,
-                        total,
-                    },
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Ok((synced, total)) => DaemonRes::SyncCoversResult { synced, total },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::SyncLyrics => {
@@ -2102,13 +2099,8 @@ impl Daemon {
                 .await
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
-                    Ok((synced, total)) => DaemonRes::SyncLyricsResult {
-                        synced,
-                        total,
-                    },
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Ok((synced, total)) => DaemonRes::SyncLyricsResult { synced, total },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::ExportM3u { playlist_id, path } => {
@@ -2123,9 +2115,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(_) => DaemonRes::Ok,
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::RemoveFromPlaylist {
@@ -2143,9 +2133,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(()) => DaemonRes::Ok,
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::RemoveTrack { id } => {
@@ -2159,9 +2147,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(()) => DaemonRes::Ok,
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
             gtm_core::ipc::LibraryAction::UpdateMetadata {
@@ -2197,9 +2183,7 @@ impl Daemon {
                 .map_err(|e| CoreError::Daemon(e.to_string()))?;
                 match result {
                     Ok(_) => DaemonRes::Ok,
-                    Err(e) => DaemonRes::Error {
-                        message: e,
-                    },
+                    Err(e) => DaemonRes::Error { message: e },
                 }
             }
         };
@@ -2217,9 +2201,7 @@ impl Daemon {
         .map_err(|e| CoreError::Daemon(e.to_string()))?;
         match result {
             Ok(tracks) => Ok(DaemonRes::Tracks { tracks }),
-            Err(e) => Ok(DaemonRes::Error {
-                message: e,
-            }),
+            Err(e) => Ok(DaemonRes::Error { message: e }),
         }
     }
 
@@ -2233,9 +2215,7 @@ impl Daemon {
         .map_err(|e| CoreError::Daemon(e.to_string()))?;
         match result {
             Ok(tracks) => Ok(DaemonRes::Tracks { tracks }),
-            Err(e) => Ok(DaemonRes::Error {
-                message: e,
-            }),
+            Err(e) => Ok(DaemonRes::Error { message: e }),
         }
     }
 
@@ -2249,9 +2229,7 @@ impl Daemon {
         .map_err(|e| CoreError::Daemon(e.to_string()))?;
         match result {
             Ok(_) => Ok(DaemonRes::Ok),
-            Err(e) => Ok(DaemonRes::Error {
-                message: e,
-            }),
+            Err(e) => Ok(DaemonRes::Error { message: e }),
         }
     }
 
@@ -2268,9 +2246,7 @@ impl Daemon {
         .map_err(|e| CoreError::Daemon(e.to_string()))?;
         match result {
             Ok(_) => Ok(DaemonRes::Ok),
-            Err(e) => Ok(DaemonRes::Error {
-                message: e,
-            }),
+            Err(e) => Ok(DaemonRes::Error { message: e }),
         }
     }
 
@@ -2287,9 +2263,7 @@ impl Daemon {
                     .health
                     .yt_search_errors
                     .fetch_add(1, Ordering::Relaxed);
-                Ok(DaemonRes::Error {
-                    message: e,
-                })
+                Ok(DaemonRes::Error { message: e })
             }
         }
     }
@@ -2298,9 +2272,7 @@ impl Daemon {
         match inner.youtube.lock().await.poll_results().await {
             Ok(Some(results)) => Ok(DaemonRes::YtSearchResults { results }),
             Ok(None) => Ok(DaemonRes::Ok),
-            Err(e) => Ok(DaemonRes::Error {
-                message: e,
-            }),
+            Err(e) => Ok(DaemonRes::Error { message: e }),
         }
     }
 
@@ -2314,9 +2286,7 @@ impl Daemon {
             Ok(info) => Ok(DaemonRes::StreamInfo {
                 info: Box::new(info),
             }),
-            Err(e) => Ok(DaemonRes::Error {
-                message: e,
-            }),
+            Err(e) => Ok(DaemonRes::Error { message: e }),
         }
     }
 
@@ -2435,9 +2405,7 @@ impl Daemon {
                     if let Ok(data) = tokio::fs::read(path).await {
                         use base64::Engine;
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                        return Ok(DaemonRes::CoverArt {
-                            data: Some(b64),
-                        });
+                        return Ok(DaemonRes::CoverArt { data: Some(b64) });
                     }
                 }
                 // Sidecar .jpg/.jpeg/.png/.webp next to the audio file
@@ -2449,9 +2417,7 @@ impl Daemon {
                     if let Ok(data) = tokio::fs::read(&sidecar).await {
                         use base64::Engine;
                         let b64 = base64::engine::general_purpose::STANDARD.encode(&data);
-                        return Ok(DaemonRes::CoverArt {
-                            data: Some(b64),
-                        });
+                        return Ok(DaemonRes::CoverArt { data: Some(b64) });
                     }
                 }
                 discovered_artist = track.artist;
@@ -2485,16 +2451,12 @@ impl Daemon {
                 if let Some(cover) = cover {
                     use base64::Engine;
                     let b64 = base64::engine::general_purpose::STANDARD.encode(&cover.data);
-                    return Ok(DaemonRes::CoverArt {
-                        data: Some(b64),
-                    });
+                    return Ok(DaemonRes::CoverArt { data: Some(b64) });
                 }
             }
         }
 
-        Ok(DaemonRes::CoverArt {
-            data: None,
-        })
+        Ok(DaemonRes::CoverArt { data: None })
     }
 
     async fn cmd_get_lyrics(inner: &DaemonInner, track_id: i64) -> Result<DaemonRes, CoreError> {
@@ -2522,20 +2484,14 @@ impl Daemon {
                 match library.get_track(track_id) {
                     Ok(Some(t)) => t,
                     _ => {
-                        return Ok(DaemonRes::Lyrics {
-                            lyrics: None,
-                        });
+                        return Ok(DaemonRes::Lyrics { lyrics: None });
                     }
                 }
             } else {
-                return Ok(DaemonRes::Lyrics {
-                    lyrics: None,
-                });
+                return Ok(DaemonRes::Lyrics { lyrics: None });
             }
         } else {
-            return Ok(DaemonRes::Lyrics {
-                lyrics: None,
-            });
+            return Ok(DaemonRes::Lyrics { lyrics: None });
         };
 
         if let Some(ref manager) = inner.lyrics_manager {
@@ -2543,13 +2499,9 @@ impl Daemon {
                 .await
                 .ok()
                 .flatten();
-            Ok(DaemonRes::Lyrics {
-                lyrics,
-            })
+            Ok(DaemonRes::Lyrics { lyrics })
         } else {
-            Ok(DaemonRes::Lyrics {
-                lyrics: None,
-            })
+            Ok(DaemonRes::Lyrics { lyrics: None })
         }
     }
 }

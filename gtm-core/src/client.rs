@@ -231,10 +231,15 @@ impl DaemonClient {
     }
 
     async fn send_ok(&self, req: DaemonReq) -> Result<()> {
+        let cmd = req.cmd_name().to_string();
         match self.send_raw(req).await? {
             DaemonRes::Ok => Ok(()),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon("unexpected response".into())),
+            other => {
+                let msg = format!("unexpected response to {cmd}: {other:?}");
+                tracing::warn!("{msg}");
+                Err(CoreError::Daemon(msg))
+            }
         }
     }
 
@@ -872,7 +877,9 @@ impl IpcWorker {
         // Preserve any remaining data in self.buf so broadcast events that
         // arrived in the same TCP segment are not silently dropped.
         let data = &tmp[..n];
-        let pos = data.iter().position(|&b| b == b'\n')
+        let pos = data
+            .iter()
+            .position(|&b| b == b'\n')
             .ok_or_else(|| CoreError::Daemon("malformed handshake response".into()))?;
 
         let line = &data[..pos];
