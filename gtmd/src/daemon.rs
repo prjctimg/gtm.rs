@@ -1475,10 +1475,13 @@ impl Daemon {
             return Err(CoreError::Daemon("cannot seek while stopped".into()));
         }
         drop(state);
+        tracing::debug!("cmd_seek: requested position={}", pos);
         let actual = {
             let mut mixer = inner.mixer.lock().await;
             mixer.seek(pos)?;
-            mixer.current_position()
+            let current = mixer.current_position();
+            tracing::debug!("cmd_seek: actual position after seek={}", current);
+            current
         };
         let mut state = inner.state.write().await;
         state.seek(actual)?;
