@@ -672,19 +672,21 @@ fn render_library(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
 
     // ── Visualizer (right of Now Playing) ──
     if let Some(vis_a) = vis_area {
-        app.visualizer.tick(
-            app.state.status == gtm_core::state::PlaybackStatus::Playing,
-            vis_a.width,
-        );
-        let vis_block = Block::default()
-            .borders(Borders::ALL)
-            .title(" Visualizer ")
-            .border_type(BorderType::Plain)
-            .border_style(Style::default().fg(app.theme.fg_dim));
-        let vis_inner = vis_block.inner(vis_a);
-        f.render_widget(vis_block, vis_a);
-        if let Some(lines) = app.visualizer.render(vis_inner, &app.theme) {
-            f.render_widget(lines, vis_inner);
+        if vis_a.width >= 4 && vis_a.height >= 3 {
+            app.visualizer.tick(
+                app.state.status == gtm_core::state::PlaybackStatus::Playing,
+                vis_a.width,
+            );
+            let vis_block = Block::default()
+                .borders(Borders::ALL)
+                .title(" Visualizer ")
+                .border_type(BorderType::Plain)
+                .border_style(Style::default().fg(app.theme.fg_dim));
+            let vis_inner = vis_block.inner(vis_a);
+            f.render_widget(vis_block, vis_a);
+            if let Some(lines) = app.visualizer.render(vis_inner, &app.theme) {
+                f.render_widget(lines, vis_inner);
+            }
         }
     }
 
