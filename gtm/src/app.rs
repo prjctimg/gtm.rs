@@ -1333,9 +1333,6 @@ impl App {
             }
             TuiCommand::FetchLyrics => {
                 let track_id = self.state.current_track.as_ref().map(|t| t.id).unwrap_or(0);
-                if track_id == 0 {
-                    return;
-                }
                 let client2 = self.client.clone();
                 let ipc_tx2 = self.ipc_tx.clone();
                 tokio::spawn(async move {
