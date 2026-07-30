@@ -30,6 +30,7 @@ impl DaemonState {
             queue: Vec::new(),
             queue_cursor: 0,
             volume: 100,
+            master_volume: 100,
             repeat: RepeatMode::Off,
             shuffle: false,
             mute: false,

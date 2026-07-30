@@ -724,6 +724,7 @@ impl Daemon {
             DaemonReq::Prev => Self::cmd_prev(inner).await,
             DaemonReq::Seek { position_secs } => Self::cmd_seek(inner, *position_secs).await,
             DaemonReq::SetVolume { volume } => Self::cmd_set_volume(inner, *volume).await,
+            DaemonReq::SetMasterVolume { volume } => Self::cmd_set_master_volume(inner, *volume).await,
             DaemonReq::GetVolume => Self::cmd_get_volume(inner).await,
             DaemonReq::ToggleShuffle => Self::cmd_toggle_shuffle(inner).await,
             DaemonReq::CycleRepeat { mode } => Self::cmd_cycle_repeat(inner, *mode).await,
@@ -1496,6 +1497,16 @@ impl Daemon {
         state.set_volume(volume)?;
         drop(state);
         Self::push_event(inner, DaemonEvent::VolumeChanged { volume });
+        Self::save_state(inner);
+        Ok(DaemonRes::Ok)
+    }
+
+    async fn cmd_set_master_volume(inner: &DaemonInner, volume: u8) -> Result<DaemonRes, CoreError> {
+        let vol = volume.min(100);
+        inner.mixer.lock().await.set_master_volume(vol)?;
+        let mut state = inner.state.write().await;
+        state.master_volume = vol;
+        drop(state);
         Self::save_state(inner);
         Ok(DaemonRes::Ok)
     }

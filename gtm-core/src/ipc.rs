@@ -133,6 +133,9 @@ pub enum DaemonReq {
     SetVolume {
         volume: u8,
     },
+    SetMasterVolume {
+        volume: u8,
+    },
     GetVolume,
     ToggleShuffle,
     CycleRepeat {
@@ -260,6 +263,7 @@ impl DaemonReq {
             DaemonReq::Prev => "prev",
             DaemonReq::Seek { .. } => "seek",
             DaemonReq::SetVolume { .. } => "set_volume",
+            DaemonReq::SetMasterVolume { .. } => "set_master_volume",
             DaemonReq::GetVolume => "get_volume",
             DaemonReq::ToggleShuffle => "toggle_shuffle",
             DaemonReq::CycleRepeat { .. } => "cycle_repeat",

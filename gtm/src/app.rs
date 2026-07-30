@@ -158,7 +158,6 @@ pub struct App {
     pub crossfade_duration: u8,
     pub yt_search_loading: bool,
     pub yt_search_debounce: Option<std::time::Instant>,
-    pub pending_volume: Option<u8>,
     pub pending_delete: Option<(i64, String)>,
     pub pickers: PickerManager,
     pub sleep_timer_remaining: Option<u64>,
@@ -256,6 +255,7 @@ pub enum TuiCommand {
     Prev,
     Seek(f64),
     SetVolume(u8),
+    SetMasterVolume(u8),
     ToggleShuffle,
     CycleRepeat(RepeatMode),
     ToggleMute,
@@ -330,7 +330,6 @@ impl App {
             status_message: None,
             notifications: Vec::new(),
             crossfade_duration: 7,
-            pending_volume: None,
             pending_delete: None,
             yt_search_loading: false,
             yt_search_debounce: None,
@@ -938,7 +937,7 @@ impl App {
 
     fn settings_options_for_category(&self) -> usize {
         match self.settings_category {
-            0 => 2, // Audio: Volume, Mute
+            0 => 3, // Audio: Master Volume, Volume, Mute
             1 => 8, // YouTube
             2 => 4, // Playback: Repeat, Shuffle, Crossfade, Easing
             3 => 5, // System: Theme, Transparent BG, Sync Covers, Sync Lyrics, Footer Preset
@@ -1025,6 +1024,13 @@ impl App {
             TuiCommand::SetVolume(v) => {
                 tokio::spawn(async move {
                     if let Err(e) = client.set_volume(v).await {
+                        error_handler(e);
+                    }
+                });
+            }
+            TuiCommand::SetMasterVolume(v) => {
+                tokio::spawn(async move {
+                    if let Err(e) = client.set_master_volume(v).await {
                         error_handler(e);
                     }
                 });
@@ -1537,11 +1543,7 @@ impl App {
                         return false;
                     }
                     if let Ok(vol) = cmd.parse::<u8>() {
-                        if vol > 85 {
-                            self.pending_volume = Some(vol);
-                        } else {
-                            self.send_high(TuiCommand::SetVolume(vol));
-                        }
+                        self.send_high(TuiCommand::SetVolume(vol));
                     }
                 }
                 KeyCode::Char(c) => {
@@ -1553,22 +1555,6 @@ impl App {
                 _ => {}
             },
             InputMode::Normal => {
-                // If a volume safety prompt is pending, intercept Enter/Esc
-                if self.pending_volume.is_some() {
-                    match key.code {
-                        KeyCode::Enter => {
-                            if let Some(v) = self.pending_volume.take() {
-                                self.send_high(TuiCommand::SetVolume(v));
-                                self.notify(format!("Volume: {}%", v), NotificationKind::Info);
-                            }
-                        }
-                        KeyCode::Esc => {
-                            self.pending_volume = None;
-                        }
-                        _ => {}
-                    }
-                    return true;
-                }
                 // If a delete confirmation is pending, intercept Enter/Esc
                 if self.pending_delete.is_some() {
                     match key.code {
@@ -1701,12 +1687,8 @@ impl App {
                     }
                     Some(KeyboardAction::VolumeUp) => {
                         let new_vol = (self.state.volume + 5).min(100);
-                        if new_vol > 85 {
-                            self.pending_volume = Some(new_vol);
-                        } else {
-                            self.send_high(TuiCommand::SetVolume(new_vol));
-                            self.notify(format!("Volume: {}%", new_vol), NotificationKind::Info);
-                        }
+                        self.send_high(TuiCommand::SetVolume(new_vol));
+                        self.notify(format!("Volume: {}%", new_vol), NotificationKind::Info);
                     }
                     Some(KeyboardAction::VolumeDown) => {
                         self.set_last_action("Volume Down");
@@ -1961,6 +1943,20 @@ impl App {
                             let opt = self.settings_option;
                             match self.settings_category {
                                     0 => match opt {
+                                    0 => {
+                                        // Master Volume: cycle in 10% increments
+                                        let current = self.state.master_volume;
+                                        let new_vol = if current >= 100 {
+                                            50
+                                        } else {
+                                            (current + 10).min(100)
+                                        };
+                                        self.send_high(TuiCommand::SetMasterVolume(new_vol));
+                                        self.notify(
+                                            format!("Master Volume: {}%", new_vol),
+                                            NotificationKind::Info,
+                                        );
+                                    }
                                     1 => {
                                         // Mute toggle
                                         let muted = !self.state.mute;
