@@ -1060,7 +1060,10 @@ fn render_settings(f: &mut ratatui::Frame, area: Rect, app: &App) {
         ],
         1 => vec![
             format!("Cookie Source   [ chromium   ▶ ]"),
-            format!("Cookie File     [ (none)     ▶ ]"),
+            format!(
+                "Cookie File     [ {} ]",
+                app.cookie_file.as_deref().unwrap_or("(none)")
+            ),
             format!("JS Runtime      [ deno       ▶ ]"),
             format!("Max Downloads   [{:-<13}]  3", "█".repeat(9)),
             format!("Results/Page    10"),
