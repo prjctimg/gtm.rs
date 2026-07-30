@@ -619,8 +619,11 @@ impl App {
                     IpcResult::LibraryTracks(tracks) => self.tracks_cache = tracks,
                     IpcResult::Playlists(playlists) => self.playlist_cache = playlists,
                     IpcResult::Queue(tracks, cursor) => {
-                        self.queue_cache = tracks;
+                        self.queue_cache = tracks.clone();
                         self.queue_cursor = cursor;
+                        if self.queue_cache.is_empty() && self.state.current_track.is_none() {
+                            self.browse_detail = None;
+                        }
                     }
                     IpcResult::YtResults(results) => {
                         // Interleave: 1 playlist for every 3 tracks
