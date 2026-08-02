@@ -894,6 +894,20 @@ impl App {
         albums.into_iter().collect()
     }
 
+    /// Length of the list currently visible in the library right pane,
+    /// depending on the active category and drill-down state.
+    pub fn library_list_len(&self) -> usize {
+        if self.browse_detail.is_some() {
+            return self.filtered_tracks().len();
+        }
+        match self.library_category {
+            2 => self.unique_albums().len(),
+            3 => self.unique_artists().len(),
+            4 => self.playlist_cache.len(),
+            _ => self.filtered_tracks().len(),
+        }
+    }
+
     /// Unique artist names with track counts, sorted by artist.
     pub fn unique_artists(&self) -> Vec<(String, usize)> {
         let mut artists: std::collections::BTreeMap<String, usize> =
@@ -1583,7 +1597,10 @@ impl App {
                     }
                 }
                 // Handle gg (vim-style double-press) for jump to start
-                if key.code == KeyCode::Char('g') {
+                if key.code == KeyCode::Char('g')
+                    && self.current_tab == Tab::Library
+                    && !self.library_pane_focus
+                {
                     if self.pending_motion == Some('g') {
                         // Second 'g' — execute jump to start
                         self.pending_motion = None;
@@ -1614,7 +1631,14 @@ impl App {
                     return true;
                 }
                 match self.keybindings.dispatch(key, KeyContext::Normal) {
-                    Some(KeyboardAction::Quit) => return false,
+                    Some(KeyboardAction::Quit) => {
+                        if self.browse_detail.is_some() {
+                            self.browse_detail = None;
+                            self.scroll_offset = 0;
+                        } else {
+                            return false;
+                        }
+                    }
                     Some(KeyboardAction::QuitDaemon) => {
                         let c = self.client.clone();
                         tokio::spawn(async move {
@@ -1863,12 +1887,37 @@ impl App {
                             self.settings_option = (self.settings_option + 1).min(max);
                         }
                         Tab::Library => {
-                            let max_list = self.filtered_tracks().len();
-                            self.scroll_offset =
-                                (self.scroll_offset + 1).min(max_list.saturating_sub(1));
+                            let max_list = self.library_list_len().saturating_sub(1);
+                            self.scroll_offset = (self.scroll_offset + 1).min(max_list);
                             self.update_track_popup();
                         }
                     },
+                    Some(KeyboardAction::PageUp) => {
+                        if self.current_tab == Tab::Library && !self.library_pane_focus {
+                            let page = self.viewport_items.max(1);
+                            self.scroll_offset = self.scroll_offset.saturating_sub(page);
+                            self.update_track_popup();
+                        }
+                    }
+                    Some(KeyboardAction::PageDown) => {
+                        if self.current_tab == Tab::Library && !self.library_pane_focus {
+                            let page = self.viewport_items.max(1);
+                            let max_list = self.library_list_len().saturating_sub(1);
+                            self.scroll_offset = (self.scroll_offset + page).min(max_list);
+                            self.update_track_popup();
+                        }
+                    }
+                    Some(KeyboardAction::Top) => {
+                        if self.current_tab == Tab::Library && !self.library_pane_focus {
+                            self.scroll_offset = 0;
+                        }
+                    }
+                    Some(KeyboardAction::Bottom) => {
+                        if self.current_tab == Tab::Library && !self.library_pane_focus {
+                            let max_list = self.library_list_len().saturating_sub(1);
+                            self.scroll_offset = max_list;
+                        }
+                    }
                     Some(KeyboardAction::Select) => {
                         if self.current_tab == Tab::Library {
                             if self.library_pane_focus {
@@ -2308,7 +2357,7 @@ impl App {
                     }
                     Some(KeyboardAction::JumpToEnd) => {
                         if self.current_tab == Tab::Library && !self.library_pane_focus {
-                            let max = self.filtered_tracks().len().saturating_sub(1);
+                            let max = self.library_list_len().saturating_sub(1);
                             self.scroll_offset = max;
                         }
                     }
