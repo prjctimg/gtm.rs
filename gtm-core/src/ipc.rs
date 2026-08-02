@@ -275,6 +275,11 @@ pub enum DaemonReq {
     },
     GetLyrics {
         track_id: i64,
+        path: Option<String>,
+    },
+    LyricsSearch {
+        artist: String,
+        title: String,
     },
     SetSleepTimer {
         minutes: u32,
@@ -334,6 +339,7 @@ impl DaemonReq {
             DaemonReq::YtSetConfig { .. } => "yt_set_config",
             DaemonReq::GetCoverArt { .. } => "get_cover_art",
             DaemonReq::GetLyrics { .. } => "get_lyrics",
+            DaemonReq::LyricsSearch { .. } => "lyrics_search",
             DaemonReq::SetSleepTimer { .. } => "set_sleep_timer",
             DaemonReq::CancelSleepTimer => "cancel_sleep_timer",
             DaemonReq::GetStatus => "get_status",
@@ -572,10 +578,24 @@ impl DaemonReq {
                 #[derive(Deserialize)]
                 struct Params {
                     track_id: i64,
+                    path: Option<String>,
                 }
                 let x: Params = p(params)?;
                 DaemonReq::GetLyrics {
                     track_id: x.track_id,
+                    path: x.path,
+                }
+            }
+            "lyrics_search" => {
+                #[derive(Deserialize)]
+                struct Params {
+                    artist: String,
+                    title: String,
+                }
+                let x: Params = p(params)?;
+                DaemonReq::LyricsSearch {
+                    artist: x.artist,
+                    title: x.title,
                 }
             }
             "set_sleep_timer" => {

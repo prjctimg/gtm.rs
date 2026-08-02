@@ -856,7 +856,12 @@ impl Daemon {
                 Ok(DaemonRes::Ok)
             }
             DaemonReq::GetCoverArt { track_id } => Self::cmd_get_cover_art(inner, *track_id).await,
-            DaemonReq::GetLyrics { track_id } => Self::cmd_get_lyrics(inner, *track_id).await,
+            DaemonReq::GetLyrics { track_id, path } => {
+                Self::cmd_get_lyrics(inner, *track_id, path.clone()).await
+            }
+            DaemonReq::LyricsSearch { artist, title } => {
+                Self::cmd_lyrics_search(inner, artist, title).await
+            }
             DaemonReq::SetSleepTimer { minutes } => {
                 Self::cmd_set_sleep_timer(inner, *minutes).await
             }
@@ -2752,12 +2757,16 @@ impl Daemon {
         Ok(DaemonRes::CoverArt { data: None })
     }
 
-    async fn cmd_get_lyrics(inner: &DaemonInner, track_id: i64) -> Result<DaemonRes, CoreError> {
+    async fn cmd_get_lyrics(
+        inner: &DaemonInner,
+        track_id: i64,
+        path: Option<String>,
+    ) -> Result<DaemonRes, CoreError> {
         inner
             .health
             .lyrics_fetch_count
             .fetch_add(1, Ordering::Relaxed);
-        let track = {
+        let current = {
             let state = inner.state.read().await;
             if let Some(ref t) = state.current_track {
                 if t.id == track_id {
@@ -2769,29 +2778,61 @@ impl Daemon {
                 None
             }
         };
-        let track = if let Some(t) = track {
-            t
-        } else if !inner.config.test_mode {
-            let lib = Library::new(inner.config.data_dir.to_str().unwrap_or("")).ok();
-            if let Some(ref library) = lib {
-                match library.get_track(track_id) {
-                    Ok(Some(t)) => t,
-                    _ => {
-                        return Ok(DaemonRes::Lyrics { lyrics: None });
-                    }
+        let track = match current {
+            Some(t) => t,
+            None => {
+                // Prefer the library row (full tags) when available; otherwise
+                // fall back to a path-derived track so queued/foreign tracks
+                // (id == 0) can still be looked up.
+                let resolved = if !inner.config.test_mode {
+                    Library::new(inner.config.data_dir.to_str().unwrap_or(""))
+                        .ok()
+                        .and_then(|lib| lib.get_track(track_id).ok().flatten())
+                } else {
+                    None
+                };
+                match resolved.or_else(|| path.map(|p| crate::queue::resolve_track(&p))) {
+                    Some(t) => t,
+                    None => return Ok(DaemonRes::Lyrics { lyrics: None }),
                 }
-            } else {
-                return Ok(DaemonRes::Lyrics { lyrics: None });
             }
-        } else {
-            return Ok(DaemonRes::Lyrics { lyrics: None });
         };
+
+        // If tags are missing, derive artist/title from the filename so the
+        // lrclib exact/search lookup gets meaningful metadata.
+        let mut track = track;
+        if track.artist.is_empty() || track.title.is_empty() {
+            let (artist, title) = crate::lyrics::meta_from_filename(&track.path);
+            if track.artist.is_empty() {
+                track.artist = artist;
+            }
+            if track.title.is_empty() {
+                track.title = title;
+            }
+        }
 
         if let Some(ref manager) = inner.lyrics_manager {
             let lyrics = tokio::time::timeout(Duration::from_secs(5), manager.get_lyrics(&track))
                 .await
                 .ok()
                 .flatten();
+            Ok(DaemonRes::Lyrics { lyrics })
+        } else {
+            Ok(DaemonRes::Lyrics { lyrics: None })
+        }
+    }
+
+    async fn cmd_lyrics_search(
+        inner: &DaemonInner,
+        artist: &str,
+        title: &str,
+    ) -> Result<DaemonRes, CoreError> {
+        if let Some(ref manager) = inner.lyrics_manager {
+            let lyrics =
+                tokio::time::timeout(Duration::from_secs(5), manager.search(artist, title))
+                    .await
+                    .ok()
+                    .flatten();
             Ok(DaemonRes::Lyrics { lyrics })
         } else {
             Ok(DaemonRes::Lyrics { lyrics: None })

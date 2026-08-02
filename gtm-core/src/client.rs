@@ -694,8 +694,28 @@ impl DaemonClient {
         }
     }
 
-    pub async fn get_lyrics(&self, track_id: i64) -> Result<Option<track::LrcData>> {
-        let res = self.send_raw(DaemonReq::GetLyrics { track_id }).await?;
+    pub async fn get_lyrics(&self, track_id: i64, path: Option<&str>) -> Result<Option<track::LrcData>> {
+        let res = self
+            .send_raw(DaemonReq::GetLyrics {
+                track_id,
+                path: path.map(str::to_string),
+            })
+            .await?;
+        match res {
+            DaemonRes::Lyrics { lyrics, .. } => Ok(lyrics),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+        }
+    }
+
+    /// Fetch lyrics for a free-form artist/title pair (no track id or path).
+    pub async fn lyrics_search(&self, artist: &str, title: &str) -> Result<Option<track::LrcData>> {
+        let res = self
+            .send_raw(DaemonReq::LyricsSearch {
+                artist: artist.into(),
+                title: title.into(),
+            })
+            .await?;
         match res {
             DaemonRes::Lyrics { lyrics, .. } => Ok(lyrics),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
