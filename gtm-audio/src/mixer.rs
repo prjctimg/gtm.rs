@@ -104,7 +104,15 @@ pub struct AudioMixer {
     active_decode_handle: Option<std::thread::JoinHandle<()>>,
     standby_control: Option<Arc<DecodeControl>>,
     standby_decode_handle: Option<std::thread::JoinHandle<()>>,
+    /// When the active sink first ran dry while still marked playing.
+    /// Emit `Finished` only after the grace period elapses so transient
+    /// buffer gaps (seek restarts, source swaps) never truncate a track.
+    underrun_since: Option<Instant>,
 }
+
+/// Grace period before an empty sink is declared finished.  All supported
+/// sources only run dry at genuine EOF, so this is purely a jitter filter.
+const UNDERFLOW_GRACE: Duration = Duration::from_millis(100);
 
 struct MixerDeviceSink(rodio::MixerDeviceSink);
 
@@ -237,6 +245,7 @@ impl AudioMixer {
             active_decode_handle: None,
             standby_control: None,
             standby_decode_handle: None,
+            underrun_since: None,
         })
     }
 
@@ -260,6 +269,16 @@ impl AudioMixer {
     /// Kept for `load_active_decoded` / `load_standby_decoded` paths.
     pub fn decode_file(path: &str) -> AudioResult<Box<dyn Source<Item = f32> + Send>> {
         Self::decode(path)
+    }
+
+    /// Decode a file starting at `start_pos` seconds (blocking I/O).
+    /// Safe to call from `spawn_blocking`. Uses the seek-skip fast-forward
+    /// in `SymphoniaSource`, so it works for every supported format.
+    pub fn decode_file_at(
+        path: &str,
+        start_pos: f64,
+    ) -> AudioResult<Box<dyn Source<Item = f32> + Send>> {
+        SymphoniaSource::from_file(path, start_pos)
     }
 
     fn decode(path: &str) -> AudioResult<Box<dyn Source<Item = f32> + Send>> {
@@ -729,22 +748,27 @@ impl AudioMixer {
             if self.crossfade_start.is_some() {
                 self.force_complete_crossfade();
                 if !self.active().empty() {
+                    self.underrun_since = None;
                     return Ok(None);
                 }
             }
             if self.playing.load(Ordering::SeqCst) {
-                // Guard: if the buffer emptied before the track duration was
-                // reached, it's an underrun — skip Finished and retry next poll.
-                let total = *self.duration.lock().unwrap();
-                let pos = self.current_position();
-                if total > 0.0 && pos < total - 0.5 {
+                // Underrun guard: the sink can run dry transiently while a
+                // source is swapped or a decode thread restarts. Give it a
+                // short grace period, then emit Finished unconditionally so
+                // auto-advance always fires at end of track.
+                let since = self.underrun_since.get_or_insert_with(Instant::now);
+                if since.elapsed() < UNDERFLOW_GRACE {
                     return Ok(None);
                 }
+                self.underrun_since = None;
                 self.playing.store(false, Ordering::SeqCst);
                 return Ok(Some(AudioEvent::Finished));
             }
+            self.underrun_since = None;
             return Ok(None);
         }
+        self.underrun_since = None;
 
         if !self.active().is_paused() {
             let elapsed = self

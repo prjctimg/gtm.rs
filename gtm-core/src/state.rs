@@ -155,8 +155,18 @@ impl Default for ReverbConfig {
 pub struct DaemonState {
     pub version: u128,
     pub status: PlaybackStatus,
+    /// User-added, one-time queue entries. The currently-playing entry is at
+    /// index 0 and is removed once it finishes or Next is pressed.
     pub queue: Vec<TrackInfo>,
     pub queue_cursor: u128,
+    /// Default playback list (whole library sorted by title, optionally
+    /// shuffled). Loaded lazily when the user queue exhausts; entries persist
+    /// in the view while `default_cursor` advances through them.
+    pub default_list: Vec<TrackInfo>,
+    pub default_cursor: usize,
+    /// Set by Clear so the default list is not auto-built after the current
+    /// track ends. Re-enabled by any explicit play or queue add.
+    pub fallback_disabled: bool,
     pub volume: u8,
     pub master_volume: u8,
     pub repeat: RepeatMode,
@@ -440,7 +450,7 @@ impl SavedState {
     /// Apply this saved state to a `DaemonState`, restoring persisted fields.
     pub fn apply_to(&self, state: &mut DaemonState) {
         state.queue = self.queue.clone();
-        state.queue_cursor = self.queue_cursor;
+        state.queue_cursor = self.queue_cursor.min(state.queue.len() as u128);
         state.volume = self.volume;
         state.master_volume = self.master_volume;
         state.repeat = self.repeat;
