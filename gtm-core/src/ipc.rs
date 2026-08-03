@@ -4,6 +4,7 @@
 //
 // This is free software released under the GPL-3.0 license.
 
+use crate::spotify::{SpotifyPlaylist, SpotifyStatus, SpotifyTrack};
 use crate::state::{self, DaemonState, EqPreset, RepeatMode, YTFilter};
 use crate::track::{LrcData, Playlist, StreamInfo, TrackInfo, YTSearchResult};
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
@@ -281,6 +282,20 @@ pub enum DaemonReq {
         artist: String,
         title: String,
     },
+    SpotifySetToken {
+        token: String,
+    },
+    SpotifyClear,
+    SpotifyStatus,
+    SpotifySync,
+    SpotifyPlaylists,
+    SpotifyPlaylistTracks {
+        id: String,
+    },
+    SpotifyResolve {
+        playlist_id: String,
+        track_index: usize,
+    },
     SetSleepTimer {
         minutes: u32,
     },
@@ -340,6 +355,13 @@ impl DaemonReq {
             DaemonReq::GetCoverArt { .. } => "get_cover_art",
             DaemonReq::GetLyrics { .. } => "get_lyrics",
             DaemonReq::LyricsSearch { .. } => "lyrics_search",
+            DaemonReq::SpotifySetToken { .. } => "spotify_set_token",
+            DaemonReq::SpotifyClear => "spotify_clear",
+            DaemonReq::SpotifyStatus => "spotify_status",
+            DaemonReq::SpotifySync => "spotify_sync",
+            DaemonReq::SpotifyPlaylists => "spotify_playlists",
+            DaemonReq::SpotifyPlaylistTracks { .. } => "spotify_playlist_tracks",
+            DaemonReq::SpotifyResolve { .. } => "spotify_resolve",
             DaemonReq::SetSleepTimer { .. } => "set_sleep_timer",
             DaemonReq::CancelSleepTimer => "cancel_sleep_timer",
             DaemonReq::GetStatus => "get_status",
@@ -596,6 +618,38 @@ impl DaemonReq {
                 DaemonReq::LyricsSearch {
                     artist: x.artist,
                     title: x.title,
+                }
+            }
+            "spotify_set_token" => {
+                #[derive(Deserialize)]
+                struct Params {
+                    token: String,
+                }
+                let x: Params = p(params)?;
+                DaemonReq::SpotifySetToken { token: x.token }
+            }
+            "spotify_clear" => DaemonReq::SpotifyClear,
+            "spotify_status" => DaemonReq::SpotifyStatus,
+            "spotify_sync" => DaemonReq::SpotifySync,
+            "spotify_playlists" => DaemonReq::SpotifyPlaylists,
+            "spotify_playlist_tracks" => {
+                #[derive(Deserialize)]
+                struct Params {
+                    id: String,
+                }
+                let x: Params = p(params)?;
+                DaemonReq::SpotifyPlaylistTracks { id: x.id }
+            }
+            "spotify_resolve" => {
+                #[derive(Deserialize)]
+                struct Params {
+                    playlist_id: String,
+                    track_index: usize,
+                }
+                let x: Params = p(params)?;
+                DaemonReq::SpotifyResolve {
+                    playlist_id: x.playlist_id,
+                    track_index: x.track_index,
                 }
             }
             "set_sleep_timer" => {
@@ -866,6 +920,15 @@ pub enum DaemonRes {
     Lyrics {
         lyrics: Option<LrcData>,
     },
+    SpotifyStatusRes {
+        status: SpotifyStatus,
+    },
+    SpotifyPlaylistsRes {
+        playlists: Vec<SpotifyPlaylist>,
+    },
+    SpotifyTracksRes {
+        tracks: Vec<SpotifyTrack>,
+    },
     CoverArt {
         data: Option<String>,
     },
@@ -913,6 +976,11 @@ impl DaemonRes {
             }
             DaemonRes::StreamInfo { info } => Some(serde_json::json!({ "info": info })),
             DaemonRes::Lyrics { lyrics } => Some(serde_json::json!({ "lyrics": lyrics })),
+            DaemonRes::SpotifyStatusRes { status } => Some(serde_json::json!({ "status": status })),
+            DaemonRes::SpotifyPlaylistsRes { playlists } => {
+                Some(serde_json::json!({ "playlists": playlists }))
+            }
+            DaemonRes::SpotifyTracksRes { tracks } => Some(serde_json::json!({ "tracks": tracks })),
             DaemonRes::CoverArt { data } => Some(serde_json::json!({ "data": data })),
             DaemonRes::SyncCoversResult { synced, total } => {
                 Some(serde_json::json!({ "synced": synced, "total": total }))
@@ -1036,6 +1104,34 @@ impl DaemonRes {
                 let lyrics = data.get("lyrics").cloned().unwrap_or(Value::Null);
                 match serde_json::from_value::<Option<LrcData>>(lyrics) {
                     Ok(lyrics) => DaemonRes::Lyrics { lyrics },
+                    Err(_) => DaemonRes::Value { value: data },
+                }
+            }
+            "spotify_status" => {
+                let status = data.get("status").cloned().unwrap_or(Value::Null);
+                match serde_json::from_value::<SpotifyStatus>(status) {
+                    Ok(status) => DaemonRes::SpotifyStatusRes { status },
+                    Err(_) => DaemonRes::Value { value: data },
+                }
+            }
+            "spotify_playlists" => {
+                let playlists = data.get("playlists").cloned().unwrap_or(Value::Null);
+                match serde_json::from_value::<Vec<SpotifyPlaylist>>(playlists) {
+                    Ok(playlists) => DaemonRes::SpotifyPlaylistsRes { playlists },
+                    Err(_) => DaemonRes::Value { value: data },
+                }
+            }
+            "spotify_playlist_tracks" => {
+                let tracks = data.get("tracks").cloned().unwrap_or(Value::Null);
+                match serde_json::from_value::<Vec<SpotifyTrack>>(tracks) {
+                    Ok(tracks) => DaemonRes::SpotifyTracksRes { tracks },
+                    Err(_) => DaemonRes::Value { value: data },
+                }
+            }
+            "spotify_set_token" | "spotify_clear" => {
+                let status = data.get("status").cloned().unwrap_or(Value::Null);
+                match serde_json::from_value::<SpotifyStatus>(status) {
+                    Ok(status) => DaemonRes::SpotifyStatusRes { status },
                     Err(_) => DaemonRes::Value { value: data },
                 }
             }

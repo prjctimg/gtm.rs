@@ -80,6 +80,7 @@ use crate::cover_art::CoverCache;
 use crate::library::Library;
 use crate::lyrics::LyricsManager;
 use crate::queue;
+use crate::spotify::SpotifyManager;
 use crate::youtube::YoutubeManager;
 
 type ClientId = u64;
@@ -145,6 +146,7 @@ struct DaemonInner {
     cover_cache: tokio::sync::Mutex<Option<CoverCache>>,
     lyrics_manager: Option<LyricsManager>,
     youtube: tokio::sync::Mutex<YoutubeManager>,
+    spotify: tokio::sync::Mutex<SpotifyManager>,
     crossfade_loaded_for: tokio::sync::Mutex<Option<String>>,
     sleep_cancel: Arc<AtomicBool>,
     health: Arc<HealthTracker>,
@@ -241,6 +243,7 @@ impl Daemon {
         let (internal_req_tx, internal_req_rx) = mpsc::unbounded_channel();
 
         let cache_dir = config.cache_dir.clone();
+        let config_dir = config.config_dir.clone();
         let audio_backend_name = match config.audio_backend {
             #[cfg(feature = "pulseaudio")]
             crate::config::AudioBackendKind::PulseAudio => "pulseaudio",
@@ -255,6 +258,7 @@ impl Daemon {
             cover_cache: tokio::sync::Mutex::new(Some(CoverCache::new(cache_dir))),
             lyrics_manager: Some(LyricsManager::new()),
             youtube: tokio::sync::Mutex::new(YoutubeManager::new()),
+            spotify: tokio::sync::Mutex::new(SpotifyManager::new(config_dir)),
             crossfade_loaded_for: tokio::sync::Mutex::new(None),
             sleep_cancel: Arc::new(AtomicBool::new(false)),
             health: Arc::new(HealthTracker::new(audio_backend_name)),
@@ -341,6 +345,19 @@ impl Daemon {
             loop {
                 interval.tick().await;
                 let _ = hb_event_tx.send(DaemonEvent::Heartbeat);
+            }
+        });
+
+        // Load a persisted Spotify token (if any) in the background so a slow
+        // playlist refresh never delays daemon startup or client connects.
+        let spotify_inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let mut spotify = spotify_inner.spotify.lock().await;
+            if spotify.has_token_file() {
+                match spotify.load().await {
+                    Ok(()) => info!("spotify auto-synced on startup"),
+                    Err(e) => warn!("spotify auto-sync failed: {e}"),
+                }
             }
         });
 
@@ -862,6 +879,18 @@ impl Daemon {
             DaemonReq::LyricsSearch { artist, title } => {
                 Self::cmd_lyrics_search(inner, artist, title).await
             }
+            DaemonReq::SpotifySetToken { token } => Self::cmd_spotify_set_token(inner, token).await,
+            DaemonReq::SpotifyClear => Self::cmd_spotify_clear(inner).await,
+            DaemonReq::SpotifyStatus => Self::cmd_spotify_status(inner).await,
+            DaemonReq::SpotifySync => Self::cmd_spotify_sync(inner).await,
+            DaemonReq::SpotifyPlaylists => Self::cmd_spotify_playlists(inner).await,
+            DaemonReq::SpotifyPlaylistTracks { id } => {
+                Self::cmd_spotify_playlist_tracks(inner, id).await
+            }
+            DaemonReq::SpotifyResolve {
+                playlist_id,
+                track_index,
+            } => Self::cmd_spotify_resolve(inner, playlist_id, *track_index).await,
             DaemonReq::SetSleepTimer { minutes } => {
                 Self::cmd_set_sleep_timer(inner, *minutes).await
             }
@@ -2837,5 +2866,192 @@ impl Daemon {
         } else {
             Ok(DaemonRes::Lyrics { lyrics: None })
         }
+    }
+
+    // ─── Spotify ───
+
+    async fn cmd_spotify_set_token(
+        inner: &DaemonInner,
+        token: &str,
+    ) -> Result<DaemonRes, CoreError> {
+        let mut spotify = inner.spotify.lock().await;
+        let _ = tokio::time::timeout(Duration::from_secs(60), spotify.set_token(token)).await;
+        Ok(DaemonRes::SpotifyStatusRes {
+            status: spotify.status(),
+        })
+    }
+
+    async fn cmd_spotify_clear(inner: &DaemonInner) -> Result<DaemonRes, CoreError> {
+        let mut spotify = inner.spotify.lock().await;
+        spotify.clear();
+        Ok(DaemonRes::SpotifyStatusRes {
+            status: spotify.status(),
+        })
+    }
+
+    async fn cmd_spotify_status(inner: &DaemonInner) -> Result<DaemonRes, CoreError> {
+        let spotify = inner.spotify.lock().await;
+        Ok(DaemonRes::SpotifyStatusRes {
+            status: spotify.status(),
+        })
+    }
+
+    async fn cmd_spotify_sync(inner: &DaemonInner) -> Result<DaemonRes, CoreError> {
+        let mut spotify = inner.spotify.lock().await;
+        match tokio::time::timeout(Duration::from_secs(60), spotify.sync()).await {
+            Ok(Ok(())) => Ok(DaemonRes::Ok),
+            Ok(Err(e)) => Ok(DaemonRes::Error { message: e }),
+            Err(_) => Ok(DaemonRes::Error {
+                message: "spotify sync timed out".into(),
+            }),
+        }
+    }
+
+    async fn cmd_spotify_playlists(inner: &DaemonInner) -> Result<DaemonRes, CoreError> {
+        let spotify = inner.spotify.lock().await;
+        if !spotify.linked() {
+            return Ok(DaemonRes::Error {
+                message: "spotify not linked".into(),
+            });
+        }
+        Ok(DaemonRes::SpotifyPlaylistsRes {
+            playlists: spotify.playlists(),
+        })
+    }
+
+    async fn cmd_spotify_playlist_tracks(
+        inner: &DaemonInner,
+        id: &str,
+    ) -> Result<DaemonRes, CoreError> {
+        let spotify = inner.spotify.lock().await;
+        if !spotify.linked() {
+            return Ok(DaemonRes::Error {
+                message: "spotify not linked".into(),
+            });
+        }
+        match spotify.playlist_tracks(id) {
+            Some(tracks) => Ok(DaemonRes::SpotifyTracksRes { tracks }),
+            None => Ok(DaemonRes::Error {
+                message: "unknown spotify playlist".into(),
+            }),
+        }
+    }
+
+    /// Resolve a cached Spotify track to a YouTube stream, download it into
+    /// the cache, and append it to the user queue (auto-playing if empty).
+    async fn cmd_spotify_resolve(
+        inner: &DaemonInner,
+        playlist_id: &str,
+        track_index: usize,
+    ) -> Result<DaemonRes, CoreError> {
+        let track = {
+            let spotify = inner.spotify.lock().await;
+            spotify
+                .playlist_tracks(playlist_id)
+                .and_then(|tracks| tracks.into_iter().find(|t| t.index == track_index))
+        };
+        let Some(track) = track else {
+            return Ok(DaemonRes::Error {
+                message: "track not found in spotify cache".into(),
+            });
+        };
+        let query = if track.artists.is_empty() {
+            track.name.clone()
+        } else {
+            format!("{} - {}", track.artists, track.name)
+        };
+
+        let mut yt = inner.youtube.lock().await;
+        if let Err(e) = yt.search(&query, None).await {
+            return Ok(DaemonRes::Error { message: e });
+        }
+        let top = match yt.poll_results().await {
+            Ok(Some(mut results)) if !results.is_empty() => results.remove(0),
+            _ => {
+                return Ok(DaemonRes::Error {
+                    message: "no youtube results for track".into(),
+                })
+            }
+        };
+        let info = match yt.resolve_stream(&top.url).await {
+            Ok(info) => info,
+            Err(e) => return Ok(DaemonRes::Error { message: e }),
+        };
+
+        let prefix = format!("spotify-{playlist_id}-{track_index}");
+        let path = match Self::download_audio_to_cache(&inner.config.cache_dir, &prefix, &info.url)
+            .await
+        {
+            Ok(path) => path,
+            Err(e) => return Ok(DaemonRes::Error { message: e }),
+        };
+        drop(yt);
+
+        let was_empty = {
+            let mut state = inner.state.write().await;
+            state.fallback_disabled = false;
+            let w = state.queue.is_empty() && state.status == PlaybackStatus::Stopped;
+            queue::queue_add(&mut state, &path, None);
+            drop(state);
+            w
+        };
+        if was_empty {
+            let _ = Self::cmd_play(inner, &path, 0.0, false).await;
+        }
+        Self::push_queue_state(inner).await;
+        Self::save_state(inner);
+        Ok(DaemonRes::Ok)
+    }
+
+    /// Download a stream URL into `cache_dir/spotify/` via yt-dlp, returning
+    /// the local file path. Stale files with the same prefix are replaced.
+    async fn download_audio_to_cache(
+        cache_dir: &Path,
+        prefix: &str,
+        url: &str,
+    ) -> Result<String, String> {
+        let dir = cache_dir.join("spotify");
+        std::fs::create_dir_all(&dir).map_err(|e| format!("create spotify cache: {e}"))?;
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.starts_with(prefix) {
+                    let _ = std::fs::remove_file(entry.path());
+                }
+            }
+        }
+        let template = dir.join(format!("{prefix}.%(ext)s"));
+        let output = tokio::time::timeout(
+            Duration::from_secs(120),
+            tokio::process::Command::new("yt-dlp")
+                .arg("-f")
+                .arg("bestaudio[ext=m4a]/bestaudio")
+                .arg("-o")
+                .arg(&template)
+                .arg("--no-warnings")
+                .arg(url)
+                .output(),
+        )
+        .await
+        .map_err(|_| "spotify download timed out".to_string())?
+        .map_err(|e| format!("yt-dlp download: {e}"))?;
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let msg = stderr
+                .lines()
+                .last()
+                .unwrap_or("yt-dlp download failed")
+                .trim()
+                .to_string();
+            return Err(msg);
+        }
+        for entry in std::fs::read_dir(&dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(prefix) {
+                return Ok(entry.path().to_string_lossy().into_owned());
+            }
+        }
+        Err("download produced no file".into())
     }
 }
