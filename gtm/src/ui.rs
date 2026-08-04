@@ -2423,6 +2423,14 @@ fn render_command_palette_picker(f: &mut ratatui::Frame, area: Rect, app: &App) 
     };
     let scroll_end = (scroll_start + visible).min(total);
 
+    // Pad names so keybindings line up in a column.
+    let name_w = filtered
+        .iter()
+        .map(|((name, _), _)| name.chars().count())
+        .max()
+        .unwrap_or(0)
+        .min(inner.width.saturating_sub(8) as usize);
+
     let mut lines: Vec<Line> = vec![search_line];
     for i in scroll_start..scroll_end {
         let ((name, key), _score) = filtered[i];
@@ -2435,7 +2443,10 @@ fn render_command_palette_picker(f: &mut ratatui::Frame, area: Rect, app: &App) 
             Style::default()
         };
         lines.push(Line::from(vec![
-            Span::styled(format!("{prefix}{name}"), style),
+            Span::styled(
+                format!("{prefix}{name:<width$}", name = name, width = name_w),
+                style,
+            ),
             Span::styled(
                 format!("  [{key}]", key = key),
                 Style::default().fg(app.theme.fg_dim),
@@ -2764,16 +2775,23 @@ pub fn readable_fg(
 /// Scroll text horizontally if it exceeds max_width, using a frame-based offset.
 /// Only the selected item scrolls; others are truncated with "…".
 fn scroll_text(text: &str, max_width: usize, frame: usize, is_selected: bool) -> String {
-    if text.len() <= max_width {
+    if text.chars().count() <= max_width {
         return format!("{:<width$}", text, width = max_width);
     }
     if !is_selected {
         let truncated: String = text.chars().take(max_width.saturating_sub(1)).collect();
         return format!("{}…", truncated);
     }
-    // Animated scroll: shift by (frame / 3) characters, wrap around
-    let scroll = (frame / 3) % text.len();
-    let scrolled = format!("{}{}", &text[scroll..], &text[..scroll]);
+    // Animated scroll: shift by (frame / 3) characters, wrap around.
+    // Rotate on character boundaries to avoid slicing mid-UTF-8-sequence.
+    let chars: Vec<char> = text.chars().collect();
+    let n = chars.len();
+    let scroll = (frame / 3) % n.max(1);
+    let scrolled: String = chars
+        .iter()
+        .skip(scroll)
+        .chain(chars.iter().take(scroll))
+        .collect();
     scrolled.chars().take(max_width).collect()
 }
 
@@ -2950,4 +2968,34 @@ fn render_health_panel(f: &mut ratatui::Frame, area: Rect, app: &App) {
         1,
     );
     f.render_widget(help, help_area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scroll_text;
+
+    #[test]
+    fn scroll_text_handles_multibyte_utf8() {
+        let text = "Artist \u{2014} T\u{e9}t\u{e9} Song Title That Is Quite Long";
+        // Exercise a range of frame offsets so byte/char boundaries vary.
+        for frame in 0..600 {
+            for width in [8usize, 16, 24] {
+                let out = scroll_text(text, width, frame, true);
+                assert!(out.chars().count() <= width, "frame {frame} width {width}");
+            }
+            let out = scroll_text(text, 16, frame, false);
+            assert!(out.chars().count() <= 16);
+        }
+    }
+
+    #[test]
+    fn scroll_text_pads_when_fits() {
+        assert_eq!(scroll_text("ab", 4, 0, true), "ab  ");
+    }
+
+    #[test]
+    fn scroll_text_empty_never_panics() {
+        let out = scroll_text("", 0, 1, true);
+        assert_eq!(out, "");
+    }
 }

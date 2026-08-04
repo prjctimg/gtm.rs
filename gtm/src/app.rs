@@ -623,15 +623,17 @@ impl App {
                         if state.version >= self.state.version {
                             self.state = state;
                             self.client.seed_clock_from_state(&self.state).await;
+                            // Cover art is fetched on track-change events only.
+                            // Do not clear last_cover_track_id when a periodic
+                            // RefreshDone carries no cover, or the track-change
+                            // guard would re-download art (and re-fetch lyrics)
+                            // every second.
                             if !no_image_protocol() {
                                 if let Some(c) = cover {
                                     self.current_cover = Some(c);
                                     self.last_cover_track_id = cover_tid;
-                                } else {
-                                    self.current_cover = None;
-                                    self.last_cover_track_id = cover_tid;
+                                    self.sync_cover_stateful();
                                 }
-                                self.sync_cover_stateful();
                             }
                         }
                     }
@@ -1686,9 +1688,10 @@ impl App {
                     }
                     Some(KeyboardAction::QuitDaemon) => {
                         let c = self.client.clone();
-                        tokio::spawn(async move {
-                            let _ = c.quit().await;
-                        });
+                        // Await the daemon's reply so the quit request is
+                        // actually delivered before the TUI exits. The daemon
+                        // replies Ok then shuts down ~200ms later.
+                        let _ = tokio::time::timeout(Duration::from_millis(1500), c.quit()).await;
                         return false;
                     }
                     Some(KeyboardAction::NextTab) => {
