@@ -191,7 +191,7 @@ pub struct App {
     pub footer_preset: usize,
     pub footer_title_scroll: usize,
     pub is_ready: bool,
-    last_queue_cursor: u128,
+    last_queue_cursor: u64,
     last_track_id_display: Option<i64>,
     prev_tab: Tab,
     prev_track_id: Option<i64>,
@@ -270,8 +270,8 @@ pub enum TuiCommand {
     Crossfade(bool, u8),
     SetCrossfadeEasing(gtm_core::state::Easing),
     QueueAdd(String),
-    QueueRemove(u128),
-    QueueMove(u128, u128),
+    QueueRemove(u64),
+    QueueMove(u64, u64),
     QueueClear,
     YtSearch(String),
     YtDownload(String),
@@ -2014,7 +2014,7 @@ impl App {
                                         let path = paths[idx].clone();
                                         let c = self.client.clone();
                                         tokio::spawn(async move {
-                                            let _ = c.queue_set(paths, idx as u128).await;
+                                            let _ = c.queue_set(paths, idx as u64).await;
                                             let _ = c.play(&path, 0.0).await;
                                         });
                                     }
@@ -2090,7 +2090,7 @@ impl App {
                                     let path = paths[idx].clone();
                                     let c = self.client.clone();
                                     tokio::spawn(async move {
-                                        let _ = c.queue_set(paths, idx as u128).await;
+                                        let _ = c.queue_set(paths, idx as u64).await;
                                         let _ = c.play(&path, 0.0).await;
                                     });
                                 }
@@ -2776,8 +2776,8 @@ impl App {
                         if idx > 0 {
                             let _ = tx
                                 .send(TuiCommand::QueueMove(
-                                    idx as u128,
-                                    idx.saturating_sub(1) as u128,
+                                    idx as u64,
+                                    idx.saturating_sub(1) as u64,
                                 ))
                                 .await;
                             self.fetch_queue().await;
@@ -2791,7 +2791,7 @@ impl App {
                         let idx = top.selected.min(self.queue_cache.len() - 1);
                         if idx < self.queue_cache.len() - 1 {
                             let _ = tx
-                                .send(TuiCommand::QueueMove(idx as u128, (idx + 1) as u128))
+                                .send(TuiCommand::QueueMove(idx as u64, (idx + 1) as u64))
                                 .await;
                             self.fetch_queue().await;
                         }
