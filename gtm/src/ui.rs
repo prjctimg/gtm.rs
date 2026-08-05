@@ -1342,17 +1342,21 @@ fn render_picker(f: &mut ratatui::Frame, area: Rect, app: &mut App) {
         return;
     };
 
-    // Overlay box: centered, 60% width, 70% height, with minimum size
-    let picker_width = ((area.width as f64 * 0.6) as u16).max(50).min(area.width);
-    let picker_height = ((area.height as f64 * 0.7) as u16).max(15).min(area.height);
-    let picker_x = (area.width.saturating_sub(picker_width)) / 2;
-    let picker_y = (area.height.saturating_sub(picker_height)) / 3;
+    let picker_area = if top.id == PickerId::Help {
+        area
+    } else {
+        // Overlay box: centered, 60% width, 70% height, with minimum size
+        let picker_width = ((area.width as f64 * 0.6) as u16).max(50).min(area.width);
+        let picker_height = ((area.height as f64 * 0.7) as u16).max(15).min(area.height);
+        let picker_x = (area.width.saturating_sub(picker_width)) / 2;
+        let picker_y = (area.height.saturating_sub(picker_height)) / 3;
 
-    let picker_area = Rect {
-        x: picker_x,
-        y: picker_y,
-        width: picker_width,
-        height: picker_height,
+        Rect {
+            x: picker_x,
+            y: picker_y,
+            width: picker_width,
+            height: picker_height,
+        }
     };
 
     let picker_box_bg = if app.transparent_bg {
@@ -2058,83 +2062,74 @@ fn render_about_picker(f: &mut ratatui::Frame, area: Rect, app: &App) {
 fn render_help_picker(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let query = app.pickers.top().map_or(String::new(), |o| o.query.clone());
     let help_lines = vec![
-        " Playback",
-        "   Space        Play / Pause",
-        "   n / Ctrl+N   Next track",
-        "   p / Ctrl+P   Previous track",
-        "   s            Stop",
-        "   . / ,        Seek forward / back",
-        "",
-        " Volume",
-        "   + / =        Volume up",
-        "   -            Volume down",
-        "   m            Toggle mute",
-        "",
-        " Queue & Library",
-        "   Enter        Play selected / drill-down",
-        "   d / Del      Remove item",
-        "   F            Toggle favourite",
-        "   D            Clear queue",
-        "   /            Filter mode",
-        "",
-        " Navigation",
-        "   Tab          Toggle left/right pane focus",
-        "   j/k / arrows Move up/down",
-        "   h/l          Focus left/right pane",
-        "   ?            Toggle this help",
-        "",
-        " Overlays (Alt+key)",
-        "   Alt+Q        Queue",
-        "   Alt+Y        YouTube Search",
-        "   Alt+F        Search Library",
-        "   Alt+A        About",
-        "   Alt+C        Theme Picker",
-        "   Alt+E        Equalizer",
-        "   Alt+P        Command Palette",
-        "   Alt+Z        Sleep Timer",
-        "   Alt+X        Sound Effects",
-        "   Alt+S        Spotify Search",
-        "",
-        " Other",
-        "   q            Quit",
-        "   Q            Quit & stop daemon",
-        "   S            Toggle shuffle",
-        "   r / R        Cycle repeat",
-        "   :            Command palette",
-        "   Alt+F        Cycle footer preset",
+        ("topic", "Playback"),
+        ("key", "   Space        Play / Pause"),
+        ("key", "   n / Ctrl+N   Next track"),
+        ("key", "   p / Ctrl+P   Previous track"),
+        ("key", "   s            Stop"),
+        ("key", "   . / ,        Seek forward / back"),
+        ("", ""),
+        ("topic", "Volume"),
+        ("key", "   + / =        Volume up"),
+        ("key", "   -            Volume down"),
+        ("key", "   m            Toggle mute"),
+        ("", ""),
+        ("topic", "Queue & Library"),
+        ("key", "   Enter        Play selected / drill-down"),
+        ("key", "   d / Del      Remove item"),
+        ("key", "   F            Toggle favourite"),
+        ("key", "   D            Clear queue"),
+        ("key", "   /            Filter mode"),
+        ("", ""),
+        ("topic", "Navigation"),
+        ("key", "   Tab          Toggle left/right pane focus"),
+        ("key", "   j/k / arrows Move up/down"),
+        ("key", "   h/l          Focus left/right pane"),
+        ("key", "   ?            Toggle this help"),
+        ("", ""),
+        ("topic", "Overlays (Alt+key)"),
+        ("key", "   Alt+Q        Queue"),
+        ("key", "   Alt+Y        YouTube Search"),
+        ("key", "   Alt+F        Search Library"),
+        ("key", "   Alt+A        About"),
+        ("key", "   Alt+C        Theme Picker"),
+        ("key", "   Alt+E        Equalizer"),
+        ("key", "   Alt+P        Command Palette"),
+        ("key", "   Alt+Z        Sleep Timer"),
+        ("key", "   Alt+X        Sound Effects"),
+        ("key", "   Alt+S        Spotify Search"),
+        ("", ""),
+        ("topic", "Other"),
+        ("key", "   q            Quit"),
+        ("key", "   Q            Quit & stop daemon"),
+        ("key", "   S            Toggle shuffle"),
+        ("key", "   r / R        Cycle repeat"),
+        ("key", "   :            Command palette"),
+        ("key", "   Alt+F        Cycle footer preset"),
+        ("", ""),
+        ("topic", "Help"),
+        ("key", "   ?            Toggle this help"),
+        ("key", "   gg / G       Jump to top / bottom"),
+        ("key", "   0 / $        Jump to first / last line"),
+        ("key", "   /            Search"),
+        ("key", "   n / N        Next / previous match"),
+        ("key", "   Esc / q      Close"),
     ];
 
-    let filtered: Vec<&str> = if query.is_empty() {
-        help_lines.to_vec()
+    let filtered: Vec<( &str, &str)> = if query.is_empty() {
+        help_lines.iter().map(|(t, l)| (*t, *l)).collect()
     } else {
         let q = query.to_lowercase();
         help_lines
             .iter()
-            .filter(|l| l.to_lowercase().contains(&q))
-            .copied()
+            .filter(|(_, l)| l.to_lowercase().contains(&q))
+            .map(|(t, l)| (*t, *l))
             .collect()
     };
 
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(" Keybindings ")
-        .border_type(BorderType::Plain)
-        .style(Style::default().bg(if app.transparent_bg {
-            ratatui::style::Color::Reset
-        } else {
-            app.theme.picker_bg
-        }));
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
-    let search_line = Line::from(Span::styled(
-        format!(" > {}_", query),
-        Style::default().fg(app.theme.fg),
-    ));
-
     let total = filtered.len();
-    let visible = inner.height.saturating_sub(1) as usize;
     let sel = app.pickers.top().map_or(0, |o| o.selected);
+    let visible = area.height.saturating_sub(1) as usize;
     let (scroll_start, _) = if total > 0 {
         centered_scroll(sel, visible, total)
     } else {
@@ -2142,15 +2137,23 @@ fn render_help_picker(f: &mut ratatui::Frame, area: Rect, app: &App) {
     };
     let scroll_end = (scroll_start + visible).min(total);
 
-    let mut lines: Vec<Line> = vec![search_line];
-    for (i, line) in filtered.iter().enumerate().take(scroll_end).skip(scroll_start) {
-        let is_header = line.starts_with(|c: char| c.is_uppercase()) && !line.starts_with("   ");
+    let mut lines: Vec<Line> = Vec::new();
+
+    let title = Line::from(Span::styled(
+        " KEYBINDINGS ",
+        Style::default()
+            .fg(app.theme.accent)
+            .add_modifier(Modifier::BOLD),
+    ));
+    lines.push(title);
+
+    for (i, (kind, line)) in filtered.iter().enumerate().take(scroll_end).skip(scroll_start) {
         let is_sel = i == sel;
         let style = if is_sel {
             Style::default()
                 .fg(app.theme.selection_fg)
                 .bg(app.theme.selection_bg)
-        } else if is_header {
+        } else if *kind == "topic" {
             Style::default()
                 .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD)
@@ -2161,8 +2164,14 @@ fn render_help_picker(f: &mut ratatui::Frame, area: Rect, app: &App) {
     }
 
     let para = Paragraph::new(lines);
-    f.render_widget(para, inner);
-    picker_help(f, inner, " [Esc] Close  Type to search  j/k Navigate", app);
+    f.render_widget(para, area);
+
+    let footer = if !query.is_empty() {
+        format!(" /{}  [Esc] Close  ? Toggle  gg/G Top/Bottom  0/$ First/Last  n/N Next/Prev", query)
+    } else {
+        "[Esc] Close  ? Toggle  gg/G Top/Bottom  0/$ First/Last  / Search  n/N Next/Prev".to_string()
+    };
+    picker_help(f, area, &footer, app);
 }
 
 fn render_sleep_timer_picker(f: &mut ratatui::Frame, area: Rect, app: &App) {

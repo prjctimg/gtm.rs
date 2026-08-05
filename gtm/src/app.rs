@@ -1558,6 +1558,80 @@ impl App {
         }
     }
 
+    fn help_picker_total(&self) -> usize {
+        let help_lines = [
+            ("topic", "Playback"),
+            ("key", "   Space        Play / Pause"),
+            ("key", "   n / Ctrl+N   Next track"),
+            ("key", "   p / Ctrl+P   Previous track"),
+            ("key", "   s            Stop"),
+            ("key", "   . / ,        Seek forward / back"),
+            ("", ""),
+            ("topic", "Volume"),
+            ("key", "   + / =        Volume up"),
+            ("key", "   -            Volume down"),
+            ("key", "   m            Toggle mute"),
+            ("", ""),
+            ("topic", "Queue & Library"),
+            ("key", "   Enter        Play selected / drill-down"),
+            ("key", "   d / Del      Remove item"),
+            ("key", "   F            Toggle favourite"),
+            ("key", "   D            Clear queue"),
+            ("key", "   /            Filter mode"),
+            ("", ""),
+            ("topic", "Navigation"),
+            ("key", "   Tab          Toggle left/right pane focus"),
+            ("key", "   j/k / arrows Move up/down"),
+            ("key", "   h/l          Focus left/right pane"),
+            ("key", "   ?            Toggle this help"),
+            ("", ""),
+            ("topic", "Overlays (Alt+key)"),
+            ("key", "   Alt+Q        Queue"),
+            ("key", "   Alt+Y        YouTube Search"),
+            ("key", "   Alt+F        Search Library"),
+            ("key", "   Alt+A        About"),
+            ("key", "   Alt+C        Theme Picker"),
+            ("key", "   Alt+E        Equalizer"),
+            ("key", "   Alt+P        Command Palette"),
+            ("key", "   Alt+Z        Sleep Timer"),
+            ("key", "   Alt+X        Sound Effects"),
+            ("key", "   Alt+S        Spotify Search"),
+            ("", ""),
+            ("topic", "Other"),
+            ("key", "   q            Quit"),
+            ("key", "   Q            Quit & stop daemon"),
+            ("key", "   S            Toggle shuffle"),
+            ("key", "   r / R        Cycle repeat"),
+            ("key", "   :            Command palette"),
+            ("key", "   Alt+F        Cycle footer preset"),
+            ("", ""),
+            ("topic", "Help"),
+            ("key", "   ?            Toggle this help"),
+            ("key", "   gg / G       Jump to top / bottom"),
+            ("key", "   0 / $        Jump to first / last line"),
+            ("key", "   /            Search"),
+            ("key", "   n / N        Next / previous match"),
+            ("key", "   Esc / q      Close"),
+        ];
+        if let Some(top) = self.pickers.top() {
+            if top.id == PickerId::Help {
+                let q = top.query.to_lowercase();
+                if q.is_empty() {
+                    help_lines.len()
+                } else {
+                    help_lines
+                        .iter()
+                        .filter(|(_, l)| l.to_lowercase().contains(&q))
+                        .count()
+                }
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+
     async fn handle_key(&mut self, key: event::KeyEvent) -> bool {
         // Reset pending_motion if the key is not 'g'
         if key.code != KeyCode::Char('g') {
@@ -1714,8 +1788,12 @@ impl App {
                         self.dismiss_track_popup();
                     }
                     Some(KeyboardAction::ToggleHelp) => {
-                        self.pickers.open(PickerId::Help);
-                        self.dismiss_track_popup();
+                        if self.pickers.top().map_or(false, |o| o.id == PickerId::Help) {
+                            self.pickers.close_top();
+                        } else {
+                            self.pickers.open(PickerId::Help);
+                            self.dismiss_track_popup();
+                        }
                     }
                     Some(KeyboardAction::HideHelpBar) => {
                         self.hide_help_bar = !self.hide_help_bar;
@@ -2710,6 +2788,65 @@ impl App {
                 }
                 self.pickers.close_top();
             }
+            // Help picker vim motions
+            KeyCode::Char('g') if key.modifiers == KeyModifiers::CONTROL => {
+                if let Some(top) = self.pickers.top_mut() {
+                    if top.id == PickerId::Help {
+                        top.selected = 0;
+                    }
+                }
+            }
+            KeyCode::Char('G') => {
+                let is_help = self.pickers.top().map_or(false, |t| t.id == PickerId::Help);
+                let total = if is_help { self.help_picker_total() } else { 0 };
+                if let Some(top) = self.pickers.top_mut() {
+                    if top.id == PickerId::Help {
+                        top.selected = total.saturating_sub(1);
+                    }
+                }
+            }
+            KeyCode::Char('0') => {
+                if let Some(top) = self.pickers.top_mut() {
+                    if top.id == PickerId::Help {
+                        top.selected = 0;
+                    }
+                }
+            }
+            KeyCode::Char('$') => {
+                let is_help = self.pickers.top().map_or(false, |t| t.id == PickerId::Help);
+                let total = if is_help { self.help_picker_total() } else { 0 };
+                if let Some(top) = self.pickers.top_mut() {
+                    if top.id == PickerId::Help {
+                        top.selected = total.saturating_sub(1);
+                    }
+                }
+            }
+            KeyCode::Char('/') => {
+                if let Some(top) = self.pickers.top_mut() {
+                    if top.id == PickerId::Help {
+                        top.query.clear();
+                    }
+                }
+            }
+            KeyCode::Char('n') => {
+                if self.pickers.top().map_or(false, |t| t.id == PickerId::Help) {
+                    let total = self.help_picker_total();
+                    if let Some(top) = self.pickers.top_mut() {
+                        if top.id == PickerId::Help && total > 0 {
+                            top.selected = (top.selected + 1).min(total - 1);
+                        }
+                    }
+                }
+            }
+            KeyCode::Char('N') => {
+                if self.pickers.top().map_or(false, |t| t.id == PickerId::Help) {
+                    if let Some(top) = self.pickers.top_mut() {
+                        if top.id == PickerId::Help {
+                            top.selected = top.selected.saturating_sub(1);
+                        }
+                    }
+                }
+            }
             // Queue move up/down (Ctrl+K/J) must come before plain k/j
             KeyCode::Char('k') if key.modifiers == KeyModifiers::CONTROL => {
                 if let Some(top) = self.pickers.top() {
@@ -3164,7 +3301,8 @@ let patch = gtm_core::MetadataPatch {
                         PickerId::YTSearch
                         | PickerId::SearchLibrary
                         | PickerId::CommandPalette
-                        | PickerId::ThemePicker => {
+                        | PickerId::ThemePicker
+                        | PickerId::Help => {
                             top.query.push(c);
                             if top.id == PickerId::YTSearch {
                                 if c == ' ' {
