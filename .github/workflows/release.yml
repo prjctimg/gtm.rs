@@ -342,7 +342,7 @@ jobs:
             target/release/*.tar.gz
             target/aarch64-linux-android/release/gtm-full-*
             target/aarch64-linux-android/release/gtmd-*
-            artifacts/man/*
-            artifacts/completions/*
+            man/*
+            completions/*
             target/debian/*.deb
             ./*.deb
