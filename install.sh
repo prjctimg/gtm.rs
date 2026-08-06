@@ -215,7 +215,7 @@ resolve_latest_tag() {
 }
 
 resolve_download_url() {
-  local archive="$1"  # e.g. gtm-full or gtmd or gtm
+  local archive="$1"  # e.g. gtm-full
   local url
 
   if [ "$VERSION" = "latest" ]; then
@@ -276,11 +276,11 @@ esac
 info "Install type: ${INSTALL_TYPE}"
 
 # ── Map type to archive name ────────────────────────────────────────
+# All tarball installs use the single per-platform gtm-full archive
+# (gtm + gtmd binaries, manpages, completions, systemd service).
 case "$INSTALL_TYPE" in
-  minimal)  ARCHIVE_NAME="gtmd" ;;
-  full)     ARCHIVE_NAME="gtm-full" ;;
-  tui-only) ARCHIVE_NAME="gtm" ;;
-  deb)      ARCHIVE_NAME="" ;;
+  minimal|full|tui-only) ARCHIVE_NAME="gtm-full" ;;
+  deb)                   ARCHIVE_NAME="" ;;
 esac
 
 # ── Validate tui-only requires gtmd ─────────────────────────────────
