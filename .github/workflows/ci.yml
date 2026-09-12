@@ -2,6 +2,11 @@ name: CI
 on:
   push:
   pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   # Never fall back to the deprecated Node 20 runtime: force every action
   # onto the current Node (24+).
@@ -17,9 +22,10 @@ jobs:
         with:
           fetch-depth: 0
       - uses: Swatinem/rust-cache@v2
+      - uses: dtolnay/rust-toolchain@stable
       - name: Install ALSA headers (Linux)
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
-      - run: cargo fmt
-      - run: cargo clippy --workspace --all-targets
+      - run: cargo fmt --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace

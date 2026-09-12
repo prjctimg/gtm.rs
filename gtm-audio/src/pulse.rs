@@ -19,8 +19,10 @@ use crate::buffer::{DecodeControl, PREBUFFER_SAMPLES, RingBufferInner, SharedRin
 use crate::decoder::DecodeThread;
 use crate::eq::{EqGains, EqSource, ReverbSource};
 use crate::mixer::Mixer;
+use crate::stretch::{SpeedControl, TimeStretchSource};
 use crate::symphonia::SymphoniaSource;
 use gtm_core::global::{EqPreset, ReverbConfig};
+use gtm_core::{MAX_VOLUME, volume_from_ratio, volume_ratio};
 use rodio::Source;
 
 struct PaPlaybackSource {
@@ -35,7 +37,7 @@ struct PaPlaybackSource {
 impl PlaybackSource for PaPlaybackSource {
     fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<usize> {
         let self_ = self.get_mut();
-        let vol = self_.volume.load(Ordering::Relaxed) as f32 / 100.0;
+        let vol = volume_ratio(self_.volume.load(Ordering::Relaxed));
         let float_count = buf.len() / 4;
         let mut written = 0usize;
 
@@ -189,6 +191,7 @@ pub struct PulseAudioMixer {
     eq_enabled: Arc<AtomicBool>,
     reverb_enabled: Arc<AtomicBool>,
     reverb_room_size: Arc<Mutex<f32>>,
+    speed: SpeedControl,
     spectrum: Arc<Mutex<Vec<f32>>>,
 }
 
@@ -197,7 +200,7 @@ impl PulseAudioMixer {
         let client = Client::from_env(c"gtm")
             .map_err(|e| AudioError::OutputError(format!("PulseAudio client: {e}")))?;
 
-        let mixer_volume = Arc::new(AtomicU8::new(100));
+        let mixer_volume = Arc::new(AtomicU8::new(MAX_VOLUME));
 
         let stream_a = PaStreamState::new(&client, "gtm-a", &mixer_volume)?;
         let stream_b = PaStreamState::new(&client, "gtm-b", &mixer_volume)?;
@@ -217,12 +220,13 @@ impl PulseAudioMixer {
             crossfade_duration: 0.0,
             pending_pause: false,
             pause_fade_start: None,
-            stored_volume: 100,
-            user_volume: Arc::new(AtomicU8::new(100)),
+            stored_volume: MAX_VOLUME,
+            user_volume: Arc::new(AtomicU8::new(MAX_VOLUME)),
             eq_gains: EqGains::new_flat(),
             eq_enabled: Arc::new(AtomicBool::new(true)),
             reverb_enabled: Arc::new(AtomicBool::new(false)),
             reverb_room_size: Arc::new(Mutex::new(0.3)),
+            speed: SpeedControl::new(),
             spectrum: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -276,6 +280,31 @@ impl PulseAudioMixer {
             .unwrap_or(0.0))
     }
 
+    fn wrap_source(
+        &self,
+        source: Box<dyn Source<Item = f32> + Send>,
+    ) -> Box<dyn Source<Item = f32> + Send> {
+        let source: Box<dyn Source<Item = f32> + Send> =
+            Box::new(TimeStretchSource::new(source, self.speed.clone()));
+        let source = if self.eq_enabled.load(Ordering::Relaxed) {
+            Box::new(EqSource::new(source, self.eq_gains.clone()))
+                as Box<dyn Source<Item = f32> + Send>
+        } else {
+            source
+        };
+        if self.reverb_enabled.load(Ordering::Relaxed) {
+            let room_size = *self.reverb_room_size.lock().unwrap();
+            Box::new(ReverbSource::new(
+                source,
+                room_size,
+                self.reverb_enabled.clone(),
+            )) as Box<dyn Source<Item = f32> + Send>
+        } else {
+            source
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn start_decode(
         path: &str,
         ring: &SharedRingBuffer,
@@ -283,7 +312,9 @@ impl PulseAudioMixer {
         eq_enabled: &Arc<AtomicBool>,
         reverb_enabled: &Arc<AtomicBool>,
         reverb_room_size: &Arc<Mutex<f32>>,
+        speed: &SpeedControl,
         spectrum: &Arc<Mutex<Vec<f32>>>,
+        prebuffer_samples: usize,
     ) -> AudioResult<(Arc<DecodeControl>, std::thread::JoinHandle<()>)> {
         let control = Arc::new(DecodeControl::new());
         let thread = DecodeThread::new(
@@ -294,7 +325,9 @@ impl PulseAudioMixer {
             eq_enabled.clone(),
             reverb_enabled.clone(),
             reverb_room_size.clone(),
+            speed.clone(),
             spectrum.clone(),
+            prebuffer_samples,
         );
         let handle = thread.spawn().map_err(AudioError::DecodeError)?;
 
@@ -362,7 +395,9 @@ impl Mixer for PulseAudioMixer {
             &self.eq_enabled,
             &self.reverb_enabled,
             &self.reverb_room_size,
+            &self.speed,
             &self.spectrum,
+            PREBUFFER_SAMPLES,
         )?;
 
         self.active_mut().control = Some(control);
@@ -394,21 +429,7 @@ impl Mixer for PulseAudioMixer {
             *self.duration.lock().unwrap() = dur.as_secs_f64();
         }
 
-        let source = if self.eq_enabled.load(Ordering::Relaxed) {
-            Box::new(EqSource::new(source, self.eq_gains.clone()))
-        } else {
-            source
-        };
-        let source = if self.reverb_enabled.load(Ordering::Relaxed) {
-            let room_size = *self.reverb_room_size.lock().unwrap();
-            Box::new(ReverbSource::new(
-                source,
-                room_size,
-                self.reverb_enabled.clone(),
-            ))
-        } else {
-            source
-        };
+        let source = self.wrap_source(source);
 
         let ring = self.active().ring.clone();
         let handle = std::thread::Builder::new()
@@ -453,7 +474,9 @@ impl Mixer for PulseAudioMixer {
             &self.eq_enabled,
             &self.reverb_enabled,
             &self.reverb_room_size,
+            &self.speed,
             &self.spectrum,
+            PREBUFFER_SAMPLES,
         )?;
 
         self.standby_mut().control = Some(control);
@@ -473,21 +496,7 @@ impl Mixer for PulseAudioMixer {
         self.standby().flush();
         Self::set_stream_volume(&self.standby(), 0);
 
-        let source = if self.eq_enabled.load(Ordering::Relaxed) {
-            Box::new(EqSource::new(source, self.eq_gains.clone()))
-        } else {
-            source
-        };
-        let source = if self.reverb_enabled.load(Ordering::Relaxed) {
-            let room_size = *self.reverb_room_size.lock().unwrap();
-            Box::new(ReverbSource::new(
-                source,
-                room_size,
-                self.reverb_enabled.clone(),
-            ))
-        } else {
-            source
-        };
+        let source = self.wrap_source(source);
 
         let ring = self.standby().ring.clone();
         let handle = std::thread::Builder::new()
@@ -575,7 +584,7 @@ impl Mixer for PulseAudioMixer {
     }
 
     fn set_volume(&mut self, volume: u8) -> AudioResult<()> {
-        let vol = volume.min(100);
+        let vol = volume.min(MAX_VOLUME);
         self.user_volume.store(vol, Ordering::SeqCst);
         if !self.pending_pause {
             Self::set_stream_volume(&self.active(), vol);
@@ -706,8 +715,9 @@ impl Mixer for PulseAudioMixer {
                 self.playing.store(false, Ordering::SeqCst);
             } else {
                 let progress = elapsed / FADE_MS;
-                let target = (self.stored_volume.min(100) as f32 / 100.0) * (1.0 - progress as f32);
-                Self::set_stream_volume(&self.active(), (target * 100.0) as u8);
+                let target =
+                    volume_ratio(self.stored_volume.min(MAX_VOLUME)) * (1.0 - progress as f32);
+                Self::set_stream_volume(&self.active(), volume_from_ratio(target));
             }
         }
 
@@ -757,11 +767,19 @@ impl Mixer for PulseAudioMixer {
         *self.reverb_room_size.lock().unwrap() = config.room_size;
     }
 
+    fn set_speed(&self, rate: f32) {
+        self.speed.store(rate);
+    }
+
+    fn speed(&self) -> f32 {
+        self.speed.load()
+    }
+
     fn current_peak_level(&self) -> f32 {
         if !self.playing.load(Ordering::SeqCst) {
             return 0.0;
         }
-        let vol = self.user_volume.load(Ordering::SeqCst) as f32 / 100.0;
+        let vol = volume_ratio(self.user_volume.load(Ordering::SeqCst));
         vol
     }
     fn current_spectrum(&self) -> Vec<f32> {
@@ -791,8 +809,8 @@ impl PulseAudioMixer {
             eased_out
         };
 
-        Self::set_stream_volume(&self.stream_a, (a_vol * 100.0) as u8);
-        Self::set_stream_volume(&self.stream_b, (b_vol * 100.0) as u8);
+        Self::set_stream_volume(&self.stream_a, volume_from_ratio(a_vol as f32));
+        Self::set_stream_volume(&self.stream_b, volume_from_ratio(b_vol as f32));
 
         if progress >= 1.0 {
             self.swap_active_standby();

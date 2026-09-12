@@ -19,6 +19,7 @@ use zvariant::{ObjectPath, Value};
 
 use gtm_core::ipc::{DaemonEvent, DaemonReq};
 use gtm_core::state::{DaemonState, PlaybackStatus, RepeatMode};
+use gtm_core::{volume_from_ratio, volume_ratio};
 
 const BUS_NAME: &str = "org.mpris.MediaPlayer2.gtm";
 const OBJECT_PATH: &str = "/org/mpris/MediaPlayer2";
@@ -27,8 +28,6 @@ const PROPERTY_IFACE: &str = "org.freedesktop.DBus.Properties";
 /// Handle to shut down the MPRIS server.
 pub struct MprisHandle {
     cancel: tokio::sync::broadcast::Sender<()>,
-    #[allow(dead_code)]
-    task: tokio::task::JoinHandle<()>,
 }
 
 impl MprisHandle {
@@ -266,7 +265,7 @@ impl Player {
     #[zbus(property)]
     async fn volume(&self) -> f64 {
         let state = self.state.read().await;
-        state.volume as f64 / 100.0
+        volume_ratio(state.volume) as f64
     }
 
     #[zbus(property)]
@@ -346,7 +345,7 @@ pub async fn start(
     info!("mpris: registered on session bus as {BUS_NAME}");
 
     let cancel_rx = cancel_tx.subscribe();
-    let task = tokio::spawn(async move {
+    tokio::spawn(async move {
         let mut cancel_rx = cancel_rx;
 
         // Forward MPRIS client commands to the daemon as IPC requests.
@@ -403,7 +402,7 @@ pub async fn start(
                         let _ = cmd_req_tx.send(DaemonReq::CycleRepeat { mode });
                     }
                     UserCommand::SetVolume(volume) => {
-                        let vol = (volume.clamp(0.0, 1.0) * 100.0) as u8;
+                        let vol = volume_from_ratio(volume.clamp(0.0, 1.0) as f32);
                         let _ = cmd_req_tx.send(DaemonReq::SetVolume { volume: vol });
                     }
                     UserCommand::SetShuffle(enabled) => {
@@ -444,10 +443,7 @@ pub async fn start(
         cmd_task.abort();
     });
 
-    Ok(MprisHandle {
-        cancel: cancel_tx,
-        task,
-    })
+    Ok(MprisHandle { cancel: cancel_tx })
 }
 
 async fn apply_event(state: &Arc<RwLock<DaemonState>>, event: &DaemonEvent) {

@@ -10,6 +10,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use rodio::cpal::traits::{DeviceTrait, HostTrait};
 use rodio::{Decoder, DeviceSinkBuilder, Player, Source};
 
 use crate::backend::{AudioError, AudioEvent, AudioResult};
@@ -19,8 +20,10 @@ use crate::buffer::{
 };
 use crate::decoder::DecodeThread;
 use crate::eq::{EqGains, EqSource, ReverbSource};
-use crate::symphonia::SymphoniaSource;
+use crate::stretch::{SpeedControl, TimeStretchSource};
+use crate::symphonia::{StreamingReopen, SymphoniaSource};
 use gtm_core::global::{EqPreset, ReverbConfig};
+use gtm_core::{MAX_VOLUME, volume_ratio};
 
 pub trait Mixer: Send + Sync {
     fn load_active(&mut self, path: &str, start_pos: f64) -> AudioResult<()>;
@@ -60,11 +63,33 @@ pub trait Mixer: Send + Sync {
     fn set_eq_preset(&self, preset: &EqPreset);
     fn set_eq_enabled(&self, enabled: bool);
     fn set_reverb(&self, config: &ReverbConfig);
+
+    // ─── Playback speed (pitch-preserving) ───
+    /// Set the playback rate (0.25..=2.0, 1.0 is unity). Clamped on store.
+    fn set_speed(&self, rate: f32);
+    /// Current playback rate.
+    fn speed(&self) -> f32;
+
+    // ─── Audio device switching ───
+    /// List available output device names. Empty when the backend can't
+    /// enumerate devices (e.g. the PulseAudio network backend).
+    fn list_devices(&self) -> Vec<String> {
+        Vec::new()
+    }
+    /// Switch the active output device; `None` reselects the system default.
+    /// Restarts the output, dropping any buffered playback. Backends that
+    /// can't switch report an error.
+    fn set_device(&mut self, _name: Option<String>) -> AudioResult<()> {
+        Err(AudioError::OutputError(
+            "device switching not supported on this backend".into(),
+        ))
+    }
 }
 
 pub struct AudioMixer {
-    #[allow(dead_code)]
-    sink: Arc<MixerDeviceSink>,
+    // Kept alive for the mixer's lifetime: the underlying device must stay
+    // open or ALSA/pulse would tear the output sinks down.
+    _keepalive_sink: Arc<MixerDeviceSink>,
     player_a: Player,
     player_b: Player,
     is_a_active: bool,
@@ -86,6 +111,7 @@ pub struct AudioMixer {
     eq_enabled: Arc<AtomicBool>,
     reverb_enabled: Arc<AtomicBool>,
     reverb_room_size: Arc<Mutex<f32>>,
+    speed: SpeedControl,
     // ─── Decode thread / Ring buffer ───
     active_control: Option<Arc<DecodeControl>>,
     active_decode_handle: Option<std::thread::JoinHandle<()>>,
@@ -184,12 +210,56 @@ impl Mixer for AudioMixer {
         *self.reverb_room_size.lock().unwrap() = config.room_size;
     }
 
+    fn set_speed(&self, rate: f32) {
+        self.speed.store(rate);
+    }
+
+    fn speed(&self) -> f32 {
+        self.speed.load()
+    }
+
+    fn list_devices(&self) -> Vec<String> {
+        rodio::cpal::default_host()
+            .output_devices()
+            .map(|devs| {
+                devs.filter_map(|d| d.id().map(|id| id.to_string()).ok())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    fn set_device(&mut self, name: Option<String>) -> AudioResult<()> {
+        let volume = self.volume.load(Ordering::SeqCst);
+        let eq_enabled = self.eq_enabled.load(Ordering::Relaxed);
+        let eq_gains = self.eq_gains.clone();
+        let reverb_enabled = self.reverb_enabled.load(Ordering::Relaxed);
+        let reverb_room = *self.reverb_room_size.lock().unwrap();
+        let speed = self.speed.load();
+
+        Self::stop_decode_thread(&self.active_control, &mut self.active_decode_handle);
+        Self::stop_decode_thread(&self.standby_control, &mut self.standby_decode_handle);
+        self.player_a.stop();
+        self.player_b.stop();
+
+        let mut fresh = Self::open_for_device(name)?;
+        let _ = fresh.set_volume(volume);
+        fresh.eq_enabled.store(eq_enabled, Ordering::Relaxed);
+        fresh.eq_gains = eq_gains;
+        fresh
+            .reverb_enabled
+            .store(reverb_enabled, Ordering::Relaxed);
+        *fresh.reverb_room_size.lock().unwrap() = reverb_room;
+        fresh.speed.store(speed);
+        *self = fresh;
+        Ok(())
+    }
+
     fn current_peak_level(&self) -> f32 {
         if !self.playing.load(Ordering::SeqCst) {
             return 0.0;
         }
 
-        self.volume.load(Ordering::SeqCst) as f32 / 100.0
+        self.volume.load(Ordering::SeqCst) as f32 / MAX_VOLUME as f32
     }
     fn current_spectrum(&self) -> Vec<f32> {
         self.spectrum.lock().unwrap().clone()
@@ -204,8 +274,31 @@ impl AudioMixer {
     }
 
     pub fn new() -> AudioResult<Self> {
-        let mut sink = DeviceSinkBuilder::open_default_sink()
-            .map_err(|e| AudioError::OutputError(e.to_string()))?;
+        Self::open_for_device(None)
+    }
+
+    /// Open the output on `name` (`None` = system default device) and wire up
+    /// both crossfade players.
+    fn open_for_device(name: Option<String>) -> AudioResult<Self> {
+        let mut sink = if let Some(dev_name) = name {
+            let devices = rodio::cpal::default_host()
+                .output_devices()
+                .map_err(|e| AudioError::OutputError(e.to_string()))?;
+            let device = devices
+                .filter_map(|d| d.id().map(|id| (id.to_string(), d)).ok())
+                .find(|(name, _)| *name == dev_name)
+                .map(|(_, d)| d)
+                .ok_or_else(|| {
+                    AudioError::OutputError(format!("no output device named '{dev_name}'"))
+                })?;
+            DeviceSinkBuilder::from_device(device)
+                .map_err(|e| AudioError::OutputError(e.to_string()))?
+                .open_stream()
+                .map_err(|e| AudioError::OutputError(e.to_string()))?
+        } else {
+            DeviceSinkBuilder::open_default_sink()
+                .map_err(|e| AudioError::OutputError(e.to_string()))?
+        };
         sink.log_on_drop(false);
         let sink = Arc::new(MixerDeviceSink(sink));
         let mixer = sink.0.mixer();
@@ -216,14 +309,14 @@ impl AudioMixer {
         b.pause();
 
         Ok(Self {
-            sink,
+            _keepalive_sink: sink,
             player_a: a,
             player_b: b,
             is_a_active: true,
             position: Arc::new(Mutex::new(0.0)),
             duration: Arc::new(Mutex::new(0.0)),
             playing: Arc::new(AtomicBool::new(false)),
-            volume: Arc::new(AtomicU8::new(100)),
+            volume: Arc::new(AtomicU8::new(MAX_VOLUME)),
             start_time: Arc::new(Mutex::new(None)),
             start_pos: Arc::new(Mutex::new(0.0)),
             crossfade_start: None,
@@ -231,12 +324,13 @@ impl AudioMixer {
             standby_duration: 0.0,
             pending_pause: false,
             pause_fade_start: None,
-            stored_volume: 100,
+            stored_volume: MAX_VOLUME,
             last_reported_pos: f64::NEG_INFINITY,
             eq_gains: EqGains::new_flat(),
             eq_enabled: Arc::new(AtomicBool::new(true)),
             reverb_enabled: Arc::new(AtomicBool::new(false)),
             reverb_room_size: Arc::new(Mutex::new(0.3)),
+            speed: SpeedControl::new(),
             active_control: None,
             active_decode_handle: None,
             standby_control: None,
@@ -274,6 +368,18 @@ impl AudioMixer {
         SymphoniaSource::from_file(path, start_pos)
     }
 
+    /// Build a symphonia source over an arbitrary byte stream (e.g. a remote
+    /// HTTP stream). `start_pos` skips leading samples; `reopen` enables seek
+    /// by reconnecting, `None` disables seeking (live transports).
+    pub fn decode_reader(
+        reader: Box<dyn std::io::Read + Send + 'static>,
+        reopen: Option<Box<dyn StreamingReopen>>,
+        start_pos: f64,
+    ) -> AudioResult<Box<dyn Source<Item = f32> + Send>> {
+        SymphoniaSource::from_reader(reader, reopen, start_pos)
+            .map(|s| Box::new(s) as Box<dyn Source<Item = f32> + Send>)
+    }
+
     fn decode(path: &str) -> AudioResult<Box<dyn Source<Item = f32> + Send>> {
         let file = File::open(path).map_err(|e| AudioError::OpenFailed(e.to_string()))?;
         let reader = BufReader::new(file);
@@ -307,6 +413,8 @@ impl AudioMixer {
         &self,
         source: Box<dyn Source<Item = f32> + Send>,
     ) -> Box<dyn Source<Item = f32> + Send> {
+        let source: Box<dyn Source<Item = f32> + Send> =
+            Box::new(TimeStretchSource::new(source, self.speed.clone()));
         let boxed: Box<dyn Source<Item = f32> + Send> = if self.eq_enabled.load(Ordering::Relaxed) {
             Box::new(EqSource::new(source, self.eq_gains.clone()))
         } else {
@@ -324,12 +432,14 @@ impl AudioMixer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn start_decode_thread(
         path: &str,
         eq_gains: &EqGains,
         eq_enabled: &Arc<AtomicBool>,
         reverb_enabled: &Arc<AtomicBool>,
         reverb_room_size: &Arc<Mutex<f32>>,
+        speed: &SpeedControl,
         spectrum: &Arc<Mutex<Vec<f32>>>,
         prebuffer_samples: usize,
     ) -> AudioResult<(
@@ -348,6 +458,7 @@ impl AudioMixer {
             eq_enabled.clone(),
             reverb_enabled.clone(),
             reverb_room_size.clone(),
+            speed.clone(),
             spectrum.clone(),
             prebuffer_samples,
         );
@@ -377,7 +488,7 @@ impl AudioMixer {
         self.first_track = false;
         Self::stop_decode_thread(&self.active_control, &mut self.active_decode_handle);
 
-        let vol = self.volume.load(Ordering::SeqCst) as f32 / 100.0;
+        let vol = volume_ratio(self.volume.load(Ordering::SeqCst));
         self.active().stop();
         self.active().set_volume(vol);
 
@@ -392,6 +503,7 @@ impl AudioMixer {
             &self.eq_enabled,
             &self.reverb_enabled,
             &self.reverb_room_size,
+            &self.speed,
             &self.spectrum,
             prebuffer,
         )?;
@@ -417,7 +529,7 @@ impl AudioMixer {
     ) -> AudioResult<()> {
         Self::stop_decode_thread(&self.active_control, &mut self.active_decode_handle);
 
-        let vol = self.volume.load(Ordering::SeqCst) as f32 / 100.0;
+        let vol = volume_ratio(self.volume.load(Ordering::SeqCst));
         self.active().stop();
         self.active().set_volume(vol);
 
@@ -450,6 +562,7 @@ impl AudioMixer {
             &self.eq_enabled,
             &self.reverb_enabled,
             &self.reverb_room_size,
+            &self.speed,
             &self.spectrum,
             PREBUFFER_SAMPLES,
         )?;
@@ -485,13 +598,13 @@ impl AudioMixer {
     pub fn play(&mut self) -> AudioResult<()> {
         if self.active().is_paused() {
             self.active().play();
-            let vol = self.volume.load(Ordering::SeqCst) as f32 / 100.0;
+            let vol = volume_ratio(self.volume.load(Ordering::SeqCst));
             self.active().set_volume(vol);
         }
         if self.pending_pause {
             self.pending_pause = false;
             self.pause_fade_start = None;
-            let vol = self.stored_volume.min(100) as f32 / 100.0;
+            let vol = volume_ratio(self.stored_volume.min(MAX_VOLUME));
             self.active().set_volume(vol);
         }
         *self.start_time.lock().unwrap() = Some(Instant::now());
@@ -532,11 +645,11 @@ impl AudioMixer {
     }
 
     fn effective_vol_ratio(&self, volume: u8) -> f32 {
-        volume.min(100) as f32 / 100.0
+        volume_ratio(volume.min(MAX_VOLUME))
     }
 
     pub fn set_volume(&mut self, volume: u8) -> AudioResult<()> {
-        self.volume.store(volume.min(100), Ordering::SeqCst);
+        self.volume.store(volume.min(MAX_VOLUME), Ordering::SeqCst);
         self.active().set_volume(self.effective_vol_ratio(volume));
         Ok(())
     }
@@ -592,7 +705,7 @@ impl AudioMixer {
     }
 
     pub fn drop_active(&mut self) {
-        let vol = self.volume.load(Ordering::SeqCst) as f32 / 100.0;
+        let vol = volume_ratio(self.volume.load(Ordering::SeqCst));
         let outgoing = if self.is_a_active {
             &self.player_a
         } else {
@@ -637,7 +750,7 @@ impl AudioMixer {
             return;
         }
         self.crossfade_start = None;
-        let vol = self.volume.load(Ordering::SeqCst) as f32 / 100.0;
+        let vol = volume_ratio(self.volume.load(Ordering::SeqCst));
         if self.is_a_active {
             self.player_a.set_volume(0.0);
             self.player_a.stop();
@@ -674,7 +787,7 @@ impl AudioMixer {
         let progress = (elapsed / self.crossfade_duration).min(1.0);
         let eased_out = 1.0 - progress;
         let eased_in = progress;
-        let vol = self.volume.load(Ordering::SeqCst) as f64 / 100.0;
+        let vol = volume_ratio(self.volume.load(Ordering::SeqCst)) as f64;
         let base = vol.min(1.0);
 
         self.player_a.set_volume(if self.is_a_active {
@@ -740,7 +853,7 @@ impl AudioMixer {
                 self.playing.store(false, Ordering::SeqCst);
             } else {
                 let progress = elapsed / FADE_MS;
-                let start = self.stored_volume.min(100) as f32 / 100.0;
+                let start = volume_ratio(self.stored_volume.min(MAX_VOLUME));
                 let target = start * (1.0 - progress as f32);
                 self.active().set_volume(target);
             }

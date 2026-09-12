@@ -9,6 +9,7 @@ use gtm_core::global::{
     CrossfadeConfig, DaemonState, Image, PlaybackStatus, RepeatMode, ThemeMode, UIMode, YTFilter,
 };
 use gtm_core::ipc::{DaemonEvent, DaemonReq, DaemonRes, LibraryAction, QueueAction};
+use gtm_core::playlist::PlaylistFormatKind;
 use gtm_core::spotify::{SpotifyPlaylist, SpotifyStatus, SpotifyTrack};
 use gtm_core::track::{LrcData, LrcLine, Playlist, StreamInfo, TrackInfo, YTSearchResult};
 use gtm_core::wire::{decode, encode};
@@ -69,6 +70,25 @@ macro_rules! roundtrip {
                 format!("{:?}", val),
                 format!("{:?}", de2),
                 "bincode round-trip failed"
+            );
+        }
+    };
+}
+
+/// Like [`roundtrip!`] but JSON-only. `DaemonState` uses `#[serde(flatten)]`
+/// for its `audio` settings, which bincode (a non-self-describing format)
+/// cannot round-trip; JSON preserves the flat wire schema.
+macro_rules! roundtrip_json {
+    ($name:ident, $ty:ty, $val:expr) => {
+        #[test]
+        fn $name() {
+            let val: $ty = $val;
+            let json = serde_json::to_string(&val).unwrap();
+            let de: $ty = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                format!("{:?}", val),
+                format!("{:?}", de),
+                "JSON round-trip failed"
             );
         }
     };
@@ -140,7 +160,7 @@ roundtrip!(
         duration_secs: 8,
     }
 );
-roundtrip!(daemon_state_roundtrip, DaemonState, sample_state());
+roundtrip_json!(daemon_state_roundtrip, DaemonState, sample_state());
 roundtrip!(
     image_roundtrip,
     Image,
@@ -173,6 +193,14 @@ fn daemon_req_cmd_name_roundtrip() {
         },
         DaemonReq::SetVolume { volume: 80 },
         DaemonReq::GetVolume,
+        DaemonReq::SetSpeed { rate: 1.5 },
+        DaemonReq::GetSpeed,
+        DaemonReq::SetLowPower { enabled: true },
+        DaemonReq::GetLowPower,
+        DaemonReq::ListAudioDevices,
+        DaemonReq::SetAudioDevice {
+            name: Some("Speakers".into()),
+        },
         DaemonReq::ToggleShuffle,
         DaemonReq::ToggleMute,
         DaemonReq::GetStatus,
@@ -205,6 +233,50 @@ fn daemon_req_parse_cmd_play() {
             assert_eq!(start_pos, 0.0);
         }
         other => panic!("expected Play, got {other:?}"),
+    }
+}
+
+#[test]
+fn daemon_req_parse_cmd_lastfm() {
+    let params = serde_json::json!({
+        "enabled": true,
+        "api_key": "k1",
+        "api_secret": "s1",
+        "session_key": null,
+        "min_play_secs": null,
+        "min_play_pct": 0.5
+    });
+    let req = DaemonReq::parse_cmd("lastfm_set_config", params).unwrap();
+    assert_eq!(req.cmd_name(), "lastfm_set_config");
+    match req {
+        DaemonReq::LastfmSetConfig {
+            enabled,
+            api_key,
+            api_secret,
+            session_key,
+            min_play_secs,
+            min_play_pct,
+        } => {
+            assert!(enabled);
+            assert_eq!(api_key.as_deref(), Some("k1"));
+            assert_eq!(api_secret.as_deref(), Some("s1"));
+            assert!(session_key.is_none());
+            assert!(min_play_secs.is_none());
+            assert_eq!(min_play_pct, Some(0.5));
+        }
+        other => panic!("expected LastfmSetConfig, got {other:?}"),
+    }
+
+    for cmd in ["lastfm_auth_url", "lastfm_status", "lastfm_clear"] {
+        let req = DaemonReq::parse_cmd(cmd, serde_json::json!({})).unwrap();
+        assert_eq!(req.cmd_name(), cmd);
+    }
+
+    let req =
+        DaemonReq::parse_cmd("lastfm_authenticate", serde_json::json!({ "token": "t1" })).unwrap();
+    match req {
+        DaemonReq::LastfmAuthenticate { token } => assert_eq!(token, "t1"),
+        other => panic!("expected LastfmAuthenticate, got {other:?}"),
     }
 }
 
@@ -255,9 +327,39 @@ fn daemon_req_parse_cmd_spotify_variants() {
             serde_json::json!({ "playlist_id": "37i9dQZEVX", "track_index": 3 }),
             "spotify_resolve",
         ),
+        (
+            "spotify_resolve_track",
+            serde_json::json!({
+                "name": "Drift",
+                "artists": "Artist",
+                "album": "Album",
+                "uri": "spotify:track:abc123"
+            }),
+            "spotify_resolve_track",
+        ),
+        (
+            "spotify_resolve_track",
+            serde_json::json!({ "name": "Drift", "artists": "Artist", "album": "Album" }),
+            "spotify_resolve_track",
+        ),
+        (
+            "spotify_play_all",
+            serde_json::json!({ "playlist_id": "37i9dQZEVX", "shuffle": true }),
+            "spotify_play_all",
+        ),
+        (
+            "spotify_play_all",
+            serde_json::json!({ "playlist_id": "37i9dQZEVX" }),
+            "spotify_play_all",
+        ),
+        (
+            "spotify_track_image",
+            serde_json::json!({ "image_url": "https://i.scdn.co/image/abc" }),
+            "spotify_track_image",
+        ),
     ];
     for (cmd, params, expected) in cases {
-        let req = DaemonReq::parse_cmd(cmd, params).unwrap();
+        let req = DaemonReq::parse_cmd(cmd, params.clone()).unwrap();
         assert_eq!(req.cmd_name(), expected);
         match req {
             DaemonReq::SpotifySetToken { token } => assert_eq!(token, "BQCabc"),
@@ -268,6 +370,28 @@ fn daemon_req_parse_cmd_spotify_variants() {
             } => {
                 assert_eq!(playlist_id, "37i9dQZEVX");
                 assert_eq!(track_index, 3);
+            }
+            DaemonReq::SpotifyResolveTrack { name, uri, .. } => {
+                assert_eq!(name, "Drift");
+                if params.get("uri").is_some() {
+                    assert_eq!(uri.as_deref(), Some("spotify:track:abc123"));
+                } else {
+                    assert!(uri.is_none(), "uri must default to None when absent");
+                }
+            }
+            DaemonReq::SpotifyPlayAll {
+                playlist_id,
+                shuffle,
+            } => {
+                assert_eq!(playlist_id, "37i9dQZEVX");
+                if params.get("shuffle").is_some() {
+                    assert!(shuffle);
+                } else {
+                    assert!(!shuffle, "shuffle must default to false when absent");
+                }
+            }
+            DaemonReq::SpotifyTrackImage { image_url } => {
+                assert_eq!(image_url, "https://i.scdn.co/image/abc");
             }
             _ => {}
         }
@@ -297,6 +421,7 @@ fn daemon_res_spotify_wire_roundtrip() {
             album: Some("Album".into()),
             duration_ms: Some(240000),
             uri: None,
+            image_url: None,
         }],
     };
     let cases: Vec<(&str, DaemonRes)> = vec![
@@ -318,6 +443,12 @@ fn daemon_res_spotify_wire_roundtrip() {
                 tracks: playlist.tracks.clone(),
             },
         ),
+        (
+            "spotify_track_image",
+            DaemonRes::SpotifyImageRes {
+                data: Some("AAECAw==".into()),
+            },
+        ),
     ];
     for (cmd, res) in cases {
         let expected = format!("{:?}", res);
@@ -328,6 +459,55 @@ fn daemon_res_spotify_wire_roundtrip() {
             format!("{:?}", back),
             "round-trip failed for {cmd}"
         );
+    }
+}
+
+#[test]
+fn daemon_res_lastfm_wire_roundtrip() {
+    let cases: Vec<(&str, DaemonRes)> = vec![
+        (
+            "lastfm_auth_url",
+            DaemonRes::LastfmAuthUrlRes {
+                url: "https://www.last.fm/api/auth/?api_key=k1".into(),
+            },
+        ),
+        (
+            "lastfm_status",
+            DaemonRes::LastfmStatusRes {
+                enabled: true,
+                api_key: Some("k1".into()),
+                session_token: Some("sess".into()),
+                ready: true,
+            },
+        ),
+    ];
+    for (cmd, res) in cases {
+        let expected = format!("{:?}", res);
+        let wire = res.to_wire(1);
+        let back = DaemonRes::from_wire(cmd, &wire);
+        assert_eq!(
+            expected,
+            format!("{:?}", back),
+            "round-trip failed for {cmd}"
+        );
+    }
+}
+
+#[test]
+fn daemon_res_spotify_oauth_wire_roundtrip() {
+    for res in [
+        DaemonRes::SpotifyOauthStarted {
+            url: "https://accounts.spotify.com/authorize?response_type=code&client_id=c1".into(),
+        },
+        DaemonRes::SpotifyOauthStarted {
+            url: "https://accounts.spotify.com/authorize?client_id=c2&scope=playlist-read-private"
+                .into(),
+        },
+    ] {
+        let expected = format!("{:?}", res);
+        let wire = res.to_wire(1);
+        let back = DaemonRes::from_wire("spotify_oauth_start", &wire);
+        assert_eq!(expected, format!("{:?}", back));
     }
 }
 
@@ -366,6 +546,16 @@ wire_event_roundtrip!(wire_event_track_ended, DaemonEvent::TrackEnded);
 wire_event_roundtrip!(
     wire_event_volume_changed,
     DaemonEvent::VolumeChanged { volume: 50 }
+);
+wire_event_roundtrip!(
+    wire_event_low_power_changed,
+    DaemonEvent::LowPowerChanged { enabled: true }
+);
+wire_event_roundtrip!(
+    wire_event_audio_device_changed,
+    DaemonEvent::AudioDeviceChanged {
+        name: Some("Speakers".into())
+    }
 );
 
 // ---------------------------------------------------------------------------
@@ -432,12 +622,14 @@ fn library_action_json_roundtrip() {
             playlist_id: 1,
             track_ids: vec![1, 2],
         },
-        LibraryAction::ImportM3u {
-            path: "/m.m3u".into(),
+        LibraryAction::ImportPlaylist {
+            path: "/m.m3u8".into(),
+            format: PlaylistFormatKind::M3u8,
         },
-        LibraryAction::ExportM3u {
+        LibraryAction::ExportPlaylist {
             playlist_id: 1,
-            path: "/out.m3u".into(),
+            path: "/out.pls".into(),
+            format: PlaylistFormatKind::Pls,
         },
         LibraryAction::SyncCovers,
         LibraryAction::SyncLyrics,
@@ -448,6 +640,12 @@ fn library_action_json_roundtrip() {
         LibraryAction::RemoveFromPlaylist {
             playlist_id: 1,
             track_id: 2,
+        },
+        LibraryAction::PlaylistDedup { playlist_id: 1 },
+        LibraryAction::PlaylistDoctor { playlist_id: 1 },
+        LibraryAction::PlaylistSort {
+            playlist_id: 1,
+            field: "artist".into(),
         },
         LibraryAction::RemoveTrack { id: 1 },
     ];
@@ -593,9 +791,9 @@ fn state_transition_shuffle_toggle() {
 #[test]
 fn state_transition_repeat_cycle() {
     let mut s = sample_state();
-    s.cycle_repeat(RepeatMode::One).unwrap();
+    s.set_repeat_mode(RepeatMode::One).unwrap();
     assert_eq!(s.repeat, RepeatMode::One);
-    s.cycle_repeat(RepeatMode::All).unwrap();
+    s.set_repeat_mode(RepeatMode::All).unwrap();
     assert_eq!(s.repeat, RepeatMode::All);
 }
 

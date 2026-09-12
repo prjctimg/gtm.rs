@@ -12,9 +12,34 @@ use ratatui::widgets::Paragraph;
 use std::borrow::Cow;
 
 use chrono::Local;
-use gtm_core::state::PlaybackStatus;
+use gtm_core::state::{PlaybackStatus, RepeatMode};
 
 use crate::app::App;
+use crate::theme::{AppTheme, readable_fg};
+use crate::ui::{Render, use_nerd_fonts};
+
+/// Namespace for per-module footer rendering.
+pub struct Footer;
+
+/// Scrolling marquee for footer text: if it fits in `MAX` chars, return it
+/// verbatim; otherwise cycle one full loop then hold still before repeating.
+fn scroll_text(raw: String, scroll: usize) -> String {
+    const MAX: usize = 30;
+    const SPEED: usize = 6;
+    const HOLD_STEPS: usize = 50; // ~5s hold at 60fps / SPEED
+    let char_count = raw.chars().count();
+    if char_count > MAX {
+        // Char-based modulo so multibyte UTF-8 never splits mid-sequence.
+        let chars: Vec<char> = raw.chars().collect();
+        let step = scroll / SPEED;
+        let pos = step % (char_count + HOLD_STEPS);
+        let offset = if pos < char_count { pos } else { 0 };
+        let s: String = chars.iter().cycle().skip(offset).take(MAX).collect();
+        format!("{s} \u{2026}")
+    } else {
+        raw
+    }
+}
 
 fn darken(c: Color, factor: f64) -> Color {
     match c {
@@ -41,6 +66,7 @@ pub enum FooterModule {
     Playback,
     Title,
     Volume,
+    Speed,
     Repeat,
     Shuffle,
     Progress,
@@ -50,9 +76,12 @@ pub enum FooterModule {
     System,
     EqPreset,
     SleepTimer,
+    LowPower,
+    Device,
     Notification,
     Time,
     Multiselect,
+    Download,
 }
 
 impl FooterModule {
@@ -62,6 +91,7 @@ impl FooterModule {
             FooterModule::Playback => "Playback",
             FooterModule::Title => "Title",
             FooterModule::Volume => "Volume",
+            FooterModule::Speed => "Speed",
             FooterModule::Repeat => "Repeat",
             FooterModule::Shuffle => "Shuffle",
             FooterModule::Progress => "Progress",
@@ -71,9 +101,12 @@ impl FooterModule {
             FooterModule::System => "System",
             FooterModule::EqPreset => "EqPreset",
             FooterModule::SleepTimer => "SleepTimer",
+            FooterModule::LowPower => "LowPower",
+            FooterModule::Device => "Device",
             FooterModule::Notification => "Notification",
             FooterModule::Time => "Time",
             FooterModule::Multiselect => "Multiselect",
+            FooterModule::Download => "Download",
         }
     }
 
@@ -84,6 +117,7 @@ impl FooterModule {
             "Playback" => FooterModule::Playback,
             "Title" => FooterModule::Title,
             "Volume" => FooterModule::Volume,
+            "Speed" => FooterModule::Speed,
             "Repeat" => FooterModule::Repeat,
             "Shuffle" => FooterModule::Shuffle,
             "Progress" => FooterModule::Progress,
@@ -93,9 +127,12 @@ impl FooterModule {
             "System" => FooterModule::System,
             "EqPreset" => FooterModule::EqPreset,
             "SleepTimer" => FooterModule::SleepTimer,
+            "LowPower" => FooterModule::LowPower,
+            "Device" => FooterModule::Device,
             "Notification" => FooterModule::Notification,
             "Time" => FooterModule::Time,
             "Multiselect" => FooterModule::Multiselect,
+            "Download" => FooterModule::Download,
             _ => return None,
         })
     }
@@ -123,15 +160,20 @@ pub fn presets() -> Vec<FooterPreset> {
                 FooterModule::Repeat,
                 FooterModule::Shuffle,
                 FooterModule::Volume,
+                FooterModule::Speed,
+                FooterModule::LowPower,
+                FooterModule::Device,
                 FooterModule::EqPreset,
                 FooterModule::KeyAction,
                 FooterModule::Notification,
                 FooterModule::SleepTimer,
+                FooterModule::Download,
             ],
             right: vec![
                 FooterModule::Queue,
                 FooterModule::Time,
                 FooterModule::System,
+                FooterModule::Multiselect,
             ],
         },
         // Bare minimum for termux or very small viewports.
@@ -291,7 +333,7 @@ pub fn render(app: &App) -> Option<FooterRenderOutput> {
         // Brand-badge styling: a solid per-module accent background with the
         // readable foreground and a bold weight, exactly like the "gtm" badge.
         let bg = module_color(m, &app.theme);
-        let fg = crate::theme::readable_fg(app.theme.fg, bg);
+        let fg = readable_fg(app.theme.fg, bg);
         let span = Span::styled(
             format!(" {} ", text),
             Style::default().fg(fg).add_modifier(Modifier::BOLD),
@@ -306,6 +348,27 @@ pub fn render(app: &App) -> Option<FooterRenderOutput> {
         } else {
             out_right.push(group);
         }
+    }
+
+    // Multiselect mode is on: pin a "SEL" marker at the very far-left so the
+    // active selection mode is always visible, independent of the preset.
+    if app.multiselect_mode {
+        let bg = app.theme.accent;
+        let span = Span::styled(
+            " SEL ",
+            Style::default()
+                .fg(readable_fg(app.theme.fg, bg))
+                .bg(bg)
+                .add_modifier(Modifier::BOLD),
+        );
+        out_left.insert(
+            0,
+            FooterGroup {
+                width: span.width() as u16,
+                line: Line::from(span),
+                bg,
+            },
+        );
     }
 
     if out_left.is_empty() && out_right.is_empty() {
@@ -403,14 +466,274 @@ pub fn draw(f: &mut Frame, area: Rect, out: &FooterRenderOutput) {
     }
 }
 
+impl Footer {
+    fn multiselect(app: &App) -> Option<String> {
+        if app.multiselect_mode && !app.selected_indices.is_empty() {
+            Some(format!("[{} selected]", app.selected_indices.len()))
+        } else {
+            None
+        }
+    }
+
+    fn footer_notification(app: &App) -> Option<String> {
+        let (msg, expires) = app.footer_notification.as_ref()?;
+        if std::time::Instant::now() >= *expires {
+            return None;
+        }
+        Some(msg.clone())
+    }
+
+    fn download(app: &App) -> Option<String> {
+        // Prefer the most recently updated in-flight download.
+        let dl = app.downloads.values().max_by_key(|d| d.updated_at)?;
+        if !matches!(dl.status.as_str(), "downloading" | "pending") {
+            return None;
+        }
+        let icon = if use_nerd_fonts() {
+            "\u{f019} " // nf-fa-download
+        } else {
+            "\u{2193} " // ↓
+        };
+        let mut out = format!("{icon}{:.0}%", dl.percent.clamp(0.0, 100.0));
+        if let Some(rate) = dl.rate_bytes_per_sec {
+            out.push_str(&format!(" {}", Footer::format_rate(rate)));
+        }
+        if let Some(eta) = dl.eta_secs {
+            out.push_str(&format!(" ETA {}", format_duration(eta)));
+        }
+        Some(out)
+    }
+
+    fn format_rate(bytes_per_sec: f64) -> String {
+        const KB: f64 = 1024.0;
+        const MB: f64 = KB * 1024.0;
+        const GB: f64 = MB * 1024.0;
+        if bytes_per_sec >= GB {
+            format!("{:.1}GiB/s", bytes_per_sec / GB)
+        } else if bytes_per_sec >= MB {
+            format!("{:.1}MiB/s", bytes_per_sec / MB)
+        } else if bytes_per_sec >= KB {
+            format!("{:.0}KiB/s", bytes_per_sec / KB)
+        } else {
+            format!("{:.0}B/s", bytes_per_sec)
+        }
+    }
+
+    fn playback(app: &App) -> String {
+        match app.state.status {
+            PlaybackStatus::Playing => {
+                if use_nerd_fonts() {
+                    "\u{f040a}".into()
+                } else {
+                    "\u{25b6}".into()
+                }
+            }
+            PlaybackStatus::Paused => {
+                if use_nerd_fonts() {
+                    "\u{f03e4}".into()
+                } else {
+                    "\u{23f8}".into()
+                }
+            }
+            PlaybackStatus::Stopped => {
+                if use_nerd_fonts() {
+                    "\u{f04db}".into()
+                } else {
+                    "\u{25a0}".into()
+                }
+            }
+        }
+    }
+
+    fn title(app: &App) -> Option<String> {
+        // A live stream's ICY `StreamTitle` (when present) overrides the
+        // track title, which for radio is just the station name.
+        if let Some(live) = &app.state.radio_title
+            && !live.is_empty()
+        {
+            return Some(scroll_text(live.clone(), app.footer_title_scroll));
+        }
+        let raw = app
+            .state
+            .current_track
+            .as_ref()
+            .map_or_else(String::new, |t| {
+                // Show the track title with the artist concatenated after it.
+                if t.artist.is_empty() {
+                    t.title.clone()
+                } else {
+                    format!("{} \u{2013} {}", t.title, t.artist)
+                }
+            });
+        if raw.is_empty() {
+            return None;
+        }
+        Some(scroll_text(raw, app.footer_title_scroll))
+    }
+
+    fn volume(app: &App) -> String {
+        if app.state.mute {
+            "MUTE".into()
+        } else {
+            format!("{:>3}%", app.state.volume)
+        }
+    }
+
+    fn speed(app: &App) -> Option<String> {
+        let s = app.state.audio.speed;
+        if (s - 1.0).abs() < f32::EPSILON {
+            None
+        } else {
+            Some(format!("{s:.2}x"))
+        }
+    }
+
+    fn low_power(app: &App) -> Option<String> {
+        if app.state.low_power {
+            Some("LowPower".into())
+        } else {
+            None
+        }
+    }
+
+    fn device(app: &App) -> Option<String> {
+        Some(
+            app.state
+                .audio
+                .audio_device
+                .clone()
+                .unwrap_or_else(|| "Default".into()),
+        )
+    }
+
+    fn repeat(app: &App) -> Option<String> {
+        match app.state.repeat {
+            RepeatMode::Off => None,
+            RepeatMode::One => Some(if use_nerd_fonts() {
+                "\u{f0458}".into()
+            } else {
+                "1".into()
+            }),
+            RepeatMode::All => Some(if use_nerd_fonts() {
+                "\u{f0456}".into()
+            } else {
+                "A".into()
+            }),
+        }
+    }
+
+    fn shuffle(app: &App) -> Option<String> {
+        if app.state.shuffle {
+            Some(if use_nerd_fonts() {
+                "\u{f049d}".into()
+            } else {
+                "S".into()
+            })
+        } else {
+            None
+        }
+    }
+
+    fn eq_preset(app: &App) -> Option<String> {
+        if app.state.audio.eq_enabled {
+            let icon = if use_nerd_fonts() {
+                "\u{f062e} "
+            } else {
+                "EQ:"
+            };
+            Some(format!("{icon}{}", app.state.audio.eq_preset.label()))
+        } else {
+            None
+        }
+    }
+
+    fn sleep_timer(app: &App) -> Option<String> {
+        if let Some(secs) = app.state.sleep_timer {
+            let m = secs / 60;
+            let s = secs % 60;
+            let icon = if use_nerd_fonts() {
+                "\u{f04b2} "
+            } else {
+                "zzz "
+            };
+            Some(format!("{icon}{}:{:02}", m, s))
+        } else {
+            None
+        }
+    }
+
+    fn progress(app: &App) -> Option<String> {
+        let track = app.state.current_track.as_ref()?;
+        let pos = app.display_position as u64;
+        let dur = if app.state.duration > 0.0 {
+            app.state.duration as u64
+        } else {
+            track.duration as u64
+        };
+        if dur == 0 {
+            return None;
+        }
+        let ratio = (pos as f64 / dur as f64).clamp(0.0, 1.0);
+        let time_str = format!("{} / {}", format_duration(pos), format_duration(dur));
+        let bar_w = 12;
+        let progress = Render::progress_variant(ratio, bar_w, app);
+        Some(format!("{} {}", progress, time_str))
+    }
+
+    fn queue(app: &App) -> Option<String> {
+        let len = app.queue.cache.len();
+        if len == 0 {
+            return None;
+        }
+        let cursor = app.queue.cursor;
+        Some(format!("{}/{}", cursor + 1, len))
+    }
+
+    fn keyaction(app: &App) -> Option<String> {
+        if let Some((ref action, expires)) = app.last_action_name
+            && std::time::Instant::now() < expires
+        {
+            return Some(format!("[{}]", action));
+        }
+        None
+    }
+
+    fn backend(app: &App) -> String {
+        let name = app
+            .health_report
+            .as_ref()
+            .and_then(|h| {
+                h.components
+                    .iter()
+                    .find(|c| c.name == "audio_backend")
+                    .and_then(|c| c.message.as_deref())
+            })
+            .unwrap_or("unknown");
+        name.to_string()
+    }
+
+    fn system(app: &App) -> String {
+        let backend = Footer::backend(app);
+        format!("{} {}", platform_icon(), backend)
+    }
+    /// Render the current wall-clock time using the user's strftime-style format.
+    fn time(app: &App) -> Option<String> {
+        if app.footer_time_format.is_empty() {
+            return None;
+        }
+        Some(Local::now().format(&app.footer_time_format).to_string())
+    }
+}
+
 // ─── Module dispatch ───────────────────────────────────────────────────
 
 /// Per-module accent colour used as the group background (brand-badge style).
-fn module_color(m: FooterModule, theme: &crate::theme::AppTheme) -> Color {
+fn module_color(m: FooterModule, theme: &AppTheme) -> Color {
     match m {
         FooterModule::Playback => theme.accent,
         FooterModule::Title => theme.secondary_accent,
         FooterModule::Volume => theme.tertiary_accent,
+        FooterModule::Speed => theme.secondary_accent,
         FooterModule::Repeat => theme.accent,
         FooterModule::Shuffle => theme.tertiary_accent,
         FooterModule::Progress => theme.secondary_accent,
@@ -420,188 +743,37 @@ fn module_color(m: FooterModule, theme: &crate::theme::AppTheme) -> Color {
         FooterModule::System => theme.accent,
         FooterModule::EqPreset => theme.secondary_accent,
         FooterModule::SleepTimer => theme.accent,
+        FooterModule::LowPower => theme.warning,
+        FooterModule::Device => theme.secondary_accent,
         FooterModule::Notification => theme.fg_bright,
         FooterModule::Time => theme.tertiary_accent,
         FooterModule::Multiselect => theme.warning,
+        FooterModule::Download => theme.secondary_accent,
     }
 }
 
 fn module_text(m: FooterModule, app: &App) -> Option<String> {
     match m {
-        FooterModule::Playback => Some(render_playback(app)),
-        FooterModule::Title => render_title(app),
-        FooterModule::Volume => Some(render_volume(app)),
-        FooterModule::Repeat => render_repeat(app),
-        FooterModule::Shuffle => render_shuffle(app),
-        FooterModule::Progress => render_progress(app),
-        FooterModule::Queue => render_queue(app),
-        FooterModule::KeyAction => render_keyaction(app),
-        FooterModule::Backend => Some(render_backend(app)),
-        FooterModule::System => Some(render_system(app)),
-        FooterModule::EqPreset => render_eq_preset(app),
-        FooterModule::SleepTimer => render_sleep_timer(app),
-        FooterModule::Notification => render_footer_notification(app),
-        FooterModule::Time => render_time(app),
-        FooterModule::Multiselect => render_multiselect(app),
+        FooterModule::Playback => Some(Footer::playback(app)),
+        FooterModule::Title => Footer::title(app),
+        FooterModule::Volume => Some(Footer::volume(app)),
+        FooterModule::Speed => Footer::speed(app),
+        FooterModule::Repeat => Footer::repeat(app),
+        FooterModule::Shuffle => Footer::shuffle(app),
+        FooterModule::Progress => Footer::progress(app),
+        FooterModule::Queue => Footer::queue(app),
+        FooterModule::KeyAction => Footer::keyaction(app),
+        FooterModule::Backend => Some(Footer::backend(app)),
+        FooterModule::System => Some(Footer::system(app)),
+        FooterModule::EqPreset => Footer::eq_preset(app),
+        FooterModule::SleepTimer => Footer::sleep_timer(app),
+        FooterModule::LowPower => Footer::low_power(app),
+        FooterModule::Device => Footer::device(app),
+        FooterModule::Notification => Footer::footer_notification(app),
+        FooterModule::Time => Footer::time(app),
+        FooterModule::Multiselect => Footer::multiselect(app),
+        FooterModule::Download => Footer::download(app),
     }
-}
-
-fn render_multiselect(app: &App) -> Option<String> {
-    if app.multiselect_mode && !app.selected_indices.is_empty() {
-        Some(format!("[{} selected]", app.selected_indices.len()))
-    } else {
-        None
-    }
-}
-
-fn render_footer_notification(app: &App) -> Option<String> {
-    let (msg, expires) = app.footer_notification.as_ref()?;
-    if std::time::Instant::now() >= *expires {
-        return None;
-    }
-    Some(msg.clone())
-}
-
-fn render_playback(app: &App) -> String {
-    match app.state.status {
-        PlaybackStatus::Playing => {
-            if crate::ui::use_nerd_fonts() {
-                "\u{f040a}".into()
-            } else {
-                "\u{25b6}".into()
-            }
-        }
-        PlaybackStatus::Paused => {
-            if crate::ui::use_nerd_fonts() {
-                "\u{f03e4}".into()
-            } else {
-                "\u{23f8}".into()
-            }
-        }
-        PlaybackStatus::Stopped => {
-            if crate::ui::use_nerd_fonts() {
-                "\u{f04db}".into()
-            } else {
-                "\u{25a0}".into()
-            }
-        }
-    }
-}
-
-fn render_title(app: &App) -> Option<String> {
-    let raw = app
-        .state
-        .current_track
-        .as_ref()
-        .map_or_else(String::new, |t| {
-            // Show the track title with the artist concatenated after it.
-            if t.artist.is_empty() {
-                t.title.clone()
-            } else {
-                format!("{} \u{2013} {}", t.title, t.artist)
-            }
-        });
-    if raw.is_empty() {
-        return None;
-    }
-    const MAX: usize = 30;
-    const SPEED: usize = 6;
-    const HOLD_STEPS: usize = 50; // ~5s hold at 60fps / SPEED
-    let char_count = raw.chars().count();
-    if char_count > MAX {
-        // Char-based modulo so multibyte UTF-8 never splits mid-sequence.
-        // Scroll one full loop, then hold still before animating again.
-        let chars: Vec<char> = raw.chars().collect();
-        let step = app.footer_title_scroll / SPEED;
-        let pos = step % (char_count + HOLD_STEPS);
-        let offset = if pos < char_count { pos } else { 0 };
-        let s: String = chars.iter().cycle().skip(offset).take(MAX).collect();
-        Some(format!("{} \u{2026}", s))
-    } else {
-        Some(raw)
-    }
-}
-
-fn render_volume(app: &App) -> String {
-    if app.state.mute {
-        "MUTE".into()
-    } else {
-        format!("{:>3}%", app.state.volume)
-    }
-}
-
-fn render_repeat(app: &App) -> Option<String> {
-    match app.state.repeat {
-        gtm_core::state::RepeatMode::Off => None,
-        gtm_core::state::RepeatMode::One => Some(if crate::ui::use_nerd_fonts() {
-            "\u{f0458}".into()
-        } else {
-            "1".into()
-        }),
-        gtm_core::state::RepeatMode::All => Some(if crate::ui::use_nerd_fonts() {
-            "\u{f0456}".into()
-        } else {
-            "A".into()
-        }),
-    }
-}
-
-fn render_shuffle(app: &App) -> Option<String> {
-    if app.state.shuffle {
-        Some(if crate::ui::use_nerd_fonts() {
-            "\u{f049d}".into()
-        } else {
-            "S".into()
-        })
-    } else {
-        None
-    }
-}
-
-fn render_eq_preset(app: &App) -> Option<String> {
-    if app.state.eq_enabled {
-        let icon = if crate::ui::use_nerd_fonts() {
-            "\u{f062e} "
-        } else {
-            "EQ:"
-        };
-        Some(format!("{icon}{}", app.state.eq_preset.label()))
-    } else {
-        None
-    }
-}
-
-fn render_sleep_timer(app: &App) -> Option<String> {
-    if let Some(secs) = app.state.sleep_timer {
-        let m = secs / 60;
-        let s = secs % 60;
-        let icon = if crate::ui::use_nerd_fonts() {
-            "\u{f04b2} "
-        } else {
-            "zzz "
-        };
-        Some(format!("{icon}{}:{:02}", m, s))
-    } else {
-        None
-    }
-}
-
-fn render_progress(app: &App) -> Option<String> {
-    let track = app.state.current_track.as_ref()?;
-    let pos = app.display_position as u64;
-    let dur = if app.state.duration > 0.0 {
-        app.state.duration as u64
-    } else {
-        track.duration as u64
-    };
-    if dur == 0 {
-        return None;
-    }
-    let ratio = (pos as f64 / dur as f64).clamp(0.0, 1.0);
-    let time_str = format!("{} / {}", format_duration(pos), format_duration(dur));
-    let bar_w = 12;
-    let progress = crate::ui::Render::progress_variant(ratio, bar_w, app);
-    Some(format!("{} {}", progress, time_str))
 }
 
 pub fn format_duration(secs: u64) -> String {
@@ -632,42 +804,10 @@ pub fn format_uptime(secs: f64) -> String {
     }
 }
 
-fn render_queue(app: &App) -> Option<String> {
-    let len = app.queue_cache.len();
-    if len == 0 {
-        return None;
-    }
-    let cursor = app.queue_cursor;
-    Some(format!("{}/{}", cursor + 1, len))
-}
-
-fn render_keyaction(app: &App) -> Option<String> {
-    if let Some((ref action, expires)) = app.last_action_name
-        && std::time::Instant::now() < expires
-    {
-        return Some(format!("[{}]", action));
-    }
-    None
-}
-
-fn render_backend(app: &App) -> String {
-    let name = app
-        .health_report
-        .as_ref()
-        .and_then(|h| {
-            h.components
-                .iter()
-                .find(|c| c.name == "audio_backend")
-                .and_then(|c| c.message.as_deref())
-        })
-        .unwrap_or("unknown");
-    name.to_string()
-}
-
 /// Get platform mascot/icon for the current OS.
 fn platform_icon() -> &'static str {
     // Use nerd font icons when available, fallback to emoji
-    if crate::ui::use_nerd_fonts() {
+    if use_nerd_fonts() {
         match std::env::consts::OS {
             "linux" => "\u{f17c}",   // Linux (Tux)
             "macos" => "\u{f302}",   // Apple
@@ -684,19 +824,6 @@ fn platform_icon() -> &'static str {
     }
 }
 
-fn render_system(app: &App) -> String {
-    let backend = render_backend(app);
-    format!("{} {}", platform_icon(), backend)
-}
-
-/// Render the current wall-clock time using the user's strftime-style format.
-fn render_time(app: &App) -> Option<String> {
-    if app.footer_time_format.is_empty() {
-        return None;
-    }
-    Some(Local::now().format(&app.footer_time_format).to_string())
-}
-
 pub(crate) fn read_process_memory_kb() -> Option<u64> {
     let status = std::fs::read_to_string("/proc/self/status").ok()?;
     for line in status.lines() {
@@ -711,6 +838,8 @@ pub(crate) fn read_process_memory_kb() -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use crate::theme::assert_unique_names;
 
     #[test]
     fn format_duration_hours() {
@@ -738,6 +867,7 @@ mod tests {
             FooterModule::EqPreset,
             FooterModule::SleepTimer,
             FooterModule::Notification,
+            FooterModule::Download,
         ] {
             let s = m.as_str();
             assert_eq!(FooterModule::from_str_lossy(s), Some(m));
@@ -747,7 +877,7 @@ mod tests {
 
     #[test]
     fn presets_have_unique_names() {
-        crate::theme::assert_unique_names(presets().iter().map(|p| p.name.as_ref()), "preset");
+        assert_unique_names(presets().iter().map(|p| p.name.as_ref()), "preset");
     }
 
     #[test]

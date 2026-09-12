@@ -73,6 +73,41 @@ pub struct ScrobbleConfig {
     pub min_play_pct: Option<f32>,
 }
 
+/// Default minimum play time (seconds) before a track qualifies for scrobbling.
+pub const DEFAULT_MIN_PLAY_SECS: u32 = 240;
+/// Default minimum play fraction of the total track duration for scrobbling.
+pub const DEFAULT_MIN_PLAY_PCT: f32 = 0.5;
+
+impl ScrobbleConfig {
+    pub fn min_play_secs_effective(&self) -> u32 {
+        self.min_play_secs.unwrap_or(DEFAULT_MIN_PLAY_SECS)
+    }
+
+    pub fn min_play_pct_effective(&self) -> f32 {
+        self.min_play_pct.unwrap_or(DEFAULT_MIN_PLAY_PCT)
+    }
+}
+
+/// Maximum volume, in percent (0..=MAX_VOLUME).
+pub const MAX_VOLUME: u8 = 100;
+
+/// Minimum supported playback rate (0.25×) for pitch-preserving speed.
+pub const MIN_SPEED: f32 = 0.25;
+/// Maximum supported playback rate (2.0×) for pitch-preserving speed.
+pub const MAX_SPEED: f32 = 2.0;
+/// Unity playback rate.
+pub const DEFAULT_SPEED: f32 = 1.0;
+
+/// Scale a 0..=MAX_VOLUME volume to a 0..1 ratio.
+pub fn volume_ratio(vol: u8) -> f32 {
+    vol as f32 / MAX_VOLUME as f32
+}
+
+/// Scale a 0..1 ratio back to a 0..=MAX_VOLUME volume.
+pub fn volume_from_ratio(ratio: f32) -> u8 {
+    (ratio.clamp(0.0, 1.0) * MAX_VOLUME as f32) as u8
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrossfadeConfig {
     pub enabled: bool,
@@ -90,6 +125,42 @@ impl Default for ReverbConfig {
         Self {
             enabled: false,
             room_size: 0.5,
+        }
+    }
+}
+
+/// Equalizer + audio-effect settings. `#[serde(flatten)]` keeps the on-disk
+/// and IPC wire schema flat (`eq_preset`, `eq_enabled`, ... at top level).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioSettings {
+    pub eq_preset: EqPreset,
+    pub eq_enabled: bool,
+    pub reverb: ReverbConfig,
+    pub loudness_mode: LoudnessMode,
+    pub pre_gain_db: f32,
+    /// Playback rate (0.25..=2.0, 1.0 is unity), pitch-preserving.
+    #[serde(default = "default_speed")]
+    pub speed: f32,
+    /// Active output device name (`None` = system default). Applied (and
+    /// reset on failure) by the daemon; device switching restarts output.
+    #[serde(default)]
+    pub audio_device: Option<String>,
+}
+
+fn default_speed() -> f32 {
+    1.0
+}
+
+impl Default for AudioSettings {
+    fn default() -> Self {
+        Self {
+            eq_preset: EqPreset::Flat,
+            eq_enabled: true,
+            reverb: ReverbConfig::default(),
+            loudness_mode: LoudnessMode::Off,
+            pre_gain_db: 0.0,
+            speed: 1.0,
+            audio_device: None,
         }
     }
 }
@@ -118,12 +189,17 @@ pub struct DaemonState {
     pub current_track: Option<TrackInfo>,
     pub time_pos: f64,
     pub duration: f64,
+    /// Live `StreamTitle` reported by the current ICY/Shoutcast stream via
+    /// `radio://` (or a direct `http(s)://`) playback. `None` while a local
+    /// file, podcast, or non-metadata stream is active.
+    #[serde(default)]
+    pub radio_title: Option<String>,
     pub sleep_timer: Option<u32>,
-    pub eq_preset: EqPreset,
-    pub eq_enabled: bool,
-    pub reverb: ReverbConfig,
-    pub loudness_mode: LoudnessMode,
-    pub pre_gain_db: f32,
+    /// Low-power mode: pauses playback and suspends background work.
+    #[serde(default)]
+    pub low_power: bool,
+    #[serde(flatten)]
+    pub audio: AudioSettings,
     pub gapless: bool,
     pub dynamic_mode: DynamicModeConfig,
     pub scrobble: ScrobbleConfig,
@@ -448,11 +524,8 @@ pub struct SavedState {
     pub shuffle: bool,
     pub mute: bool,
     pub crossfade: Option<CrossfadeConfig>,
-    pub eq_preset: EqPreset,
-    pub eq_enabled: bool,
-    pub reverb: ReverbConfig,
-    pub loudness_mode: LoudnessMode,
-    pub pre_gain_db: f32,
+    #[serde(flatten)]
+    pub audio: AudioSettings,
     pub gapless: bool,
     pub dynamic_mode: DynamicModeConfig,
     pub scrobble: ScrobbleConfig,
@@ -469,11 +542,7 @@ impl SavedState {
             shuffle: state.shuffle,
             mute: state.mute,
             crossfade: state.crossfade.clone(),
-            eq_preset: state.eq_preset,
-            eq_enabled: state.eq_enabled,
-            reverb: state.reverb.clone(),
-            loudness_mode: state.loudness_mode,
-            pre_gain_db: state.pre_gain_db,
+            audio: state.audio.clone(),
             gapless: state.gapless,
             dynamic_mode: state.dynamic_mode.clone(),
             scrobble: state.scrobble.clone(),
@@ -489,11 +558,7 @@ impl SavedState {
         state.shuffle = self.shuffle;
         state.mute = self.mute;
         state.crossfade = self.crossfade.clone();
-        state.eq_preset = self.eq_preset;
-        state.eq_enabled = self.eq_enabled;
-        state.reverb = self.reverb.clone();
-        state.loudness_mode = self.loudness_mode;
-        state.pre_gain_db = self.pre_gain_db;
+        state.audio = self.audio.clone();
         state.gapless = self.gapless;
         state.dynamic_mode = self.dynamic_mode.clone();
         state.scrobble = self.scrobble.clone();

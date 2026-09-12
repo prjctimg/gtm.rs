@@ -17,6 +17,7 @@ use gtm_core::global::{EQ_DEFAULT_Q, EQ_FREQUENCIES};
 
 use crate::buffer::{DecodeControl, SharedRingBuffer};
 use crate::eq::EqGains;
+use crate::stretch::{SpeedControl, TimeStretchSource};
 use crate::symphonia::SymphoniaSource;
 
 // ---------------------------------------------------------------------------
@@ -159,6 +160,52 @@ impl SpectrumAnalyzer {
 }
 
 // ---------------------------------------------------------------------------
+// Thread priority: protect the decode thread from CPU-bound siblings
+// ---------------------------------------------------------------------------
+
+/// Best-effort bump of the current thread above the CFS default so a busy
+/// desktop (rendering, builds, the network stack) can't preempt decoding.
+/// Tries SCHED_FIFO first (needs CAP_SYS_NICE / rtkit), then SCHED_RR, then
+/// a moderated nice value.  All failures are intentional and ignored — this
+/// is an optimization, never a requirement.
+#[cfg(target_os = "linux")]
+fn boost_thread_priority() {
+    unsafe {
+        // glibc exposes only `sched_priority` (private rest), while musl
+        // exposes the POSIX sporadic-scheduling fields too — zero-initialise
+        // so the literal works on every libc variant.
+        let mut param: libc::sched_param = std::mem::zeroed();
+        param.sched_priority = 1;
+        let allowed_sched = [
+            libc::SCHED_FIFO,
+            libc::SCHED_RR,
+            libc::sched_getscheduler(0),
+        ];
+        for sched in allowed_sched {
+            if libc::pthread_setschedparam(libc::pthread_self(), sched, &param) == 0 {
+                return;
+            }
+        }
+        // SCHED_OTHER twist: keep the thread out of the top of the CFS queue;
+        // lowering below the parent's nice needs privilege, but nudging the
+        // process doesn't hurt when permitted.
+        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+    }
+}
+
+// Other unix platforms (macOS, BSDs): sched_param/FIFO/RR are Linux-only, so
+// fall back to a nice-value nudge.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn boost_thread_priority() {
+    unsafe {
+        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+    }
+}
+
+#[cfg(not(unix))]
+fn boost_thread_priority() {}
+
+// ---------------------------------------------------------------------------
 // DecodeThread owns a dedicated std::thread
 // ---------------------------------------------------------------------------
 
@@ -170,6 +217,7 @@ pub struct DecodeThread {
     eq_enabled: Arc<AtomicBool>,
     reverb_enabled: Arc<AtomicBool>,
     reverb_room_size: Arc<Mutex<f32>>,
+    speed: SpeedControl,
     spectrum: Arc<Mutex<Vec<f32>>>,
     prebuffer_samples: usize,
 }
@@ -184,6 +232,7 @@ impl DecodeThread {
         eq_enabled: Arc<AtomicBool>,
         reverb_enabled: Arc<AtomicBool>,
         reverb_room_size: Arc<Mutex<f32>>,
+        speed: SpeedControl,
         spectrum: Arc<Mutex<Vec<f32>>>,
         prebuffer_samples: usize,
     ) -> Self {
@@ -195,6 +244,7 @@ impl DecodeThread {
             eq_enabled,
             reverb_enabled,
             reverb_room_size,
+            speed,
             spectrum,
             prebuffer_samples,
         }
@@ -203,7 +253,10 @@ impl DecodeThread {
     pub fn spawn(self) -> Result<JoinHandle<()>, String> {
         std::thread::Builder::new()
             .name("gtm-decode".into())
-            .spawn(move || self.run())
+            .spawn(move || {
+                boost_thread_priority();
+                self.run()
+            })
             .map_err(|e| format!("failed to spawn decode thread: {e}"))
     }
 }
@@ -267,7 +320,7 @@ impl DecodeThread {
 
             // Decode loop: read from SymphoniaSource, process, write to ring buffer
             // Use an explicit loop over the iterator so we can check seek/running flags.
-            let mut source_iter = raw;
+            let mut source_iter = TimeStretchSource::new(raw, self.speed.clone());
 
             loop {
                 // Check for stop
@@ -358,8 +411,8 @@ impl DecodeThread {
                                         let (out_l, out_r) =
                                             rev.process_stereo(eq_sample, right_eq);
                                         // Write left now, push right to ring buffer
-                                        self.shared.push_blocking(out_l);
-                                        self.shared.push_blocking(out_r);
+                                        self.shared.push_blocking(out_l, &self.control.running);
+                                        self.shared.push_blocking(out_r, &self.control.running);
                                         sample_count += 1;
                                         prebuffer_check(
                                             &self.shared,
@@ -369,8 +422,8 @@ impl DecodeThread {
                                         );
                                         continue; // both channels written
                                     } else {
-                                        self.shared.push_blocking(eq_sample);
-                                        self.shared.push_blocking(right_eq);
+                                        self.shared.push_blocking(eq_sample, &self.control.running);
+                                        self.shared.push_blocking(right_eq, &self.control.running);
                                         sample_count += 1;
                                         prebuffer_check(
                                             &self.shared,
@@ -382,7 +435,7 @@ impl DecodeThread {
                                     }
                                 }
                                 None => {
-                                    self.shared.push_blocking(eq_sample);
+                                    self.shared.push_blocking(eq_sample, &self.control.running);
                                     self.shared.set_finished(true);
                                     self.control.ready.store(true, Ordering::Release);
                                     return;
@@ -404,7 +457,8 @@ impl DecodeThread {
                     eq_sample
                 };
 
-                self.shared.push_blocking(final_sample);
+                self.shared
+                    .push_blocking(final_sample, &self.control.running);
                 sample_count += 1;
 
                 // Accumulate (decimated) samples for spectrum analysis.

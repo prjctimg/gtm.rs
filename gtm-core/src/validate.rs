@@ -5,8 +5,8 @@
 // This is free software released under the GPL-3.0 license.
 
 use crate::global::{
-    CrossfadeConfig, DaemonState, DynamicModeConfig, LoudnessMode, PlaybackStatus, RepeatMode,
-    ReverbConfig, ScrobbleConfig,
+    AudioSettings, CrossfadeConfig, DaemonState, DynamicModeConfig, PlaybackStatus, RepeatMode,
+    ScrobbleConfig,
 };
 use crate::track::TrackInfo;
 
@@ -35,19 +35,17 @@ impl DaemonState {
             repeat: RepeatMode::Off,
             shuffle: false,
             mute: false,
-            crossfade: Some(crate::global::CrossfadeConfig {
+            crossfade: Some(CrossfadeConfig {
                 enabled: true,
                 duration_secs: 6,
             }),
             current_track: None,
             time_pos: 0.0,
             duration: 0.0,
+            radio_title: None,
             sleep_timer: None,
-            eq_preset: crate::global::EqPreset::Flat,
-            eq_enabled: true,
-            reverb: ReverbConfig::default(),
-            loudness_mode: LoudnessMode::Off,
-            pre_gain_db: 0.0,
+            low_power: false,
+            audio: AudioSettings::default(),
             gapless: false,
             dynamic_mode: DynamicModeConfig::default(),
             scrobble: ScrobbleConfig::default(),

@@ -16,14 +16,24 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 
 use crate::CoreError;
 use crate::Result;
-use crate::global::{DaemonState, EqPreset, PlaybackStatus, RepeatMode, YTFilter};
+use crate::global::{DaemonState, EqPreset, LoudnessMode, PlaybackStatus, RepeatMode, YTFilter};
 use crate::ipc::{
-    CacheKind, DaemonEvent, DaemonReq, DaemonRes, LibraryAction, MetadataPatch, PROTOCOL_VERSION,
-    QueueAction, SyncKind, WireReq, WireRes,
+    CacheKind, DaemonEvent, DaemonReq, DaemonRes, HealthReport, LibraryAction, MetadataPatch,
+    PROTOCOL_VERSION, QueueAction, SyncKind, WireReq, WireRes,
 };
+use crate::log::log;
+use crate::playlist::PlaylistFormatKind;
+use crate::podcast::{PodcastEpisode, PodcastFeed, PodcastStatus};
+use crate::radio::{RadioCountry, RadioStation, RadioTag};
 use crate::spotify::{SpotifyPlaylist, SpotifyStatus, SpotifyTrack};
+use crate::subsonic::{SubsonicAlbum, SubsonicSearchResults, SubsonicStatus, SubsonicTrack};
 use crate::track;
 use crate::wire;
+
+/// Map a response that did not match the awaited variant into an error.
+fn unexpected(res: &DaemonRes) -> CoreError {
+    CoreError::Daemon(format!("unexpected response: {res:?}"))
+}
 
 /// Snapshot of a background library sync operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -78,7 +88,6 @@ impl DaemonClient {
                         consecutive_failures: 0,
                         pending: HashMap::new(),
                         next_id: 0,
-                        handshake_sent: false,
                         authenticated: Arc::new(AtomicBool::new(false)),
                     };
                     // Spawn worker before constructing the client handle so
@@ -252,6 +261,22 @@ impl DaemonClient {
         }
     }
 
+    /// Send a request whose response is expected to be `DaemonRes::Playlists`
+    /// (e.g. `CreatePlaylist`, `ImportPlaylist`). Returns the created/imported
+    /// playlists so callers can attach tracks without a second round-trip.
+    async fn send_playlists(&self, req: DaemonReq) -> Result<Vec<track::Playlist>> {
+        let cmd = req.cmd_name().to_string();
+        match self.send_raw(req).await? {
+            DaemonRes::Playlists { playlists } => Ok(playlists),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            other => {
+                let msg = format!("unexpected response to {cmd}: {other:?}");
+                tracing::warn!("{msg}");
+                Err(CoreError::Daemon(msg))
+            }
+        }
+    }
+
     // ─── Playback ───
 
     pub async fn play(&self, path: &str, start_pos: f64) -> Result<()> {
@@ -260,6 +285,11 @@ impl DaemonClient {
             start_pos,
         })
         .await
+    }
+
+    pub async fn play_stream(&self, url: &str) -> Result<()> {
+        self.send_ok(DaemonReq::PlayStream { url: url.into() })
+            .await
     }
 
     pub async fn play_pause(&self) -> Result<()> {
@@ -317,6 +347,58 @@ impl DaemonClient {
             .await
     }
 
+    /// Set pitch-preserving playback rate (clamped to 0.25..=2.0 by the daemon).
+    pub async fn set_speed(&self, rate: f32) -> Result<()> {
+        self.send_ok(DaemonReq::SetSpeed { rate }).await
+    }
+
+    /// Current pitch-preserving playback rate.
+    pub async fn speed(&self) -> Result<f32> {
+        match self.send_raw(DaemonReq::GetSpeed).await? {
+            DaemonRes::Value { value } => {
+                Ok(value.get("speed").and_then(|v| v.as_f64()).unwrap_or(1.0) as f32)
+            }
+            _ => Err(CoreError::Daemon("unexpected response to get_speed".into())),
+        }
+    }
+
+    /// Current low-power mode flag.
+    pub async fn low_power(&self) -> Result<bool> {
+        match self.send_raw(DaemonReq::GetLowPower).await? {
+            DaemonRes::Value { value } => Ok(value
+                .get("low_power")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)),
+            _ => Err(CoreError::Daemon(
+                "unexpected response to get_low_power".into(),
+            )),
+        }
+    }
+
+    /// List available output device names.
+    pub async fn list_audio_devices(&self) -> Result<Vec<String>> {
+        match self.send_raw(DaemonReq::ListAudioDevices).await? {
+            DaemonRes::Value { value } => Ok(value
+                .get("devices")
+                .and_then(|v| v.as_array())
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(String::from))
+                        .collect()
+                })
+                .unwrap_or_default()),
+            _ => Err(CoreError::Daemon(
+                "unexpected response to list_audio_devices".into(),
+            )),
+        }
+    }
+
+    /// Switch the active output device (`None` restores the system default).
+    /// This stops playback and restarts the audio output.
+    pub async fn set_audio_device(&self, name: Option<String>) -> Result<()> {
+        self.send_ok(DaemonReq::SetAudioDevice { name }).await
+    }
+
     /// Switch the live cover-art provider used by the daemon without a
     /// restart. The TUI persists the choice in config.toml separately.
     pub async fn set_cover_provider(&self, provider: &str) -> Result<()> {
@@ -334,7 +416,7 @@ impl DaemonClient {
         .await
     }
 
-    pub async fn set_loudness_mode(&self, mode: crate::global::LoudnessMode) -> Result<()> {
+    pub async fn set_loudness_mode(&self, mode: LoudnessMode) -> Result<()> {
         self.send_ok(DaemonReq::SetLoudnessMode { mode }).await
     }
 
@@ -395,6 +477,10 @@ impl DaemonClient {
         self.send_ok(DaemonReq::CancelSleepTimer).await
     }
 
+    pub async fn set_low_power(&self, enabled: bool) -> Result<()> {
+        self.send_ok(DaemonReq::SetLowPower { enabled }).await
+    }
+
     pub async fn clear_cache(&self, what: CacheKind) -> Result<()> {
         self.send_ok(DaemonReq::ClearCache { what }).await
     }
@@ -426,6 +512,22 @@ impl DaemonClient {
         Spotify { client: self }
     }
 
+    pub fn subsonic(&self) -> Subsonic<'_> {
+        Subsonic { client: self }
+    }
+
+    pub fn podcast(&self) -> Podcast<'_> {
+        Podcast { client: self }
+    }
+
+    pub fn radio(&self) -> Radio<'_> {
+        Radio { client: self }
+    }
+
+    pub fn lastfm(&self) -> Lastfm<'_> {
+        Lastfm { client: self }
+    }
+
     pub fn favourites(&self) -> Favourites<'_> {
         Favourites { client: self }
     }
@@ -445,7 +547,7 @@ impl DaemonClient {
         match res {
             DaemonRes::Status { state, .. } => Ok(*state),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 
@@ -454,7 +556,7 @@ impl DaemonClient {
         match res {
             DaemonRes::Pong => Ok(()),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 
@@ -462,12 +564,12 @@ impl DaemonClient {
         self.send_ok(DaemonReq::Quit).await
     }
 
-    pub async fn check_health(&self) -> Result<crate::ipc::HealthReport> {
+    pub async fn check_health(&self) -> Result<HealthReport> {
         let res = self.send_raw(DaemonReq::CheckHealth).await?;
         match res {
             DaemonRes::HealthReport { report, .. } => Ok(*report),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 }
@@ -582,9 +684,9 @@ impl<'a> Library<'a> {
             .await
     }
 
-    pub async fn create_playlist(&self, name: &str) -> Result<()> {
+    pub async fn create_playlist(&self, name: &str) -> Result<Vec<track::Playlist>> {
         self.client
-            .send_ok(DaemonReq::Library {
+            .send_playlists(DaemonReq::Library {
                 action: LibraryAction::CreatePlaylist { name: name.into() },
             })
             .await
@@ -609,20 +711,33 @@ impl<'a> Library<'a> {
             .await
     }
 
-    pub async fn import_m3u(&self, path: &str) -> Result<()> {
+    pub async fn import_playlist(
+        &self,
+        path: &str,
+        format: PlaylistFormatKind,
+    ) -> Result<Vec<track::Playlist>> {
         self.client
-            .send_ok(DaemonReq::Library {
-                action: LibraryAction::ImportM3u { path: path.into() },
+            .send_playlists(DaemonReq::Library {
+                action: LibraryAction::ImportPlaylist {
+                    path: path.into(),
+                    format,
+                },
             })
             .await
     }
 
-    pub async fn export_m3u(&self, playlist_id: i64, path: &str) -> Result<()> {
+    pub async fn export_playlist(
+        &self,
+        playlist_id: i64,
+        path: &str,
+        format: PlaylistFormatKind,
+    ) -> Result<()> {
         self.client
             .send_ok(DaemonReq::Library {
-                action: LibraryAction::ExportM3u {
+                action: LibraryAction::ExportPlaylist {
                     playlist_id,
                     path: path.into(),
+                    format,
                 },
             })
             .await
@@ -701,6 +816,40 @@ impl<'a> Library<'a> {
             .await
     }
 
+    pub async fn playlist_dedup(&self, playlist_id: i64) -> Result<u64> {
+        self.library_removed_count(LibraryAction::PlaylistDedup { playlist_id })
+            .await
+    }
+
+    pub async fn playlist_doctor(&self, playlist_id: i64) -> Result<u64> {
+        self.library_removed_count(LibraryAction::PlaylistDoctor { playlist_id })
+            .await
+    }
+
+    pub async fn playlist_sort(&self, playlist_id: i64, field: &str) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::Library {
+                action: LibraryAction::PlaylistSort {
+                    playlist_id,
+                    field: field.into(),
+                },
+            })
+            .await
+    }
+
+    /// Send a library action that returns a `{ "removed": n }` value,
+    /// extracting `n`.
+    async fn library_removed_count(&self, action: LibraryAction) -> Result<u64> {
+        match self.client.send_raw(DaemonReq::Library { action }).await? {
+            DaemonRes::Value { value } => {
+                Ok(value.get("removed").and_then(|v| v.as_u64()).unwrap_or(0))
+            }
+            other => Err(CoreError::Daemon(format!(
+                "unexpected response to playlist action: {other:?}"
+            ))),
+        }
+    }
+
     pub async fn remove_track(&self, id: i64) -> Result<()> {
         self.client
             .send_ok(DaemonReq::Library {
@@ -744,6 +893,57 @@ impl<'a> Yt<'a> {
         self.client
             .send_raw(DaemonReq::YtResolveStream { url: url.into() })
             .await
+    }
+
+    /// Start a daemon-side yt-dlp download of `url`. Returns a download ID to
+    /// poll with [`Yt::download_poll`].
+    pub async fn download(
+        &self,
+        url: String,
+        title: Option<String>,
+        channel: Option<String>,
+    ) -> Result<u64> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::YtDownload {
+                url,
+                title,
+                channel,
+            })
+            .await?;
+        match res {
+            DaemonRes::Value { value } => value
+                .get("id")
+                .and_then(|v| v.as_u64())
+                .ok_or_else(|| CoreError::Daemon("missing download id".into())),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    /// Poll progress of the current daemon-side download.
+    pub async fn download_poll(&self) -> Result<DaemonRes> {
+        self.client.send_raw(DaemonReq::YtDownloadPoll).await
+    }
+
+    /// Cancel the current daemon-side download.
+    pub async fn cancel_download(&self, url: String) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::YtCancelDownload { url })
+            .await
+    }
+
+    /// Start a daemon-side yt-dlp flat-playlist fetch of `url`. Entries are
+    /// collected with [`Yt::fetch_playlist_poll`].
+    pub async fn fetch_playlist(&self, url: &str) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::YtFetchPlaylist { url: url.into() })
+            .await
+    }
+
+    /// Poll for a finished playlist fetch.
+    pub async fn fetch_playlist_poll(&self) -> Result<DaemonRes> {
+        self.client.send_raw(DaemonReq::YtFetchPlaylistPoll).await
     }
 
     pub async fn set_config(
@@ -798,7 +998,7 @@ impl<'a> Spotify<'a> {
         match res {
             DaemonRes::SpotifyOauthStarted { url } => Ok(url),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 
@@ -836,7 +1036,7 @@ impl<'a> Spotify<'a> {
         match res {
             DaemonRes::SpotifyPlaylistsRes { playlists, .. } => Ok(playlists),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 
@@ -849,7 +1049,7 @@ impl<'a> Spotify<'a> {
         match res {
             DaemonRes::SpotifyTracksRes { tracks, .. } => Ok(tracks),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 
@@ -875,29 +1075,460 @@ impl<'a> Spotify<'a> {
         match res {
             DaemonRes::SpotifyTracksRes { tracks, .. } => Ok(tracks),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 
-    /// Resolve a Spotify track (by metadata) to a playable local stream via
-    /// YouTube search and append it to the user queue.
-    pub async fn resolve_track(&self, name: &str, artists: &str, album: &str) -> Result<()> {
+    /// Resolve a Spotify track (by metadata) to a playable stream and append
+    /// it to the user queue. With a known `spotify:track:` URI on a Premium
+    /// account the track streams natively via librespot instead of a YouTube
+    /// match.
+    pub async fn resolve_track(
+        &self,
+        name: &str,
+        artists: &str,
+        album: &str,
+        uri: Option<String>,
+    ) -> Result<()> {
         self.client
             .send_ok(DaemonReq::SpotifyResolveTrack {
                 name: name.into(),
                 artists: artists.into(),
                 album: album.into(),
+                uri,
             })
             .await
+    }
+
+    /// Play every track of a synced Spotify playlist. With `shuffle` the
+    /// track order is randomised before enqueueing (i.e. dash `S`).
+    pub async fn play_all(&self, playlist_id: &str, shuffle: bool) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::SpotifyPlayAll {
+                playlist_id: playlist_id.into(),
+                shuffle,
+            })
+            .await
+    }
+
+    /// Fetch the raw bytes of a Spotify album-cover URL as base64, so the
+    /// client can render it without proxying through Spotify's CDN itself.
+    pub async fn track_image(&self, image_url: &str) -> Result<Option<String>> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::SpotifyTrackImage {
+                image_url: image_url.into(),
+            })
+            .await?;
+        match res {
+            DaemonRes::SpotifyImageRes { data, .. } => Ok(data),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
     }
 
     fn status_from(res: DaemonRes) -> Result<SpotifyStatus> {
         match res {
             DaemonRes::SpotifyStatusRes { status, .. } => Ok(status),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
+}
+
+/// Client helpers for the Navidrome/Subsonic server integration.
+pub struct Subsonic<'a> {
+    client: &'a DaemonClient,
+}
+
+impl<'a> Subsonic<'a> {
+    /// Validate and persist the server configuration. Returns the new status.
+    pub async fn configure(
+        &self,
+        server: &str,
+        username: &str,
+        password: &str,
+    ) -> Result<SubsonicStatus> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::SubsonicConfigure {
+                server: server.into(),
+                username: username.into(),
+                password: password.into(),
+            })
+            .await?;
+        match res {
+            DaemonRes::SubsonicStatusRes { status, .. } => Ok(status),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn clear(&self) -> Result<()> {
+        self.client.send_ok(DaemonReq::SubsonicClear).await
+    }
+
+    pub async fn status(&self) -> Result<SubsonicStatus> {
+        let res = self.client.send_raw(DaemonReq::SubsonicStatus).await?;
+        match res {
+            DaemonRes::SubsonicStatusRes { status, .. } => Ok(status),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn ping(&self) -> Result<()> {
+        let res = self.client.send_raw(DaemonReq::SubsonicPing).await?;
+        match res {
+            DaemonRes::SubsonicPingRes { .. } => Ok(()),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn search(&self, query: &str) -> Result<SubsonicSearchResults> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::SubsonicSearch {
+                query: query.into(),
+            })
+            .await?;
+        match res {
+            DaemonRes::SubsonicSearchRes { results, .. } => Ok(results),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn albums(&self, offset: u64, size: u64) -> Result<Vec<SubsonicAlbum>> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::SubsonicAlbums { offset, size })
+            .await?;
+        match res {
+            DaemonRes::SubsonicAlbumsRes { albums, .. } => Ok(albums),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn album_tracks(&self, album_id: &str) -> Result<Vec<SubsonicTrack>> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::SubsonicAlbumTracks {
+                album_id: album_id.into(),
+            })
+            .await?;
+        match res {
+            DaemonRes::SubsonicTracksRes { tracks, .. } => Ok(tracks),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn play(&self, track: &SubsonicTrack) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::SubsonicPlay {
+                track_id: track.id.clone(),
+                title: track.title.clone(),
+                artist: track.artist.clone(),
+                album: track.album.clone(),
+                duration_secs: Some(track.duration_secs),
+                cover_url: None,
+            })
+            .await
+    }
+
+    /// Enqueue every track of an album and play the first.
+    pub async fn play_album(&self, album_id: &str) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::SubsonicPlayAlbum {
+                album_id: album_id.into(),
+            })
+            .await
+    }
+
+    /// Base64 cover art for a track (used by the picker preview).
+    pub async fn cover(&self, track_id: &str) -> Result<Option<String>> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::SubsonicCover {
+                track_id: track_id.into(),
+            })
+            .await?;
+        match res {
+            DaemonRes::SpotifyImageRes { data, .. } => Ok(data),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+}
+
+/// Client helpers for podcast subscriptions and episodes.
+pub struct Podcast<'a> {
+    client: &'a DaemonClient,
+}
+
+impl<'a> Podcast<'a> {
+    pub async fn add_feed(&self, url: &str) -> Result<Vec<PodcastFeed>> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::PodcastAddFeed { url: url.into() })
+            .await?;
+        match res {
+            DaemonRes::PodcastFeedsRes { feeds, .. } => Ok(feeds),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn remove_feed(&self, feed_id: &str) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::PodcastRemoveFeed {
+                feed_id: feed_id.into(),
+            })
+            .await
+    }
+
+    pub async fn feeds(&self) -> Result<Vec<PodcastFeed>> {
+        let res = self.client.send_raw(DaemonReq::PodcastFeeds).await?;
+        match res {
+            DaemonRes::PodcastFeedsRes { feeds, .. } => Ok(feeds),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn episodes(&self, feed_id: &str) -> Result<(String, Vec<PodcastEpisode>)> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::PodcastEpisodes {
+                feed_id: feed_id.into(),
+            })
+            .await?;
+        match res {
+            DaemonRes::PodcastEpisodesRes {
+                feed_title,
+                episodes,
+                ..
+            } => Ok((feed_title, episodes)),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn refresh(&self, feed_id: Option<&str>) -> Result<usize> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::PodcastRefresh {
+                feed_id: feed_id.map(|s| s.to_string()),
+            })
+            .await?;
+        match res {
+            DaemonRes::PodcastFeedsRes { feeds, .. } => Ok(feeds.len()),
+            DaemonRes::Value { value } => {
+                Ok(value.get("refreshed").and_then(|v| v.as_u64()).unwrap_or(0) as usize)
+            }
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn status(&self) -> Result<PodcastStatus> {
+        let res = self.client.send_raw(DaemonReq::PodcastStatus).await?;
+        match res {
+            DaemonRes::PodcastStatusRes { status, .. } => Ok(status),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn play(&self, feed_id: &str, episode_index: usize) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::PodcastPlay {
+                feed_id: feed_id.into(),
+                episode_index,
+            })
+            .await
+    }
+}
+
+/// Client helpers for the Radio Browser directory.
+pub struct Radio<'a> {
+    client: &'a DaemonClient,
+}
+
+impl<'a> Radio<'a> {
+    pub async fn search(&self, query: &str, limit: u16) -> Result<Vec<RadioStation>> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::RadioSearch {
+                query: query.into(),
+                limit,
+            })
+            .await?;
+        match res {
+            DaemonRes::RadioStationsRes { stations, .. } => Ok(stations),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn top(&self, limit: u16) -> Result<Vec<RadioStation>> {
+        let res = self.client.send_raw(DaemonReq::RadioTop { limit }).await?;
+        match res {
+            DaemonRes::RadioStationsRes { stations, .. } => Ok(stations),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn play(&self, station_id: &str, station_name: &str) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::RadioPlay {
+                station_id: station_id.into(),
+                station_name: station_name.into(),
+            })
+            .await
+    }
+
+    pub async fn tags(&self, limit: u16) -> Result<Vec<RadioTag>> {
+        let res = self.client.send_raw(DaemonReq::RadioTags { limit }).await?;
+        match res {
+            DaemonRes::RadioTagsRes { tags, .. } => Ok(tags),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn countries(&self, limit: u16) -> Result<Vec<RadioCountry>> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::RadioCountries { limit })
+            .await?;
+        match res {
+            DaemonRes::RadioCountriesRes { countries, .. } => Ok(countries),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn stations_by_tag(&self, tag: &str, limit: u16) -> Result<Vec<RadioStation>> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::RadioByTag {
+                tag: tag.into(),
+                limit,
+            })
+            .await?;
+        match res {
+            DaemonRes::RadioStationsRes { stations, .. } => Ok(stations),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    pub async fn stations_by_country(
+        &self,
+        country: &str,
+        limit: u16,
+    ) -> Result<Vec<RadioStation>> {
+        let res = self
+            .client
+            .send_raw(DaemonReq::RadioByCountry {
+                country: country.into(),
+                limit,
+            })
+            .await?;
+        match res {
+            DaemonRes::RadioStationsRes { stations, .. } => Ok(stations),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+}
+
+/// Last.fm scrobbling configuration and web-auth flow.
+pub struct Lastfm<'a> {
+    client: &'a DaemonClient,
+}
+
+impl<'a> Lastfm<'a> {
+    /// Persist API credentials, optionally enable scrobbling, and (re)initialize
+    /// the daemon-side manager. Blank key/secret/session values keep whatever
+    /// is already configured or stored in the keychain.
+    pub async fn set_config(
+        &self,
+        enabled: bool,
+        api_key: Option<String>,
+        api_secret: Option<String>,
+        session_key: Option<String>,
+        min_play_secs: Option<u32>,
+        min_play_pct: Option<f32>,
+    ) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::LastfmSetConfig {
+                enabled,
+                api_key,
+                api_secret,
+                session_key,
+                min_play_secs,
+                min_play_pct,
+            })
+            .await
+    }
+
+    /// Authorization URL the user opens to grant gtm access to their account.
+    pub async fn auth_url(&self) -> Result<String> {
+        let res = self.client.send_raw(DaemonReq::LastfmAuthUrl).await?;
+        match res {
+            DaemonRes::LastfmAuthUrlRes { url } => Ok(url),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    /// Exchange a web-auth token for a (persisted) session key.
+    pub async fn authenticate(&self, token: &str) -> Result<()> {
+        self.client
+            .send_ok(DaemonReq::LastfmAuthenticate {
+                token: token.into(),
+            })
+            .await
+    }
+
+    pub async fn status(&self) -> Result<LastfmStatus> {
+        let res = self.client.send_raw(DaemonReq::LastfmStatus).await?;
+        match res {
+            DaemonRes::LastfmStatusRes {
+                enabled,
+                api_key,
+                session_token,
+                ready,
+            } => Ok(LastfmStatus {
+                enabled,
+                api_key,
+                session_token,
+                ready,
+            }),
+            DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
+            _ => Err(unexpected(&res)),
+        }
+    }
+
+    /// Unlink the account: clear the session and stored API credentials.
+    pub async fn clear(&self) -> Result<()> {
+        self.client.send_ok(DaemonReq::LastfmClear).await
+    }
+}
+
+/// Last.fm configuration and link state.
+#[derive(Debug, Clone)]
+pub struct LastfmStatus {
+    pub enabled: bool,
+    pub api_key: Option<String>,
+    pub session_token: Option<String>,
+    pub ready: bool,
 }
 
 pub struct Favourites<'a> {
@@ -946,7 +1577,7 @@ impl<'a> Art<'a> {
         match res {
             DaemonRes::CoverArt { data, .. } => Ok(data),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 
@@ -958,7 +1589,7 @@ impl<'a> Art<'a> {
         match res {
             DaemonRes::CoverArt { data, .. } => Ok(data),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 }
@@ -979,7 +1610,7 @@ impl<'a> Lyrics<'a> {
         match res {
             DaemonRes::Lyrics { lyrics, .. } => Ok(lyrics),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 
@@ -995,7 +1626,7 @@ impl<'a> Lyrics<'a> {
         match res {
             DaemonRes::Lyrics { lyrics, .. } => Ok(lyrics),
             DaemonRes::Error { message, .. } => Err(CoreError::Daemon(message)),
-            _ => Err(CoreError::Daemon(format!("unexpected response: {res:?}"))),
+            _ => Err(unexpected(&res)),
         }
     }
 }
@@ -1012,7 +1643,6 @@ struct IpcWorker {
     consecutive_failures: u32,
     pending: HashMap<u64, (String, oneshot::Sender<Result<DaemonRes>>)>,
     next_id: u64,
-    handshake_sent: bool,
     authenticated: Arc<AtomicBool>,
 }
 
@@ -1028,7 +1658,7 @@ impl IpcWorker {
             if self.last_heartbeat_at.lock().unwrap().elapsed()
                 > Duration::from_secs(HEARTBEAT_TIMEOUT_SECS)
             {
-                crate::log::log(&format!(
+                log(&format!(
                     "IPC worker: no heartbeat for {}s, forcing reconnect",
                     HEARTBEAT_TIMEOUT_SECS,
                 ));
@@ -1044,7 +1674,7 @@ impl IpcWorker {
             if self.last_event_time.elapsed() > Duration::from_secs(30) {
                 self.consecutive_failures += 1;
                 if self.consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
-                    crate::log::log(&format!(
+                    log(&format!(
                         "IPC worker: no events for 30s ({} consecutive), forcing reconnect",
                         self.consecutive_failures
                     ));
@@ -1052,7 +1682,7 @@ impl IpcWorker {
                     self.reconnect().await;
                     self.consecutive_failures = 0;
                 } else {
-                    crate::log::log(&format!(
+                    log(&format!(
                         "IPC worker: no events for 30s ({}/{} failures), waiting",
                         self.consecutive_failures, MAX_CONSECUTIVE_FAILURES
                     ));
@@ -1070,7 +1700,7 @@ impl IpcWorker {
                 let id = self.next_id;
                 self.next_id = self.next_id.wrapping_add(1);
                 if let Err(e) = self.send_request_by_id(id, &pending).await {
-                    crate::log::log(&format!("IPC worker send error: {e}"));
+                    log(&format!("IPC worker send error: {e}"));
                     if let Some(tx) = pending.response_tx {
                         let _ = tx.send(Err(CoreError::Daemon("send failed".into())));
                     }
@@ -1089,7 +1719,7 @@ impl IpcWorker {
                 && let Err(e) =
                     tokio::time::timeout(Duration::from_secs(5), self.writer.flush()).await
             {
-                crate::log::log(&format!("IPC worker flush error: {e}"));
+                log(&format!("IPC worker flush error: {e}"));
                 self.fail_all_pending("flush failed");
                 self.reconnect().await;
                 continue;
@@ -1106,7 +1736,7 @@ impl IpcWorker {
                 }
                 Ok(false) => {} // timeout, loop back to check for requests
                 Err(e) => {
-                    crate::log::log(&format!("IPC worker read error: {e}"));
+                    log(&format!("IPC worker read error: {e}"));
                     self.fail_all_pending("read error");
                     self.reconnect().await;
                     continue;
@@ -1136,20 +1766,17 @@ impl IpcWorker {
                     self.pending.clear();
                     self.next_id = 0;
                     self.connected.store(true, Ordering::Release);
-                    crate::log::log(&format!("IPC worker reconnected after {attempt} attempts"));
-                    self.handshake_sent = false;
+                    log(&format!("IPC worker reconnected after {attempt} attempts"));
                     self.authenticated.store(false, Ordering::Release);
                     if let Err(e) = self.post_reconnect_handshake().await {
-                        crate::log::log(&format!(
-                            "IPC worker post-reconnect handshake failed: {e}"
-                        ));
+                        log(&format!("IPC worker post-reconnect handshake failed: {e}"));
                     }
                     return;
                 }
                 Err(e) => {
                     attempt += 1;
                     if attempt.is_multiple_of(10) {
-                        crate::log::log(&format!(
+                        log(&format!(
                             "IPC worker reconnect attempt {attempt} failed: {e}"
                         ));
                     }
@@ -1209,10 +1836,9 @@ impl IpcWorker {
 
         match wire_res.ok {
             Some(true) => {
-                self.handshake_sent = true;
                 self.authenticated.store(true, Ordering::Release);
                 *self.last_heartbeat_at.lock().unwrap() = Instant::now();
-                crate::log::log("IPC worker post-reconnect handshake OK");
+                log("IPC worker post-reconnect handshake OK");
                 Ok(())
             }
             Some(false) => Err(CoreError::Daemon(format!(
@@ -1242,7 +1868,7 @@ impl IpcWorker {
                             self.buf.clear();
                             return Err(CoreError::Daemon("buffer exceeded 16MB".into()));
                         }
-                        crate::log::log("IPC read buffer exceeded 16MB; dropped oldest lines");
+                        log("IPC read buffer exceeded 16MB; dropped oldest lines");
                     }
                     Ok(true)
                 }
@@ -1305,12 +1931,12 @@ async fn pulse_reader(
             Err(e) => {
                 attempt += 1;
                 if attempt > 30 {
-                    crate::log::log(&format!(
+                    log(&format!(
                         "pulse: giving up after {attempt} reconnect attempts"
                     ));
                     return;
                 }
-                crate::log::log(&format!("pulse connect attempt {attempt} failed: {e}"));
+                log(&format!("pulse connect attempt {attempt} failed: {e}"));
                 tokio::time::sleep(Duration::from_millis((200 * attempt.min(30)) as u64)).await;
                 continue;
             }
@@ -1322,12 +1948,12 @@ async fn pulse_reader(
             let mut tmp = [0u8; 4096];
             let n = match reader.read(&mut tmp).await {
                 Ok(0) => {
-                    crate::log::log("pulse: connection closed, reconnecting");
+                    log("pulse: connection closed, reconnecting");
                     break;
                 }
                 Ok(n) => n,
                 Err(e) => {
-                    crate::log::log(&format!("pulse read error: {e}, reconnecting"));
+                    log(&format!("pulse read error: {e}, reconnecting"));
                     break;
                 }
             };
@@ -1337,7 +1963,7 @@ async fn pulse_reader(
                     Ok(Some((e, c))) => (e, c),
                     Ok(None) => break,
                     Err(e) => {
-                        crate::log::log(&format!("pulse decode error: {e}"));
+                        log(&format!("pulse decode error: {e}"));
                         buf.clear();
                         break;
                     }

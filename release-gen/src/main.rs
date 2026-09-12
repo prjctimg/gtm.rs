@@ -45,6 +45,11 @@ enum Command {
         mode: String,
     },
     Mute,
+    /// Set playback speed (1.0 = normal)
+    Speed {
+        /// Playback rate multiplier
+        rate: Option<f32>,
+    },
     /// Toggle crossfade between tracks
     Crossfade {
         #[arg(
@@ -102,20 +107,35 @@ enum Command {
     DeletePlaylist {
         id: i64,
     },
+    PlaylistDedup {
+        playlist_id: i64,
+    },
+    PlaylistDoctor {
+        playlist_id: i64,
+    },
+    PlaylistSort {
+        playlist_id: i64,
+        #[arg(long, value_name = "FIELD", default_value = "title")]
+        field: String,
+    },
     AddToPlaylist {
         playlist_id: i64,
         track_ids: Vec<i64>,
     },
-    /// Import an M3U playlist file
-    ImportM3u {
+    /// Import a playlist file (M3U8 or PLS)
+    ImportPlaylist {
         #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
         path: String,
+        #[arg(long, value_name = "FORMAT", value_parser = ["m3u8", "pls"], default_value = "m3u8")]
+        format: String,
     },
-    /// Export a playlist to an M3U file
-    ExportM3u {
+    /// Export a playlist to a playlist file (M3U8 or PLS)
+    ExportPlaylist {
         playlist_id: i64,
         #[arg(value_name = "FILE", value_hint = clap::ValueHint::FilePath)]
         path: String,
+        #[arg(long, value_name = "FORMAT", value_parser = ["m3u8", "pls"], default_value = "m3u8")]
+        format: String,
     },
     Recent {
         count: u64,
@@ -169,6 +189,20 @@ enum Command {
     },
     /// Cancel a running sleep timer
     CancelSleepTimer,
+    /// Toggle low-power mode (pause playback, ease off background work)
+    LowPower {
+        /// Force on/off instead of toggling state
+        #[arg(long, value_name = "on|off")]
+        set: Option<bool>,
+    },
+    /// List available audio output devices
+    AudioDevices,
+    /// Switch audio output device ("default" restores the system default; switching stops playback)
+    SetAudioDevice {
+        /// Output device name
+        #[arg(value_name = "NAME")]
+        name: String,
+    },
     /// Edit metadata of a library track
     UpdateMetadata {
         /// Library track id
@@ -183,6 +217,27 @@ enum Command {
     /// Spotify account and playback control
     #[command(subcommand)]
     Spotify(SpotifyAction),
+    /// Subsonic/Navidrome server access
+    #[command(subcommand)]
+    Subsonic(SubsonicAction),
+    /// Podcast feed management and playback
+    #[command(subcommand)]
+    Podcast(PodcastAction),
+    /// Internet radio via radio-browser.info
+    #[command(subcommand)]
+    Radio(RadioAction),
+    /// Walk through setting up integration sources (Spotify, Last.fm,
+    /// Subsonic/Navidrome). With no SERVICE argument every unconfigured
+    /// source is visited; OAuth steps launch your browser and capture the
+    /// response.
+    Setup {
+        /// Service to configure: spotify | lastfm | subsonic
+        #[arg(value_name = "SERVICE")]
+        service: Option<String>,
+        /// Run the plain terminal wizard instead of the TUI
+        #[arg(long)]
+        cli: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -192,12 +247,85 @@ enum SpotifyAction {
         /// Spotify OAuth access token
         token: String,
     },
+    /// Run the OAuth browser flow to link the account
+    Login {
+        /// Spotify Client ID (dialog prompt when absent)
+        client_id: Option<String>,
+        /// Loopback port for the OAuth callback (default 8990)
+        port: Option<u16>,
+    },
     /// Unlink the account and delete the stored token
     Disconnect,
     /// Show the current link/playback status
     Status,
     /// Re-sync all playlists from the Web API
     Sync,
+}
+
+#[derive(Subcommand)]
+enum SubsonicAction {
+    /// Save server credentials and verify the connection
+    Configure {
+        /// Server URL, e.g. https://music.example.com/rest
+        server: String,
+        /// Subsonic username
+        username: String,
+        /// Password (interactive prompt when absent)
+        password: Option<String>,
+    },
+    /// Forget stored Subsonic credentials
+    Clear,
+    /// Show the current Subsonic configuration state
+    Status,
+    /// Ping the server
+    Ping,
+    /// Search the server's index
+    Search { query: String },
+    /// Play a track by its server-side id
+    Play { track_id: String },
+}
+
+#[derive(Subcommand)]
+enum PodcastAction {
+    /// Subscribe to a podcast feed
+    Add {
+        /// Feed URL (RSS/Atom)
+        url: String,
+    },
+    /// Unsubscribe from a feed
+    Remove { feed_id: String },
+    /// List subscribed feeds
+    List,
+    /// List episodes of a feed
+    Episodes { feed_id: String },
+    /// Refresh all feeds (or one) from the network
+    Refresh { feed_id: Option<String> },
+    /// Play an episode from a feed
+    Play {
+        feed_id: String,
+        /// Zero-based episode index
+        episode_index: usize,
+    },
+    /// Show podcast state
+    Status,
+}
+
+#[derive(Subcommand)]
+enum RadioAction {
+    /// Search for stations by name/tag
+    Search {
+        query: String,
+        /// Maximum number of results
+        limit: u16,
+    },
+    /// List the top-rated stations
+    Top { limit: u16 },
+    /// Play a station by its radio-browser id
+    Play {
+        station_id: String,
+        /// Optional display name
+        station_name: Option<String>,
+    },
 }
 
 /// gtm background audio daemon

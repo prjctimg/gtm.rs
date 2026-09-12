@@ -9,6 +9,8 @@ use std::path::Path;
 use gtm_core::global::DaemonState;
 use gtm_core::track::TrackInfo;
 
+use crate::library::extract_metadata;
+
 /// Build a TrackInfo from a file path.  The title is derived from
 /// the file stem; all other fields are left empty/default.  The path is
 /// canonicalised so path-equality checks against `daemon::resolve_track_meta`
@@ -26,7 +28,7 @@ pub fn resolve_track(path: &str) -> TrackInfo {
         .unwrap_or("")
         .to_string();
 
-    if let Ok((meta, hash)) = crate::library::extract_metadata(&path_str, None) {
+    if let Ok((meta, hash)) = extract_metadata(&path_str, None) {
         return TrackInfo {
             id: 0,
             path: path_str,
@@ -81,7 +83,7 @@ pub fn resolve_track(path: &str) -> TrackInfo {
 /// remaining default list.  The cursor marks the currently-playing entry:
 /// index 0 when a user entry is playing, otherwise the position in the
 /// default list.
-pub fn visible_queue(state: &DaemonState) -> (Vec<TrackInfo>, u64) {
+pub fn visible(state: &DaemonState) -> (Vec<TrackInfo>, u64) {
     let mut merged = state.queue.clone();
     let cursor = if state.queue.is_empty() {
         state.default_cursor.min(state.default_list.len()) as u64
@@ -123,16 +125,14 @@ fn insert_at(state: &mut DaemonState, track: TrackInfo, pos: usize) {
 /// Add a track.  `position == None` queues it to play next (right after the
 /// current entry); `Some(pos)` inserts at an explicit merged-view index.
 /// Returns the created TrackInfo.
-pub fn queue_add(state: &mut DaemonState, path: &str, position: Option<u64>) -> TrackInfo {
-    let mut added = queue_add_many(state, &[path.to_string()], position);
-    added
-        .pop()
-        .expect("queue_add_many returns one entry per path")
+pub fn add(state: &mut DaemonState, path: &str, position: Option<u64>) -> TrackInfo {
+    let mut added = add_many(state, &[path.to_string()], position);
+    added.pop().expect("add_many returns one entry per path")
 }
 
 /// Add multiple tracks as a batch.  The whole batch is queued to play next
 /// (after the current entry) unless `position` is given, preserving order.
-pub fn queue_add_many(
+pub fn add_many(
     state: &mut DaemonState,
     paths: &[String],
     position: Option<u64>,
@@ -158,9 +158,37 @@ pub fn queue_add_many(
     added
 }
 
+/// Insert a pre-resolved track using the same merged-view placement as
+/// [`add_many`]. Metadata gathering happens before the `DaemonState` write
+/// lock is taken, so the insert itself stays free of disk I/O and tag reads.
+pub fn add_resolved(state: &mut DaemonState, track: TrackInfo, position: Option<u64>) {
+    let len = state.queue.len() + state.default_list.len();
+    let insert_pos = match position {
+        Some(p) => (p as usize).min(len),
+        None => {
+            if state.queue.is_empty() {
+                0
+            } else {
+                1
+            }
+        }
+    };
+    insert_at(state, track, insert_pos);
+}
+
+/// Replace the user queue with pre-resolved tracks and drop the default-list
+/// session, mirroring [`set`] without re-reading tags.
+pub fn set_resolved(state: &mut DaemonState, tracks: Vec<TrackInfo>) {
+    state.queue = tracks;
+    state.queue_cursor = 0;
+    state.default_list.clear();
+    state.default_cursor = 0;
+    state.fallback_disabled = false;
+}
+
 /// Remove the entry at a merged-view index.  Returns the removed track, or
 /// None if the index is out of range.
-pub fn queue_remove(state: &mut DaemonState, index: u64) -> Option<TrackInfo> {
+pub fn remove(state: &mut DaemonState, index: u64) -> Option<TrackInfo> {
     let (is_user, local) = split_index(state, index as usize)?;
     let removed = if is_user {
         state.queue.remove(local)
@@ -177,7 +205,7 @@ pub fn queue_remove(state: &mut DaemonState, index: u64) -> Option<TrackInfo> {
 
 /// Move an entry between merged-view indices.  Returns false if either index
 /// is out of range.
-pub fn queue_move(state: &mut DaemonState, from: u64, to: u64) -> bool {
+pub fn move_track(state: &mut DaemonState, from: u64, to: u64) -> bool {
     let len = state.queue.len() + state.default_list.len();
     let (from, to) = (from as usize, to as usize);
     if from >= len || to >= len || from == to {
@@ -200,7 +228,7 @@ pub fn queue_move(state: &mut DaemonState, from: u64, to: u64) -> bool {
 }
 
 /// Replace the user queue with `paths` and drop the default-list session.
-pub fn queue_set(state: &mut DaemonState, paths: &[String], _start_idx: u64) -> Vec<TrackInfo> {
+pub fn set(state: &mut DaemonState, paths: &[String], _start_idx: u64) -> Vec<TrackInfo> {
     let mut tracks = Vec::with_capacity(paths.len());
     for path in paths {
         tracks.push(resolve_track(path));
@@ -215,7 +243,7 @@ pub fn queue_set(state: &mut DaemonState, paths: &[String], _start_idx: u64) -> 
 
 /// Clear the user queue and the default-list session.  Disables the
 /// auto-build fallback so playback stops after the current track ends.
-pub fn queue_clear(state: &mut DaemonState) {
+pub fn clear(state: &mut DaemonState) {
     state.queue.clear();
     state.queue_cursor = 0;
     state.default_list.clear();

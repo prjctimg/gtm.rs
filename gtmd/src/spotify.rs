@@ -16,7 +16,10 @@ use rspotify::model::{AdditionalType, PlayableItem, SearchType, Token};
 use rspotify::{CallbackError, Config, Credentials, OAuth, TokenCallback};
 use tracing::{debug, info, warn};
 
-use gtm_core::spotify::{SpotifyPlaylist, SpotifyStatus, SpotifyTrack};
+use gtm_core::secret::{
+    SPOTIFY_CLIENT_ID_KEY, SPOTIFY_TOKEN_KEY, delete_secret, get_secret, set_secret,
+};
+use gtm_core::spotify::{LIBRESPOT_CLIENT_ID, SpotifyPlaylist, SpotifyStatus, SpotifyTrack};
 
 const TOKEN_FILE: &str = "spotify.json";
 const TOKEN_ACCESS_PERMS: u32 = 0o600;
@@ -86,7 +89,7 @@ impl SpotifyManager {
         self.save_token(&token)?;
         // Mirror the token into the OS keychain so it survives the file-based
         // token being cleared and can be restored without a re-login.
-        gtm_core::secret::set_secret(gtm_core::secret::SPOTIFY_TOKEN_KEY, raw);
+        set_secret(SPOTIFY_TOKEN_KEY, raw);
         self.init_client(token).await
     }
 
@@ -105,8 +108,8 @@ impl SpotifyManager {
             Err(e) => warn!("failed to remove spotify token file: {e}"),
         }
         // Drop any keychain-stored credentials too.
-        gtm_core::secret::delete_secret(gtm_core::secret::SPOTIFY_TOKEN_KEY);
-        gtm_core::secret::delete_secret(gtm_core::secret::SPOTIFY_CLIENT_ID_KEY);
+        delete_secret(SPOTIFY_TOKEN_KEY);
+        delete_secret(SPOTIFY_CLIENT_ID_KEY);
     }
 
     /// Snapshot of the current link state for the Settings UI.
@@ -133,7 +136,6 @@ impl SpotifyManager {
 
     /// Current OAuth access token, if a client is linked.
     pub async fn access_token(&self) -> Option<String> {
-        use rspotify::clients::BaseClient;
         let client = self.client.as_ref()?;
         let arc = client.get_token();
         let guard = arc.lock().await.ok()?;
@@ -226,12 +228,28 @@ impl SpotifyManager {
     /// Refresh the account profile and every playlist from the Web API.
     pub async fn sync(&mut self) -> Result<(), String> {
         let client = self
-            .client
-            .as_ref()
+            .sync_client()
             .ok_or_else(|| "spotify not linked".to_string())?;
+        let (user, playlists) = Self::run_sync(client).await?;
+        self.commit_sync(user, playlists);
+        Ok(())
+    }
 
+    /// Clone the underlying Web API client so a sync can paginate without
+    /// holding the manager mutex. `None` when not linked.
+    pub fn sync_client(&self) -> Option<AuthCodePkceSpotify> {
+        self.client.clone()
+    }
+
+    /// Paginate the full account profile, every playlist, and every playlist's
+    /// tracks on a cloned client so the caller never holds the manager mutex
+    /// across the network pass. Returns the snapshot to commit via
+    /// [`Self::commit_sync`].
+    pub async fn run_sync(
+        client: AuthCodePkceSpotify,
+    ) -> Result<(Option<String>, Vec<SpotifyPlaylist>), String> {
         let me = client.me().await.map_err(|e| format!("me: {e}"))?;
-        self.user = me.display_name.or_else(|| Some(me.id.as_ref().to_string()));
+        let user = me.display_name.or_else(|| Some(me.id.as_ref().to_string()));
         // NOTE: rspotify's `me().product` was removed upstream (Spotify no
         // longer exposes the plan); Premium is instead probed via the
         // playback endpoint in `refresh_playback()`.
@@ -244,15 +262,11 @@ impl SpotifyManager {
             let pl = item.map_err(|e| format!("playlists: {e}"))?;
             metas.push(pl);
         }
-        debug!(
-            "fetched {} spotify playlists for {:?}",
-            metas.len(),
-            self.user
-        );
+        debug!("fetched {} spotify playlists for {:?}", metas.len(), user);
 
         let mut playlists = Vec::new();
         for meta in &metas {
-            let tracks = self.fetch_playlist_tracks(client, meta.id.clone()).await;
+            let tracks = Self::fetch_playlist_tracks(&client, meta.id.clone()).await;
             playlists.push(SpotifyPlaylist {
                 id: meta.id.as_ref().to_string(),
                 name: meta.name.clone(),
@@ -260,12 +274,19 @@ impl SpotifyManager {
                 tracks,
             });
         }
+        Ok((user, playlists))
+    }
+
+    /// Swap a completed sync snapshot into the manager. `status()` and
+    /// `playlists()` only ever contend for this brief swap, never for the
+    /// minutes of network pagination that preceded it.
+    pub fn commit_sync(&mut self, user: Option<String>, playlists: Vec<SpotifyPlaylist>) {
+        self.error = None;
+        self.user = user;
         self.playlists = playlists;
-        Ok(())
     }
 
     async fn fetch_playlist_tracks(
-        &self,
         client: &AuthCodePkceSpotify,
         playlist_id: rspotify::model::PlaylistId<'static>,
     ) -> Vec<SpotifyTrack> {
@@ -289,15 +310,14 @@ impl SpotifyManager {
 
     async fn init_client(&mut self, token: Token) -> Result<(), String> {
         let refreshable = token.refresh_token.is_some();
-        let client_id = gtm_core::secret::get_secret(gtm_core::secret::SPOTIFY_CLIENT_ID_KEY)
-            .unwrap_or_default();
+        let client_id = get_secret(SPOTIFY_CLIENT_ID_KEY).unwrap_or_default();
         // Fall back to librespot's public desktop client id when the user
         // linked with a plain pasted access token (which never stores a
         // client id). `Credentials::default()` is a dead end: rspotify's
         // bundled demo id cannot refresh, so such tokens silently expire and
         // every later Web API call fails with a 401.
         let creds = if client_id.is_empty() {
-            Credentials::new_pkce(gtm_core::spotify::LIBRESPOT_CLIENT_ID)
+            Credentials::new_pkce(LIBRESPOT_CLIENT_ID)
         } else {
             Credentials::new_pkce(&client_id)
         };
@@ -387,6 +407,7 @@ impl SpotifyManager {
                     album: Some(t.album.name.clone()),
                     duration_ms: Some(t.duration.num_milliseconds().max(0) as u64),
                     uri: t.id.as_ref().map(|id| format!("spotify:track:{id}")),
+                    image_url: pick_largest_image(&t.album.images),
                 })
                 .collect(),
             _ => Vec::new(),
@@ -447,6 +468,16 @@ impl SpotifyManager {
         let bytes = resp.bytes().await.ok()?;
         (!bytes.is_empty()).then_some(bytes.to_vec())
     }
+
+    /// Fetch the raw bytes of an album-cover image located at `image_url`
+    /// (as exposed via `SpotifyTrack::image_url`), without an extra search.
+    pub async fn image_by_url(&self, image_url: &str) -> Option<Vec<u8>> {
+        let image_url = image_url.trim();
+        if image_url.is_empty() {
+            return None;
+        }
+        self.download_image(image_url).await
+    }
 }
 
 /// Pick the largest (first-sorted-by-area) image URL from a set of Spotify
@@ -477,6 +508,7 @@ fn track_from_playable(item: &PlayableItem) -> Option<SpotifyTrack> {
             album: Some(t.album.name.clone()),
             duration_ms: Some(t.duration.num_milliseconds().max(0) as u64),
             uri: t.id.as_ref().map(|id| format!("spotify:track:{id}")),
+            image_url: pick_largest_image(&t.album.images),
         }),
         PlayableItem::Episode(_) | PlayableItem::Unknown(_) => None,
     }

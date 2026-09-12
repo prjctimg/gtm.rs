@@ -51,6 +51,9 @@ Adjust playback settings and open overlays. Left pane selects category
 | `S` | Toggle shuffle |
 | `s` | Stop |
 | `.` / `,` | Seek forward / backward |
+| `Alt+R` | Top radio stations |
+| `Alt+T` | Radio Browser (browse tags / countries) |
+| `Alt+O` | Play an HTTP(S) stream URL |
 | `l` | Fetch lyrics for current track |
 | `:` | Command mode |
 | `?` | Toggle help |
@@ -65,7 +68,14 @@ daemon and prints the result. Use **\--json** for machine-readable output.
 
 **play** *path* [*start_pos*]
 :   Play a track by filesystem path or URL. Optionally start at a given
-    position in seconds.
+    position in seconds. An `http://` or `https://` URL is treated as an
+    internet stream.
+
+**stream** *url*
+:   Play an HTTP(S) stream. The URL may also point to an M3U/PLS playlist,
+    which is fetched and resolved server-side; remaining playlist entries are
+    queued behind the first so **next** rotates through them. Live stream
+    titles (ICMP/Shoutcast `StreamTitle`) appear in the playing view.
 
 **play-pause**
 :   Toggle between play and pause (smart: stopped → play, playing → pause,
@@ -91,6 +101,10 @@ daemon and prints the result. Use **\--json** for machine-readable output.
 
 **mute**
 :   Toggle mute.
+
+**speed** [*rate*]
+:   Set the playback speed (1.0 = normal). Without an argument, prints the
+    current speed.
 
 **shuffle**
 :   Toggle shuffle mode for the queue.
@@ -144,11 +158,20 @@ daemon and prints the result. Use **\--json** for machine-readable output.
 **add-to-playlist** *playlist_id* *track_ids*...
 :   Add tracks to a playlist.
 
-**import-m3u** *path*
-:   Import an M3U playlist file into the library.
+**playlist-dedup** *playlist_id*
+:   Remove duplicate track entries from a playlist.
 
-**export-m3u** *playlist_id* *path*
-:   Export a playlist to an M3U file.
+**playlist-doctor** *playlist_id*
+:   Remove playlist entries whose audio file is missing on disk.
+
+**playlist-sort** *playlist_id* [`--field` *title|artist|album|date*]
+:   Reorder a playlist's tracks in place. Defaults to `title`.
+
+**import-playlist** *path* `--format` *m3u8|pls*
+:   Import a playlist file (M3U8 or PLS) into the library. Defaults to M3U8.
+
+**export-playlist** *playlist_id* *path* `--format` *m3u8|pls*
+:   Export a playlist to an M3U8 or PLS file. Defaults to M3U8.
 
 **recent** *count*
 :   Show recently added tracks.
@@ -192,6 +215,12 @@ daemon and prints the result. Use **\--json** for machine-readable output.
 **spotify** *connect* *token*
 :   Link the account with an access token (metadata/playlist APIs).
 
+**spotify** *login* [*client_id*] [*port*]
+:   Run the OAuth PKCE browser flow to link the account. The client id is
+    taken from the argument, the keychain, or an interactive prompt. The
+    callback is served on a loopback port (default 8990,
+    `$GTM_SPOTIFY_PORT`).
+
 **spotify** *disconnect*
 :   Unlink the account and delete the stored token.
 
@@ -200,6 +229,95 @@ daemon and prints the result. Use **\--json** for machine-readable output.
 
 **spotify** *sync*
 :   Re-sync all playlists from the Web API.
+
+## Subsonic / Navidrome
+
+**subsonic** *configure* *server* *username* [*password*]
+:   Save server credentials and verify the connection. Omit *password* for
+    an interactive prompt.
+
+**subsonic** *clear*
+:   Forget stored Subsonic credentials.
+
+**subsonic** *status*
+:   Show the current Subsonic configuration state.
+
+**subsonic** *ping*
+:   Ping the server.
+
+**subsonic** *search* *query*
+:   Search the server's index.
+
+**subsonic** *play* *track_id*
+:   Play a track by its server-side id.
+
+## Podcast
+
+**podcast** *add* *url*
+:   Subscribe to a podcast feed (RSS/Atom URL).
+
+**podcast** *remove* *feed_id*
+:   Unsubscribe from a feed.
+
+**podcast** *list*
+:   List subscribed feeds.
+
+**podcast** *episodes* *feed_id*
+:   List episodes of a feed.
+
+**podcast** *refresh* [*feed_id*]
+:   Refresh all feeds (or a single one) from the network.
+
+**podcast** *play* *feed_id* *episode_index*
+:   Play an episode by its zero-based index in the feed.
+
+**podcast** *status*
+:   Show podcast state.
+
+## Radio
+
+**radio** *search* *query* *limit*
+:   Search radio-browser.info for stations by name or tag.
+
+**radio** *top* *limit*
+:   List the top-rated stations.
+
+**radio** *tags* *limit*
+:   List the most-used station tags on radio-browser.info.
+
+**radio** *tag* *tag* *limit*
+:   List stations carrying a tag.
+
+**radio** *countries* *limit*
+:   List the available station countries.
+
+**radio** *country* *country* *limit*
+:   List stations from a country.
+
+**radio** *play* *station_id* [*station_name*]
+:   Play a station by its radio-browser id, optionally with a display name.
+
+**radio** *list*
+:   List locally stored custom stations (see *add* below). Each is referenced
+    by a `custom:N` id where *N* is its 1-based index.
+
+**radio** *add* *name* *url*
+:   Store a custom station URL so **radio play** `custom:N` and the TUI can
+    open it from any machine. Stations live in `$XDG_CONFIG_HOME/gtm/radios.toml`.
+
+**radio** *rm* *selector*
+:   Remove a custom station by `custom:N` index or by exact name.
+
+## Setup
+
+**setup** [*service*] [**\--cli**]
+:   Interactive source setup. Without a *service* argument (`spotify`,
+    `lastfm`, or `subsonic`), a picker opens and every unconfigured source is
+    walked through in turn. OAuth steps (Spotify, Last.fm) open your browser
+    and capture the callback response automatically; Last.fm's loopback
+    capture falls back to pasting the token on stdin. With **\--cli**, run the
+    plain terminal wizard instead of the TUI. The daemon is started
+    automatically if it is not already running.
 
 ## Daemon
 
@@ -222,6 +340,18 @@ daemon and prints the result. Use **\--json** for machine-readable output.
 
 **cancel-sleep-timer**
 :   Cancel a running sleep timer.
+
+**low-power** [`--set` *on|off*]
+:   Toggle low-power mode (pauses playback and eases up on background work).
+    Use `--set on|off` to force a state instead of toggling. With no flag,
+    prints the current state.
+
+**audio-devices**
+:   List available audio output devices.
+
+**set-audio-device** *name*
+:   Switch the audio output device (use `default` for the system default).
+    Switching restarts the output and stops playback.
 
 **update-metadata** *track_id* *field* *value*
 :   Edit metadata of a library track. Fields: title, artist, album, genre,
@@ -265,6 +395,10 @@ $TMPDIR/gtm/gtmd.sock
 
 $HOME/.gtm/gtm/gtmd.sock
 :   Final fallback.
+
+$XDG_CONFIG_HOME/gtm/radios.toml
+:   Custom radio stations added with **radio add** (defaults to
+    `~/.config/gtm/radios.toml`).
 
 # SEE ALSO
 
