@@ -22,7 +22,7 @@ pub struct LastfmManager {
     api_key: Option<String>,
     api_secret: Option<String>,
     session_key: Arc<Mutex<Option<String>>>,
-    last_scrobble: Arc<Mutex<Option<Instant>>>,
+    last_scrobble: Arc<Mutex<Option<(String, Instant)>>>,
     last_now_playing: Arc<Mutex<Option<Instant>>>,
 }
 
@@ -53,11 +53,13 @@ impl LastfmManager {
         }
     }
 
-    /// Check if Last.fm is configured and authenticated.
-    pub fn is_ready(&self) -> bool {
+    /// Check if Last.fm is configured and authenticated. Async so the
+    /// session-key guard never needs a blocking lock inside the daemon's
+    /// async command loop.
+    pub async fn is_ready(&self) -> bool {
         self.api_key.is_some()
             && self.api_secret.is_some()
-            && self.session_key.blocking_lock().is_some()
+            && self.session_key.lock().await.is_some()
     }
 
     /// Get the authorization URL for the user to grant permission.
@@ -116,7 +118,7 @@ impl LastfmManager {
     /// Update "now playing" status on Last.fm.
     /// Throttled to once per minute per Last.fm API guidelines.
     pub async fn update_now_playing(&self, track: &TrackInfo) -> Result<(), String> {
-        if !self.is_ready() {
+        if !self.is_ready().await {
             return Err("Last.fm not configured".into());
         }
 
@@ -184,7 +186,10 @@ impl LastfmManager {
     }
 
     /// Scrobble a track to Last.fm.
-    /// Only scrobbles if track meets minimum play criteria.
+    /// Only scrobbles if track meets minimum play criteria. Same-track
+    /// duplicate scrobbles within a short window are suppressed, but distinct
+    /// tracks are never dropped (a cross-track throttle would silently lose
+    /// legitimate scrobbles during quick skip-ahead).
     pub async fn scrobble(
         &self,
         track: &TrackInfo,
@@ -192,7 +197,7 @@ impl LastfmManager {
         min_secs: u32,
         min_pct: f32,
     ) -> Result<(), String> {
-        if !self.is_ready() {
+        if !self.is_ready().await {
             return Err("Last.fm not configured".into());
         }
 
@@ -209,14 +214,17 @@ impl LastfmManager {
             return Ok(());
         }
 
-        // Throttle: avoid rapid successive scrobbles
+        // Deduplicate: skip only when the very same track was just scrobbled.
+        let key = format!("{}|{}|{}", track.artist, track.title, track.album);
         let mut last_scrobble = self.last_scrobble.lock().await;
-        if let Some(last) = *last_scrobble
-            && last.elapsed() < Duration::from_secs(5)
+        if let Some((last_key, last)) = last_scrobble.as_ref()
+            && *last_key == key
+            && last.elapsed() < Duration::from_secs(10)
         {
-            return Ok(()); // Skip if too recent
+            debug!("track already scrobbled recently, skipping duplicate");
+            return Ok(());
         }
-        *last_scrobble = Some(Instant::now());
+        *last_scrobble = Some((key, Instant::now()));
         drop(last_scrobble);
 
         let session_key = self
@@ -304,7 +312,7 @@ impl LastfmManager {
         self.api_key.clone()
     }
 
-    pub fn get_session_key(&self) -> Option<String> {
-        self.session_key.blocking_lock().clone()
+    pub async fn get_session_key(&self) -> Option<String> {
+        self.session_key.lock().await.clone()
     }
 }

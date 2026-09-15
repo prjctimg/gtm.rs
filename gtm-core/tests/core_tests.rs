@@ -9,6 +9,7 @@ use gtm_core::global::{
     CrossfadeConfig, DaemonState, Image, PlaybackStatus, RepeatMode, ThemeMode, UIMode, YTFilter,
 };
 use gtm_core::ipc::{DaemonEvent, DaemonReq, DaemonRes, LibraryAction, QueueAction};
+use gtm_core::playlist::PlaylistFormatKind;
 use gtm_core::spotify::{SpotifyPlaylist, SpotifyStatus, SpotifyTrack};
 use gtm_core::track::{LrcData, LrcLine, Playlist, StreamInfo, TrackInfo, YTSearchResult};
 use gtm_core::wire::{decode, encode};
@@ -74,6 +75,25 @@ macro_rules! roundtrip {
     };
 }
 
+/// Like [`roundtrip!`] but JSON-only. `DaemonState` uses `#[serde(flatten)]`
+/// for its `audio` settings, which bincode (a non-self-describing format)
+/// cannot round-trip; JSON preserves the flat wire schema.
+macro_rules! roundtrip_json {
+    ($name:ident, $ty:ty, $val:expr) => {
+        #[test]
+        fn $name() {
+            let val: $ty = $val;
+            let json = serde_json::to_string(&val).unwrap();
+            let de: $ty = serde_json::from_str(&json).unwrap();
+            assert_eq!(
+                format!("{:?}", val),
+                format!("{:?}", de),
+                "JSON round-trip failed"
+            );
+        }
+    };
+}
+
 roundtrip!(track_info_roundtrip, TrackInfo, sample_track());
 roundtrip!(
     playlist_roundtrip,
@@ -91,6 +111,10 @@ roundtrip!(
     LrcLine {
         timestamp: 12.5,
         text: "hello".into(),
+        words: vec![gtm_core::track::LrcWord {
+            time: 12.5,
+            text: "hello".into(),
+        }],
     }
 );
 roundtrip!(
@@ -103,6 +127,7 @@ roundtrip!(
         lines: vec![LrcLine {
             timestamp: 0.0,
             text: "intro".into(),
+            words: Vec::new(),
         }],
     }
 );
@@ -140,7 +165,7 @@ roundtrip!(
         duration_secs: 8,
     }
 );
-roundtrip!(daemon_state_roundtrip, DaemonState, sample_state());
+roundtrip_json!(daemon_state_roundtrip, DaemonState, sample_state());
 roundtrip!(
     image_roundtrip,
     Image,
@@ -157,7 +182,7 @@ roundtrip!(
 // ---------------------------------------------------------------------------
 
 #[test]
-fn daemon_req_cmd_name_roundtrip() {
+fn req_cmd_name() {
     let reqs: Vec<DaemonReq> = vec![
         DaemonReq::Play {
             path: "/m/s.mp3".into(),
@@ -173,6 +198,14 @@ fn daemon_req_cmd_name_roundtrip() {
         },
         DaemonReq::SetVolume { volume: 80 },
         DaemonReq::GetVolume,
+        DaemonReq::SetSpeed { rate: 1.5 },
+        DaemonReq::GetSpeed,
+        DaemonReq::SetLowPower { enabled: true },
+        DaemonReq::GetLowPower,
+        DaemonReq::ListAudioDevices,
+        DaemonReq::SetAudioDevice {
+            name: Some("Speakers".into()),
+        },
         DaemonReq::ToggleShuffle,
         DaemonReq::ToggleMute,
         DaemonReq::GetStatus,
@@ -189,13 +222,13 @@ fn daemon_req_cmd_name_roundtrip() {
 }
 
 #[test]
-fn daemon_req_parse_cmd_unknown_cmd() {
+fn req_parse_unknown() {
     let result = DaemonReq::parse_cmd("totally_unknown", serde_json::json!({}));
     assert!(result.is_err());
 }
 
 #[test]
-fn daemon_req_parse_cmd_play() {
+fn req_parse_play() {
     let params = serde_json::json!({"path": "/music/song.mp3", "start_pos": 0.0});
     let req = DaemonReq::parse_cmd("play", params).unwrap();
     assert_eq!(req.cmd_name(), "play");
@@ -209,7 +242,51 @@ fn daemon_req_parse_cmd_play() {
 }
 
 #[test]
-fn daemon_req_parse_cmd_unit_variants() {
+fn req_parse_lastfm() {
+    let params = serde_json::json!({
+        "enabled": true,
+        "api_key": "k1",
+        "api_secret": "s1",
+        "session_key": null,
+        "min_play_secs": null,
+        "min_play_pct": 0.5
+    });
+    let req = DaemonReq::parse_cmd("lastfm_set_config", params).unwrap();
+    assert_eq!(req.cmd_name(), "lastfm_set_config");
+    match req {
+        DaemonReq::LastfmSetConfig {
+            enabled,
+            api_key,
+            api_secret,
+            session_key,
+            min_play_secs,
+            min_play_pct,
+        } => {
+            assert!(enabled);
+            assert_eq!(api_key.as_deref(), Some("k1"));
+            assert_eq!(api_secret.as_deref(), Some("s1"));
+            assert!(session_key.is_none());
+            assert!(min_play_secs.is_none());
+            assert_eq!(min_play_pct, Some(0.5));
+        }
+        other => panic!("expected LastfmSetConfig, got {other:?}"),
+    }
+
+    for cmd in ["lastfm_auth_url", "lastfm_status", "lastfm_clear"] {
+        let req = DaemonReq::parse_cmd(cmd, serde_json::json!({})).unwrap();
+        assert_eq!(req.cmd_name(), cmd);
+    }
+
+    let req =
+        DaemonReq::parse_cmd("lastfm_authenticate", serde_json::json!({ "token": "t1" })).unwrap();
+    match req {
+        DaemonReq::LastfmAuthenticate { token } => assert_eq!(token, "t1"),
+        other => panic!("expected LastfmAuthenticate, got {other:?}"),
+    }
+}
+
+#[test]
+fn req_parse_unit() {
     for (cmd, expected) in [
         ("play_pause", "play_pause"),
         ("pause", "pause"),
@@ -230,7 +307,7 @@ fn daemon_req_parse_cmd_unit_variants() {
 }
 
 #[test]
-fn daemon_req_parse_cmd_spotify_variants() {
+fn req_parse_spotify() {
     let cases: Vec<(&str, serde_json::Value, &str)> = vec![
         (
             "spotify_set_token",
@@ -255,9 +332,39 @@ fn daemon_req_parse_cmd_spotify_variants() {
             serde_json::json!({ "playlist_id": "37i9dQZEVX", "track_index": 3 }),
             "spotify_resolve",
         ),
+        (
+            "spotify_resolve_track",
+            serde_json::json!({
+                "name": "Drift",
+                "artists": "Artist",
+                "album": "Album",
+                "uri": "spotify:track:abc123"
+            }),
+            "spotify_resolve_track",
+        ),
+        (
+            "spotify_resolve_track",
+            serde_json::json!({ "name": "Drift", "artists": "Artist", "album": "Album" }),
+            "spotify_resolve_track",
+        ),
+        (
+            "spotify_play_all",
+            serde_json::json!({ "playlist_id": "37i9dQZEVX", "shuffle": true }),
+            "spotify_play_all",
+        ),
+        (
+            "spotify_play_all",
+            serde_json::json!({ "playlist_id": "37i9dQZEVX" }),
+            "spotify_play_all",
+        ),
+        (
+            "spotify_track_image",
+            serde_json::json!({ "image_url": "https://i.scdn.co/image/abc" }),
+            "spotify_track_image",
+        ),
     ];
     for (cmd, params, expected) in cases {
-        let req = DaemonReq::parse_cmd(cmd, params).unwrap();
+        let req = DaemonReq::parse_cmd(cmd, params.clone()).unwrap();
         assert_eq!(req.cmd_name(), expected);
         match req {
             DaemonReq::SpotifySetToken { token } => assert_eq!(token, "BQCabc"),
@@ -269,13 +376,35 @@ fn daemon_req_parse_cmd_spotify_variants() {
                 assert_eq!(playlist_id, "37i9dQZEVX");
                 assert_eq!(track_index, 3);
             }
+            DaemonReq::SpotifyResolveTrack { name, uri, .. } => {
+                assert_eq!(name, "Drift");
+                if params.get("uri").is_some() {
+                    assert_eq!(uri.as_deref(), Some("spotify:track:abc123"));
+                } else {
+                    assert!(uri.is_none(), "uri must default to None when absent");
+                }
+            }
+            DaemonReq::SpotifyPlayAll {
+                playlist_id,
+                shuffle,
+            } => {
+                assert_eq!(playlist_id, "37i9dQZEVX");
+                if params.get("shuffle").is_some() {
+                    assert!(shuffle);
+                } else {
+                    assert!(!shuffle, "shuffle must default to false when absent");
+                }
+            }
+            DaemonReq::SpotifyTrackImage { image_url } => {
+                assert_eq!(image_url, "https://i.scdn.co/image/abc");
+            }
             _ => {}
         }
     }
 }
 
 #[test]
-fn daemon_res_spotify_wire_roundtrip() {
+fn res_spotify_wire() {
     let status = SpotifyStatus {
         linked: true,
         user: Some("test-user".into()),
@@ -297,6 +426,8 @@ fn daemon_res_spotify_wire_roundtrip() {
             album: Some("Album".into()),
             duration_ms: Some(240000),
             uri: None,
+            image_url: None,
+            kind: None,
         }],
     };
     let cases: Vec<(&str, DaemonRes)> = vec![
@@ -318,6 +449,12 @@ fn daemon_res_spotify_wire_roundtrip() {
                 tracks: playlist.tracks.clone(),
             },
         ),
+        (
+            "spotify_track_image",
+            DaemonRes::SpotifyImageRes {
+                data: Some("AAECAw==".into()),
+            },
+        ),
     ];
     for (cmd, res) in cases {
         let expected = format!("{:?}", res);
@@ -328,6 +465,55 @@ fn daemon_res_spotify_wire_roundtrip() {
             format!("{:?}", back),
             "round-trip failed for {cmd}"
         );
+    }
+}
+
+#[test]
+fn res_lastfm_wire() {
+    let cases: Vec<(&str, DaemonRes)> = vec![
+        (
+            "lastfm_auth_url",
+            DaemonRes::LastfmAuthUrlRes {
+                url: "https://www.last.fm/api/auth/?api_key=k1".into(),
+            },
+        ),
+        (
+            "lastfm_status",
+            DaemonRes::LastfmStatusRes {
+                enabled: true,
+                api_key: Some("k1".into()),
+                session_token: Some("sess".into()),
+                ready: true,
+            },
+        ),
+    ];
+    for (cmd, res) in cases {
+        let expected = format!("{:?}", res);
+        let wire = res.to_wire(1);
+        let back = DaemonRes::from_wire(cmd, &wire);
+        assert_eq!(
+            expected,
+            format!("{:?}", back),
+            "round-trip failed for {cmd}"
+        );
+    }
+}
+
+#[test]
+fn res_oauth_wire() {
+    for res in [
+        DaemonRes::SpotifyOauthStarted {
+            url: "https://accounts.spotify.com/authorize?response_type=code&client_id=c1".into(),
+        },
+        DaemonRes::SpotifyOauthStarted {
+            url: "https://accounts.spotify.com/authorize?client_id=c2&scope=playlist-read-private"
+                .into(),
+        },
+    ] {
+        let expected = format!("{:?}", res);
+        let wire = res.to_wire(1);
+        let back = DaemonRes::from_wire("spotify_oauth_start", &wire);
+        assert_eq!(expected, format!("{:?}", back));
     }
 }
 
@@ -350,7 +536,7 @@ macro_rules! wire_event_roundtrip {
 }
 
 wire_event_roundtrip!(
-    wire_event_playback_started,
+    event_play_started,
     DaemonEvent::PlaybackStarted {
         track: sample_track(),
         auto_advanced: false,
@@ -359,13 +545,20 @@ wire_event_roundtrip!(
     }
 );
 wire_event_roundtrip!(
-    wire_event_playback_paused,
+    event_play_paused,
     DaemonEvent::PlaybackPaused { time_pos: 0.0 }
 );
-wire_event_roundtrip!(wire_event_track_ended, DaemonEvent::TrackEnded);
+wire_event_roundtrip!(event_track_ended, DaemonEvent::TrackEnded);
+wire_event_roundtrip!(event_volume, DaemonEvent::VolumeChanged { volume: 50 });
 wire_event_roundtrip!(
-    wire_event_volume_changed,
-    DaemonEvent::VolumeChanged { volume: 50 }
+    event_low_power,
+    DaemonEvent::LowPowerChanged { enabled: true }
+);
+wire_event_roundtrip!(
+    event_device_changed,
+    DaemonEvent::AudioDeviceChanged {
+        name: Some("Speakers".into())
+    }
 );
 
 // ---------------------------------------------------------------------------
@@ -373,7 +566,7 @@ wire_event_roundtrip!(
 // ---------------------------------------------------------------------------
 
 #[test]
-fn daemon_res_json_roundtrip() {
+fn res_json_roundtrip() {
     let ress: Vec<DaemonRes> = vec![
         DaemonRes::Ok,
         DaemonRes::Pong,
@@ -393,7 +586,7 @@ fn daemon_res_json_roundtrip() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn queue_action_json_roundtrip() {
+fn queue_action_json() {
     let actions: Vec<QueueAction> = vec![
         QueueAction::List,
         QueueAction::Clear,
@@ -414,7 +607,7 @@ fn queue_action_json_roundtrip() {
 }
 
 #[test]
-fn library_action_json_roundtrip() {
+fn lib_action_json() {
     let actions: Vec<LibraryAction> = vec![
         LibraryAction::Scan {
             path: "/music".into(),
@@ -432,12 +625,14 @@ fn library_action_json_roundtrip() {
             playlist_id: 1,
             track_ids: vec![1, 2],
         },
-        LibraryAction::ImportM3u {
-            path: "/m.m3u".into(),
+        LibraryAction::ImportPlaylist {
+            path: "/m.m3u8".into(),
+            format: PlaylistFormatKind::M3u8,
         },
-        LibraryAction::ExportM3u {
+        LibraryAction::ExportPlaylist {
             playlist_id: 1,
-            path: "/out.m3u".into(),
+            path: "/out.pls".into(),
+            format: PlaylistFormatKind::Pls,
         },
         LibraryAction::SyncCovers,
         LibraryAction::SyncLyrics,
@@ -448,6 +643,12 @@ fn library_action_json_roundtrip() {
         LibraryAction::RemoveFromPlaylist {
             playlist_id: 1,
             track_id: 2,
+        },
+        LibraryAction::PlaylistDedup { playlist_id: 1 },
+        LibraryAction::PlaylistDoctor { playlist_id: 1 },
+        LibraryAction::PlaylistSort {
+            playlist_id: 1,
+            field: "artist".into(),
         },
         LibraryAction::RemoveTrack { id: 1 },
     ];
@@ -494,7 +695,7 @@ fn encode_decode_multi() {
 }
 
 #[test]
-fn decode_partial_buffer_returns_none() {
+fn decode_partial_none() {
     let events = vec![DaemonEvent::PlaybackPaused { time_pos: 0.0 }];
     let buf = encode(&events).unwrap();
     // Truncate to only length prefix
@@ -504,13 +705,13 @@ fn decode_partial_buffer_returns_none() {
 }
 
 #[test]
-fn decode_truncated_data_returns_none() {
+fn decode_trunc_none() {
     let corrupted = vec![0u8, 0, 0, 5, 0xff, 0xff, 0xff];
     assert!(decode(&corrupted).unwrap().is_none());
 }
 
 #[test]
-fn decode_corrupted_bincode_returns_error() {
+fn decode_corrupt_err() {
     // Length says 4 bytes, but content is not valid bincode
     let bad = b"\x00\x00\x00\x04\xff\xff\xff\xff".to_vec();
     assert!(decode(&bad).is_err());
@@ -521,7 +722,7 @@ fn decode_corrupted_bincode_returns_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn state_transition_stop_play_pause_play_stop() {
+fn trans_stop_play() {
     let mut s = sample_state();
     let track = sample_track();
 
@@ -555,7 +756,7 @@ fn state_transition_seek() {
 }
 
 #[test]
-fn state_transition_seek_clamped() {
+fn trans_seek_clamp() {
     let mut s = sample_state();
     s.duration = 200.0;
     s.seek(999.0).unwrap();
@@ -574,14 +775,14 @@ fn state_transition_volume() {
 }
 
 #[test]
-fn state_transition_volume_clamped() {
+fn trans_volume_clamp() {
     let mut s = sample_state();
     s.set_volume(200).unwrap();
     assert_eq!(s.volume, 100);
 }
 
 #[test]
-fn state_transition_shuffle_toggle() {
+fn trans_shuffle() {
     let mut s = sample_state();
     assert!(!s.shuffle);
     s.toggle_shuffle().unwrap();
@@ -591,16 +792,16 @@ fn state_transition_shuffle_toggle() {
 }
 
 #[test]
-fn state_transition_repeat_cycle() {
+fn trans_repeat_cycle() {
     let mut s = sample_state();
-    s.cycle_repeat(RepeatMode::One).unwrap();
+    s.set_repeat_mode(RepeatMode::One).unwrap();
     assert_eq!(s.repeat, RepeatMode::One);
-    s.cycle_repeat(RepeatMode::All).unwrap();
+    s.set_repeat_mode(RepeatMode::All).unwrap();
     assert_eq!(s.repeat, RepeatMode::All);
 }
 
 #[test]
-fn state_transition_mute_toggle() {
+fn trans_mute_toggle() {
     let mut s = sample_state();
     assert!(!s.mute);
     s.toggle_mute().unwrap();
@@ -621,14 +822,14 @@ fn state_transition_crossfade() {
 }
 
 #[test]
-fn state_transition_crossfade_clamped() {
+fn trans_crossfade() {
     let mut s = sample_state();
     s.set_crossfade(true, 99).unwrap();
     assert_eq!(s.crossfade.as_ref().unwrap().duration_secs, 30);
 }
 
 #[test]
-fn state_transition_advance_queue_one_time() {
+fn trans_advance_once() {
     let mut s = sample_state();
     let t2 = TrackInfo {
         id: 2,
@@ -662,13 +863,13 @@ fn state_transition_advance_queue_one_time() {
 }
 
 #[test]
-fn state_transition_advance_queue_empty() {
+fn trans_advance_empty() {
     let mut s = DaemonState::new();
     assert!(s.advance_queue().unwrap().is_none());
 }
 
 #[test]
-fn state_transition_version_increments() {
+fn trans_version() {
     let mut s = sample_state();
     let v0 = s.version;
     s.play(sample_track()).unwrap();
@@ -744,7 +945,7 @@ fn apply_queue_changed() {
 }
 
 #[test]
-fn apply_repeat_mode_changed() {
+fn repeat_mode_changed() {
     let mut s = sample_state();
     s.apply_event(&DaemonEvent::RepeatModeChanged {
         mode: RepeatMode::One,
@@ -753,7 +954,7 @@ fn apply_repeat_mode_changed() {
 }
 
 #[test]
-fn apply_event_increments_version() {
+fn event_increments_version() {
     let mut s = sample_state();
     let v0 = s.version;
     s.apply_event(&DaemonEvent::PlaybackPaused { time_pos: 0.0 });
@@ -765,7 +966,7 @@ fn apply_event_increments_version() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn crossfade_config_new_clamps() {
+fn crossfade_clamps() {
     let c = CrossfadeConfig::new(true, 40);
     assert_eq!(c.duration_secs, 30);
     let c = CrossfadeConfig::new(true, 5);
@@ -773,7 +974,7 @@ fn crossfade_config_new_clamps() {
 }
 
 #[test]
-fn daemon_state_new_defaults() {
+fn state_defaults() {
     let s = DaemonState::new();
     assert_eq!(s.status, PlaybackStatus::Stopped);
     assert_eq!(s.volume, 100);
@@ -784,34 +985,34 @@ fn daemon_state_new_defaults() {
 }
 
 #[test]
-fn track_info_is_valid() {
+fn track_info_ok() {
     let t = sample_track();
     assert!(t.is_valid());
 }
 
 #[test]
-fn track_info_invalid_empty_path() {
+fn track_no_path() {
     let mut t = sample_track();
     t.path.clear();
     assert!(!t.is_valid());
 }
 
 #[test]
-fn track_info_invalid_empty_hash() {
+fn track_no_hash() {
     let mut t = sample_track();
     t.hash.clear();
     assert!(!t.is_valid());
 }
 
 #[test]
-fn track_info_invalid_negative_duration() {
+fn track_neg_duration() {
     let mut t = sample_track();
     t.duration = -1.0;
     assert!(!t.is_valid());
 }
 
 #[test]
-fn track_info_duration_formatted() {
+fn track_duration_fmt() {
     let mut t = sample_track();
     t.duration = 245.0; // 4:05
     assert_eq!(t.duration_formatted(), "4:05");
@@ -850,13 +1051,13 @@ fn primitives_derive_traits() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn malformed_json_returns_error() {
+fn malformed_json_err() {
     let result: Result<TrackInfo> = serde_json::from_str("not valid json").map_err(Into::into);
     assert!(result.is_err());
 }
 
 #[test]
-fn truncated_bincode_returns_error() {
+fn trunc_bincode_err() {
     let track = sample_track();
     let full = bincode::serialize(&track).unwrap();
     let truncated = &full[..full.len() / 2];
@@ -872,7 +1073,7 @@ fn empty_wire_frame() {
 }
 
 #[test]
-fn unknown_cmd_is_error() {
+fn unknown_cmd_err() {
     let result = DaemonReq::parse_cmd("unknown_command", serde_json::json!({}));
     assert!(result.is_err());
 }
@@ -882,7 +1083,7 @@ fn unknown_cmd_is_error() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn check_invariants_passes_on_valid_state() {
+fn inv_passes_valid() {
     let s = sample_state();
     // Should not panic
     s.check_invariants();
@@ -890,7 +1091,7 @@ fn check_invariants_passes_on_valid_state() {
 
 #[test]
 #[should_panic(expected = "volume 101 exceeds 100")]
-fn check_invariants_volume_too_high() {
+fn inv_volume_high() {
     let mut s = sample_state();
     s.volume = 101;
     s.check_invariants();
@@ -898,7 +1099,7 @@ fn check_invariants_volume_too_high() {
 
 #[test]
 #[should_panic(expected = "out of bounds")]
-fn check_invariants_queue_cursor_oob() {
+fn inv_cursor_oob() {
     let mut s = sample_state();
     s.queue_cursor = 99;
     s.check_invariants();
@@ -906,7 +1107,7 @@ fn check_invariants_queue_cursor_oob() {
 
 #[test]
 #[should_panic(expected = "negative time_pos")]
-fn check_invariants_negative_time_pos() {
+fn inv_neg_time() {
     let mut s = sample_state();
     s.time_pos = -1.0;
     s.check_invariants();
@@ -914,7 +1115,7 @@ fn check_invariants_negative_time_pos() {
 
 #[test]
 #[should_panic(expected = "Playing but current_track is None")]
-fn check_invariants_playing_no_track() {
+fn inv_no_track() {
     let mut s = sample_state();
     s.status = PlaybackStatus::Playing;
     s.current_track = None;
@@ -923,7 +1124,7 @@ fn check_invariants_playing_no_track() {
 
 #[test]
 #[should_panic(expected = "crossfade enabled with duration_secs = 0")]
-fn check_invariants_crossfade_zero_duration() {
+fn inv_crossfade_zero() {
     let mut s = sample_state();
     s.crossfade = Some(CrossfadeConfig {
         enabled: true,
@@ -937,7 +1138,7 @@ fn check_invariants_crossfade_zero_duration() {
 // ---------------------------------------------------------------------------
 
 #[test]
-fn daemon_state_default_eq_new() {
+fn state_defaults_eq() {
     let a = DaemonState::new();
     let b = DaemonState::default();
     assert_eq!(a.version, b.version);

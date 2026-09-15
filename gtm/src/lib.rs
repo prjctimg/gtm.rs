@@ -11,6 +11,7 @@ pub mod cli;
 pub mod footer;
 pub mod keymap;
 pub mod mouse;
+pub mod oauth;
 pub mod picker;
 pub mod progress;
 pub mod reactive;

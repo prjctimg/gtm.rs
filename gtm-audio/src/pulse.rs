@@ -15,12 +15,17 @@ use pulseaudio::protocol;
 use pulseaudio::{Client, PlaybackSource};
 
 use crate::backend::{AudioError, AudioEvent, AudioResult};
-use crate::buffer::{DecodeControl, PREBUFFER_SAMPLES, RingBufferInner, SharedRingBuffer};
+use crate::buffer::{
+    BUFFER_CAPACITY_SAMPLES, DecodeControl, PREBUFFER_SAMPLES, PREBUFFER_SAMPLES_REDUCED,
+    RingBufferInner, SharedRingBuffer,
+};
 use crate::decoder::DecodeThread;
 use crate::eq::{EqGains, EqSource, ReverbSource};
 use crate::mixer::Mixer;
+use crate::stretch::{SpeedControl, TimeStretchSource};
 use crate::symphonia::SymphoniaSource;
 use gtm_core::global::{EqPreset, ReverbConfig};
+use gtm_core::{MAX_VOLUME, volume_from_ratio, volume_ratio};
 use rodio::Source;
 
 struct PaPlaybackSource {
@@ -35,7 +40,7 @@ struct PaPlaybackSource {
 impl PlaybackSource for PaPlaybackSource {
     fn poll_read(self: Pin<&mut Self>, _cx: &mut Context<'_>, buf: &mut [u8]) -> Poll<usize> {
         let self_ = self.get_mut();
-        let vol = self_.volume.load(Ordering::Relaxed) as f32 / 100.0;
+        let vol = volume_ratio(self_.volume.load(Ordering::Relaxed));
         let float_count = buf.len() / 4;
         let mut written = 0usize;
 
@@ -90,50 +95,107 @@ struct PaStreamState {
     stream_volume: Arc<AtomicU8>,
     control: Option<Arc<DecodeControl>>,
     decode_handle: Option<std::thread::JoinHandle<()>>,
+    name: String,
+    sample_rate: u32,
+    channels: u16,
 }
 
 impl PaStreamState {
-    fn new(client: &Client, name: &str, _mixer_volume: &Arc<AtomicU8>) -> AudioResult<Self> {
-        let ring = Arc::new(RingBufferInner::new(44100 * 2 * 3));
-        let stream_volume = Arc::new(AtomicU8::new(0));
+    fn stream_params(sample_rate: u32, channels: u16) -> protocol::PlaybackStreamParams {
+        let sample_rate = sample_rate.clamp(22050, 192000);
+        let channels = if channels == 1 { 1 } else { 2 };
+        protocol::PlaybackStreamParams {
+            sample_spec: protocol::SampleSpec {
+                format: protocol::SampleFormat::Float32Le,
+                channels: channels as u8,
+                sample_rate,
+            },
+            channel_map: if channels == 1 {
+                protocol::ChannelMap::mono()
+            } else {
+                protocol::ChannelMap::stereo()
+            },
+            cvolume: Some(protocol::ChannelVolume::muted(channels as u8)),
+            buffer_attr: protocol::stream::BufferAttr {
+                max_length: u32::MAX,
+                // ~2s buffer and ~1.5s pre-buffer, scaled to the track rate so
+                // the timing stays constant regardless of the source rate.
+                target_length: (sample_rate * channels as u32 * 4 * 2) as u32,
+                pre_buffering: (sample_rate * channels as u32 * 4 * 3 / 2) as u32,
+                minimum_request_length: 1024,
+                fragment_size: u32::MAX,
+            },
+            ..Default::default()
+        }
+    }
 
+    fn create_stream(
+        client: &Client,
+        name: &str,
+        ring: &SharedRingBuffer,
+        stream_volume: &Arc<AtomicU8>,
+        sample_rate: u32,
+        channels: u16,
+    ) -> AudioResult<pulseaudio::PlaybackStream> {
         let source = PaPlaybackSource {
             ring: ring.clone(),
             volume: stream_volume.clone(),
             underrun_burst: 0,
         };
-
-        let params = protocol::PlaybackStreamParams {
-            sample_spec: protocol::SampleSpec {
-                format: protocol::SampleFormat::Float32Le,
-                channels: 2,
-                sample_rate: 44100,
-            },
-            channel_map: protocol::ChannelMap::stereo(),
-            cvolume: Some(protocol::ChannelVolume::muted(2)),
-            buffer_attr: protocol::stream::BufferAttr {
-                max_length: u32::MAX,
-                target_length: (44100 * 2 * 4 * 2) as u32, // ~2s buffer
-                pre_buffering: (PREBUFFER_SAMPLES * 4) as u32,
-                minimum_request_length: 1024,
-                fragment_size: u32::MAX,
-            },
-            ..Default::default()
-        };
-
+        let params = Self::stream_params(sample_rate, channels);
         let stream = tokio::task::block_in_place(|| {
             tokio::runtime::Handle::current()
                 .block_on(client.create_playback_stream(params, source))
         })
         .map_err(|e| AudioError::OutputError(format!("PA create stream '{name}': {e}")))?;
+        Ok(stream)
+    }
 
+    fn new(client: &Client, name: &str, _mixer_volume: &Arc<AtomicU8>) -> AudioResult<Self> {
+        let ring = Arc::new(RingBufferInner::new(BUFFER_CAPACITY_SAMPLES));
+        let stream_volume = Arc::new(AtomicU8::new(0));
+        let stream = Self::create_stream(client, name, &ring, &stream_volume, 44100, 2)?;
         Ok(Self {
             stream,
             ring,
             stream_volume,
             control: None,
             decode_handle: None,
+            name: name.to_string(),
+            sample_rate: 44100,
+            channels: 2,
         })
+    }
+
+    /// Re-opens the playback stream when the source rate or channel count
+    /// differs from what is currently configured. PulseAudio mixes formats on
+    /// the server, so a close-to-native rate avoids extra resampling and,
+    /// crucially, fixes playback speed drift when a track's rate is not 44.1k
+    /// (previously every stream was hard-coded to 44100 Hz).
+    fn reconfigure(&mut self, client: &Client, sample_rate: u32, channels: u16) -> AudioResult<()> {
+        let sample_rate = sample_rate.clamp(22050, 192000);
+        let channels = if channels == 1 { 1 } else { 2 };
+        if sample_rate == self.sample_rate && channels == self.channels {
+            return Ok(());
+        }
+        let stream = Self::create_stream(
+            client,
+            &self.name,
+            &self.ring,
+            &self.stream_volume,
+            sample_rate,
+            channels,
+        )?;
+        self.stream = stream;
+        self.sample_rate = sample_rate;
+        self.channels = channels;
+        log::info!(
+            "pa: stream '{}' reopened at {} Hz / {} ch",
+            self.name,
+            sample_rate,
+            channels
+        );
+        Ok(())
     }
 
     fn stop_decode(&mut self) {
@@ -189,6 +251,7 @@ pub struct PulseAudioMixer {
     eq_enabled: Arc<AtomicBool>,
     reverb_enabled: Arc<AtomicBool>,
     reverb_room_size: Arc<Mutex<f32>>,
+    speed: SpeedControl,
     spectrum: Arc<Mutex<Vec<f32>>>,
 }
 
@@ -197,7 +260,7 @@ impl PulseAudioMixer {
         let client = Client::from_env(c"gtm")
             .map_err(|e| AudioError::OutputError(format!("PulseAudio client: {e}")))?;
 
-        let mixer_volume = Arc::new(AtomicU8::new(100));
+        let mixer_volume = Arc::new(AtomicU8::new(MAX_VOLUME));
 
         let stream_a = PaStreamState::new(&client, "gtm-a", &mixer_volume)?;
         let stream_b = PaStreamState::new(&client, "gtm-b", &mixer_volume)?;
@@ -217,12 +280,13 @@ impl PulseAudioMixer {
             crossfade_duration: 0.0,
             pending_pause: false,
             pause_fade_start: None,
-            stored_volume: 100,
-            user_volume: Arc::new(AtomicU8::new(100)),
+            stored_volume: MAX_VOLUME,
+            user_volume: Arc::new(AtomicU8::new(MAX_VOLUME)),
             eq_gains: EqGains::new_flat(),
             eq_enabled: Arc::new(AtomicBool::new(true)),
             reverb_enabled: Arc::new(AtomicBool::new(false)),
             reverb_room_size: Arc::new(Mutex::new(0.3)),
+            speed: SpeedControl::new(),
             spectrum: Arc::new(Mutex::new(Vec::new())),
         })
     }
@@ -276,6 +340,31 @@ impl PulseAudioMixer {
             .unwrap_or(0.0))
     }
 
+    fn wrap_source(
+        &self,
+        source: Box<dyn Source<Item = f32> + Send>,
+    ) -> Box<dyn Source<Item = f32> + Send> {
+        let source: Box<dyn Source<Item = f32> + Send> =
+            Box::new(TimeStretchSource::new(source, self.speed.clone()));
+        let source = if self.eq_enabled.load(Ordering::Relaxed) {
+            Box::new(EqSource::new(source, self.eq_gains.clone()))
+                as Box<dyn Source<Item = f32> + Send>
+        } else {
+            source
+        };
+        if self.reverb_enabled.load(Ordering::Relaxed) {
+            let room_size = *self.reverb_room_size.lock().unwrap();
+            Box::new(ReverbSource::new(
+                source,
+                room_size,
+                self.reverb_enabled.clone(),
+            )) as Box<dyn Source<Item = f32> + Send>
+        } else {
+            source
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn start_decode(
         path: &str,
         ring: &SharedRingBuffer,
@@ -283,7 +372,9 @@ impl PulseAudioMixer {
         eq_enabled: &Arc<AtomicBool>,
         reverb_enabled: &Arc<AtomicBool>,
         reverb_room_size: &Arc<Mutex<f32>>,
+        speed: &SpeedControl,
         spectrum: &Arc<Mutex<Vec<f32>>>,
+        prebuffer_samples: usize,
     ) -> AudioResult<(Arc<DecodeControl>, std::thread::JoinHandle<()>)> {
         let control = Arc::new(DecodeControl::new());
         let thread = DecodeThread::new(
@@ -294,19 +385,78 @@ impl PulseAudioMixer {
             eq_enabled.clone(),
             reverb_enabled.clone(),
             reverb_room_size.clone(),
+            speed.clone(),
             spectrum.clone(),
+            prebuffer_samples,
         );
         let handle = thread.spawn().map_err(AudioError::DecodeError)?;
 
         let start = Instant::now();
         let timeout = Duration::from_secs(5);
         while !control.ready.load(Ordering::Acquire) && start.elapsed() < timeout {
+            if control.finished.load(Ordering::Acquire) {
+                return Err(AudioError::DecodeError("stream could not be opened".into()));
+            }
             if !control.running.load(Ordering::Acquire) {
                 return Err(AudioError::DecodeError(
                     "decode thread exited before prebuffer".into(),
                 ));
             }
             std::thread::sleep(Duration::from_millis(5));
+        }
+
+        Ok((control, handle))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn start_decode_reader(
+        reader: Box<dyn std::io::Read + Send>,
+        ring: &SharedRingBuffer,
+        eq_gains: &EqGains,
+        eq_enabled: &Arc<AtomicBool>,
+        reverb_enabled: &Arc<AtomicBool>,
+        reverb_room_size: &Arc<Mutex<f32>>,
+        speed: &SpeedControl,
+        spectrum: &Arc<Mutex<Vec<f32>>>,
+    ) -> AudioResult<(Arc<DecodeControl>, std::thread::JoinHandle<()>)> {
+        let control = Arc::new(DecodeControl::new());
+        let thread = DecodeThread::new_reader(
+            reader,
+            ring.clone(),
+            control.clone(),
+            eq_gains.clone(),
+            eq_enabled.clone(),
+            reverb_enabled.clone(),
+            reverb_room_size.clone(),
+            speed.clone(),
+            spectrum.clone(),
+            PREBUFFER_SAMPLES_REDUCED,
+        );
+        let handle = thread.spawn().map_err(AudioError::DecodeError)?;
+
+        // Same readiness contract as `start_decode_reader` on `AudioMixer`:
+        // a live reader that fails to probe exits early with `finished` set
+        // (and `ready` never set), so this wait returns immediately instead
+        // of stalling playback for the whole timeout.
+        let start = Instant::now();
+        let timeout = Duration::from_secs(5);
+        while !control.ready.load(Ordering::Acquire) && start.elapsed() < timeout {
+            if control.finished.load(Ordering::Acquire) {
+                return Err(AudioError::DecodeError(
+                    "live stream could not be opened".into(),
+                ));
+            }
+            if !control.running.load(Ordering::Acquire) {
+                return Err(AudioError::DecodeError(
+                    "decode thread exited before prebuffer".into(),
+                ));
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if !control.ready.load(Ordering::Acquire) {
+            return Err(AudioError::DecodeError(
+                "live stream did not become ready in time".into(),
+            ));
         }
 
         Ok((control, handle))
@@ -362,9 +512,17 @@ impl Mixer for PulseAudioMixer {
             &self.eq_enabled,
             &self.reverb_enabled,
             &self.reverb_room_size,
+            &self.speed,
             &self.spectrum,
+            PREBUFFER_SAMPLES,
         )?;
 
+        let client = self._client.clone();
+        self.active_mut().reconfigure(
+            &client,
+            control.sample_rate.load(Ordering::Relaxed),
+            control.channels.load(Ordering::Relaxed),
+        )?;
         self.active_mut().control = Some(control);
         self.active_mut().decode_handle = Some(handle);
 
@@ -394,21 +552,11 @@ impl Mixer for PulseAudioMixer {
             *self.duration.lock().unwrap() = dur.as_secs_f64();
         }
 
-        let source = if self.eq_enabled.load(Ordering::Relaxed) {
-            Box::new(EqSource::new(source, self.eq_gains.clone()))
-        } else {
-            source
-        };
-        let source = if self.reverb_enabled.load(Ordering::Relaxed) {
-            let room_size = *self.reverb_room_size.lock().unwrap();
-            Box::new(ReverbSource::new(
-                source,
-                room_size,
-                self.reverb_enabled.clone(),
-            ))
-        } else {
-            source
-        };
+        let rate = source.sample_rate().get();
+        let channels = source.channels().get();
+        let client = self._client.clone();
+        self.active_mut().reconfigure(&client, rate, channels)?;
+        let source = self.wrap_source(source);
 
         let ring = self.active().ring.clone();
         let handle = std::thread::Builder::new()
@@ -439,6 +587,52 @@ impl Mixer for PulseAudioMixer {
         Ok(())
     }
 
+    fn load_active_reader(
+        &mut self,
+        reader: Box<dyn std::io::Read + Send>,
+        _start_pos: f64,
+    ) -> AudioResult<()> {
+        self.active_mut().stop_decode();
+
+        self.active().cork();
+        self.active().flush();
+        Self::set_stream_volume(&self.active(), 0);
+
+        let (control, handle) = Self::start_decode_reader(
+            reader,
+            &self.active().ring,
+            &self.eq_gains,
+            &self.eq_enabled,
+            &self.reverb_enabled,
+            &self.reverb_room_size,
+            &self.speed,
+            &self.spectrum,
+        )?;
+
+        let client = self._client.clone();
+        self.active_mut().reconfigure(
+            &client,
+            control.sample_rate.load(Ordering::Relaxed),
+            control.channels.load(Ordering::Relaxed),
+        )?;
+        self.active_mut().control = Some(control);
+        self.active_mut().decode_handle = Some(handle);
+
+        self.active().uncork();
+
+        // Live streams have no meaningful total duration; zero it so the
+        // Finished stall-guard is permanently disabled for this source and a
+        // genuine EOF ends it via the ring's `finished` flag instead.
+        *self.duration.lock().unwrap() = 0.0;
+        *self.position.lock().unwrap() = 0.0;
+        *self.start_time.lock().unwrap() = None;
+        *self.start_pos.lock().unwrap() = 0.0;
+        self.playing.store(false, Ordering::SeqCst);
+        self.crossfade_start = None;
+
+        Ok(())
+    }
+
     fn load_standby(&mut self, path: &str) -> AudioResult<()> {
         self.standby_mut().stop_decode();
 
@@ -453,9 +647,17 @@ impl Mixer for PulseAudioMixer {
             &self.eq_enabled,
             &self.reverb_enabled,
             &self.reverb_room_size,
+            &self.speed,
             &self.spectrum,
+            PREBUFFER_SAMPLES,
         )?;
 
+        let client = self._client.clone();
+        self.standby_mut().reconfigure(
+            &client,
+            control.sample_rate.load(Ordering::Relaxed),
+            control.channels.load(Ordering::Relaxed),
+        )?;
         self.standby_mut().control = Some(control);
         self.standby_mut().decode_handle = Some(handle);
 
@@ -473,21 +675,11 @@ impl Mixer for PulseAudioMixer {
         self.standby().flush();
         Self::set_stream_volume(&self.standby(), 0);
 
-        let source = if self.eq_enabled.load(Ordering::Relaxed) {
-            Box::new(EqSource::new(source, self.eq_gains.clone()))
-        } else {
-            source
-        };
-        let source = if self.reverb_enabled.load(Ordering::Relaxed) {
-            let room_size = *self.reverb_room_size.lock().unwrap();
-            Box::new(ReverbSource::new(
-                source,
-                room_size,
-                self.reverb_enabled.clone(),
-            ))
-        } else {
-            source
-        };
+        let rate = source.sample_rate().get();
+        let channels = source.channels().get();
+        let client = self._client.clone();
+        self.standby_mut().reconfigure(&client, rate, channels)?;
+        let source = self.wrap_source(source);
 
         let ring = self.standby().ring.clone();
         let handle = std::thread::Builder::new()
@@ -575,7 +767,7 @@ impl Mixer for PulseAudioMixer {
     }
 
     fn set_volume(&mut self, volume: u8) -> AudioResult<()> {
-        let vol = volume.min(100);
+        let vol = volume.min(MAX_VOLUME);
         self.user_volume.store(vol, Ordering::SeqCst);
         if !self.pending_pause {
             Self::set_stream_volume(&self.active(), vol);
@@ -706,8 +898,9 @@ impl Mixer for PulseAudioMixer {
                 self.playing.store(false, Ordering::SeqCst);
             } else {
                 let progress = elapsed / FADE_MS;
-                let target = (self.stored_volume.min(100) as f32 / 100.0) * (1.0 - progress as f32);
-                Self::set_stream_volume(&self.active(), (target * 100.0) as u8);
+                let target =
+                    volume_ratio(self.stored_volume.min(MAX_VOLUME)) * (1.0 - progress as f32);
+                Self::set_stream_volume(&self.active(), volume_from_ratio(target));
             }
         }
 
@@ -757,11 +950,19 @@ impl Mixer for PulseAudioMixer {
         *self.reverb_room_size.lock().unwrap() = config.room_size;
     }
 
+    fn set_speed(&self, rate: f32) {
+        self.speed.store(rate);
+    }
+
+    fn speed(&self) -> f32 {
+        self.speed.load()
+    }
+
     fn current_peak_level(&self) -> f32 {
         if !self.playing.load(Ordering::SeqCst) {
             return 0.0;
         }
-        let vol = self.user_volume.load(Ordering::SeqCst) as f32 / 100.0;
+        let vol = volume_ratio(self.user_volume.load(Ordering::SeqCst));
         vol
     }
     fn current_spectrum(&self) -> Vec<f32> {
@@ -791,8 +992,8 @@ impl PulseAudioMixer {
             eased_out
         };
 
-        Self::set_stream_volume(&self.stream_a, (a_vol * 100.0) as u8);
-        Self::set_stream_volume(&self.stream_b, (b_vol * 100.0) as u8);
+        Self::set_stream_volume(&self.stream_a, volume_from_ratio(a_vol as f32));
+        Self::set_stream_volume(&self.stream_b, volume_from_ratio(b_vol as f32));
 
         if progress >= 1.0 {
             self.swap_active_standby();

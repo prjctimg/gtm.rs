@@ -6,6 +6,8 @@
 
 pub type AudioResult<T> = std::result::Result<T, AudioError>;
 
+use gtm_core::CoreError;
+
 #[derive(Debug, Clone)]
 pub enum AudioEvent {
     Position(f64),
@@ -28,9 +30,9 @@ pub enum AudioError {
     SeekError(String),
 }
 
-impl From<AudioError> for gtm_core::CoreError {
+impl From<AudioError> for CoreError {
     fn from(e: AudioError) -> Self {
-        gtm_core::CoreError::Daemon(e.to_string())
+        CoreError::Daemon(e.to_string())
     }
 }
 
@@ -39,7 +41,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_audio_error_display() {
+    fn audio_error_display() {
         assert_eq!(
             AudioError::OpenFailed("foo".into()).to_string(),
             "failed to open file: foo"
@@ -63,14 +65,14 @@ mod tests {
     }
 
     #[test]
-    fn test_audio_error_from_to_core() {
+    fn audio_error_core() {
         let err = AudioError::OpenFailed("x".into());
-        let core: gtm_core::CoreError = err.into();
+        let core: CoreError = err.into();
         assert_eq!(core.to_string(), "daemon error: failed to open file: x");
     }
 
     #[test]
-    fn test_audio_event_debug_clone() {
+    fn audio_event_clone() {
         let ev = AudioEvent::Position(42.5);
         let cloned = ev.clone();
         assert_eq!(format!("{:?}", cloned), "Position(42.5)");

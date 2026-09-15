@@ -5,6 +5,7 @@
 // This is free software released under the GPL-3.0 license.
 
 use std::path::PathBuf;
+use std::process::Command;
 
 /// Detect whether we are running inside Termux.
 ///
@@ -122,11 +123,10 @@ pub fn termux_music_dirs() -> Vec<PathBuf> {
 /// server is kept alive with `--exit-idle-time=-1` so it does not die between
 /// command invocations. Failures are swallowed (the daemon reports the real
 /// init error if audio still can't start).
-pub fn ensure_termux_pulseaudio() {
+pub fn ensure_termux_pulse() {
     if !is_termux() {
         return;
     }
-    use std::process::Command;
     // If the user already routes audio via PULSE_SERVER (e.g. remote TCP), do
     // not spawn a local server that would compete for the default sink.
     let _ = Command::new("pulseaudio")

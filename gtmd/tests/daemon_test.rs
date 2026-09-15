@@ -5,7 +5,10 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 
-use gtm_core::ipc::{DaemonReq, DaemonRes, PROTOCOL_VERSION, QueueAction, WireReq, WireRes};
+use gtm_core::global::PlaybackStatus;
+use gtm_core::ipc::{
+    DaemonReq, DaemonRes, LibraryAction, PROTOCOL_VERSION, QueueAction, WireReq, WireRes,
+};
 
 use gtmd::config::{DaemonArgs, DaemonConfig};
 use gtmd::daemon::Daemon;
@@ -214,7 +217,7 @@ async fn test_queue_list() {
 }
 
 #[tokio::test]
-async fn test_queue_add_and_list() {
+async fn queue_add_list() {
     let (handle, config) = daemon_handle().await;
     let (mut reader, mut writer) = connect(&config.socket_path).await;
 
@@ -257,7 +260,7 @@ async fn test_queue_add_and_list() {
 }
 
 #[tokio::test]
-async fn test_queue_add_multiple() {
+async fn queue_add_multi() {
     let (handle, config) = daemon_handle().await;
     let (mut reader, mut writer) = connect(&config.socket_path).await;
 
@@ -442,7 +445,7 @@ fn create_test_wav(path: &std::path::Path, duration_secs: f64) {
 /// Deleting the currently-playing track must stop playback and drop it from
 /// the queue so neither the row nor the audio survives (pause-then-delete).
 #[tokio::test]
-async fn test_delete_playing_track() {
+async fn delete_playing_track() {
     let (handle, config) = daemon_handle().await;
 
     let audio_dir = config.data_dir.join("audio");
@@ -459,7 +462,7 @@ async fn test_delete_playing_track() {
         &mut reader,
         &mut writer,
         &DaemonReq::Library {
-            action: gtm_core::ipc::LibraryAction::Scan {
+            action: LibraryAction::Scan {
                 path: audio_dir.to_string_lossy().to_string(),
             },
         },
@@ -507,19 +510,19 @@ async fn test_delete_playing_track() {
         &mut reader,
         &mut writer,
         &DaemonReq::Library {
-            action: gtm_core::ipc::LibraryAction::RemoveTrack { id: track_id },
+            action: LibraryAction::RemoveTrack { id: track_id },
         },
     )
     .await;
     assert!(matches!(res, DaemonRes::Ok));
 
-    let mut status = gtm_core::global::PlaybackStatus::Playing;
+    let mut status = PlaybackStatus::Playing;
     for _ in 0..50 {
         let res = send_req(&mut reader, &mut writer, &DaemonReq::GetStatus).await;
         let DaemonRes::Status { state } = res else {
             panic!("expected Status, got {res:?}");
         };
-        if state.status == gtm_core::global::PlaybackStatus::Stopped {
+        if state.status == PlaybackStatus::Stopped {
             status = state.status;
             break;
         }
@@ -529,11 +532,95 @@ async fn test_delete_playing_track() {
     let DaemonRes::Status { state } = res else {
         panic!("expected Status, got {res:?}");
     };
-    assert_eq!(status, gtm_core::global::PlaybackStatus::Stopped);
+    assert_eq!(status, PlaybackStatus::Stopped);
     assert!(state.current_track.is_none());
     assert!(state.queue.is_empty());
 
     handle.abort();
     let _ = std::fs::remove_file(&wav_path);
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn lastfm_setup() {
+    let (handle, config) = daemon_handle().await;
+    let (mut reader, mut writer) = connect(&config.socket_path).await;
+
+    let res = send_req(
+        &mut reader,
+        &mut writer,
+        &DaemonReq::LastfmSetConfig {
+            enabled: true,
+            api_key: Some("k1".into()),
+            api_secret: Some("s1".into()),
+            session_key: Some("sess".into()),
+            min_play_secs: None,
+            min_play_pct: None,
+        },
+    )
+    .await;
+    assert!(matches!(res, DaemonRes::Ok), "got {res:?}");
+
+    let res = send_req(&mut reader, &mut writer, &DaemonReq::LastfmAuthUrl).await;
+    match res {
+        DaemonRes::LastfmAuthUrlRes { url } => {
+            assert!(url.contains("api_key=k1"), "unexpected url {url}");
+        }
+        other => panic!("expected LastfmAuthUrlRes, got {other:?}"),
+    }
+
+    let res = send_req(&mut reader, &mut writer, &DaemonReq::LastfmStatus).await;
+    match res {
+        DaemonRes::LastfmStatusRes {
+            enabled,
+            api_key,
+            session_token,
+            ready,
+        } => {
+            assert!(enabled, "scrobbling should be enabled");
+            assert_eq!(api_key.as_deref(), Some("k1"));
+            assert_eq!(session_token.as_deref(), Some("sess"));
+            assert!(ready, "manager should be ready once key+secret are set");
+        }
+        other => panic!("expected LastfmStatusRes, got {other:?}"),
+    }
+
+    handle.abort();
+    cleanup(&config);
+}
+
+#[tokio::test]
+async fn oauth_start_url() {
+    let (handle, config) = daemon_handle().await;
+    let (mut reader, mut writer) = connect(&config.socket_path).await;
+
+    let res = send_req(
+        &mut reader,
+        &mut writer,
+        &DaemonReq::SpotifyOauthStart {
+            client_id: "0123456789abcdef0123456789abcdef".into(),
+            port: 0,
+        },
+    )
+    .await;
+    match res {
+        DaemonRes::SpotifyOauthStarted { url } => {
+            assert!(
+                url.contains("client_id=0123456789abcdef0123456789abcdef"),
+                "unexpected authorize url {url}"
+            );
+            assert!(
+                url.contains("accounts.spotify.com/authorize"),
+                "unexpected authorize url {url}"
+            );
+            assert!(
+                url.contains("code_challenge="),
+                "missing PKCE challenge in {url}"
+            );
+        }
+        other => panic!("expected SpotifyOauthStarted, got {other:?}"),
+    }
+
+    handle.abort();
     cleanup(&config);
 }

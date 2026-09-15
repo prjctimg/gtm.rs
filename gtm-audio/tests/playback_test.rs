@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use gtm_audio::AudioMixer;
+use gtm_audio::{AudioEvent, AudioMixer};
 
 static TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
@@ -54,7 +54,7 @@ fn test_wav_path() -> std::path::PathBuf {
 }
 
 #[test]
-fn test_mixer_load_play_pause_stop() {
+fn mixer_play_pause() {
     let wav_path = test_wav_path();
     create_test_wav(&wav_path, 3.0);
 
@@ -80,7 +80,7 @@ fn test_mixer_load_play_pause_stop() {
     std::thread::sleep(Duration::from_millis(200));
     let ev = mixer.poll().unwrap();
     assert!(ev.is_some(), "expected a Position event after playing");
-    if let Some(gtm_audio::AudioEvent::Position(pos)) = ev {
+    if let Some(AudioEvent::Position(pos)) = ev {
         assert!(pos > 0.0, "position should advance after playing");
         assert!(pos <= mixer.duration());
     }
@@ -130,7 +130,7 @@ fn test_mixer_load_play_pause_stop() {
 }
 
 #[test]
-fn test_mixer_poll_detects_finished() {
+fn mixer_poll_done() {
     let wav_path = test_wav_path();
     create_test_wav(&wav_path, 0.5);
 
@@ -161,7 +161,7 @@ fn test_mixer_poll_detects_finished() {
 }
 
 #[test]
-fn test_mixer_multiple_volume_levels() {
+fn mixer_volume_levels() {
     let wav_path = test_wav_path();
     create_test_wav(&wav_path, 1.0);
 
@@ -190,7 +190,7 @@ fn test_mixer_multiple_volume_levels() {
 }
 
 #[test]
-fn test_mixer_load_nonexistent_file() {
+fn mixer_missing_file() {
     let mut mixer = match AudioMixer::new() {
         Ok(m) => m,
         Err(e) => {

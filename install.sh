@@ -29,6 +29,7 @@ MUTED='\033[0;2m'
 RED='\033[0;31m'
 ORANGE='\033[38;5;214m'
 GREEN='\033[0;32m'
+BOLD='\033[1m'
 
 usage() {
   cat <<EOF
@@ -65,6 +66,8 @@ die() {
 need() {
   command -v "$1" >/dev/null 2>&1 || die "requires '$1' — install it first, or download a release archive manually"
 }
+# Colourised header for a dependency-install step (binaries, man pages, …).
+step() { printf "${BOLD}${GREEN}==>${NC} ${BOLD}%s${NC}\n" "$*" >&2; }
 
 CLR_RESET=$'\033[0m'
 CLR_DIM=$'\033[2m'
@@ -96,36 +99,44 @@ draw_progress() {
   printf '\033[0m'
 }
 
-# Download a URL with a gradient progress bar (when a terminal + content
-# length are available), falling back to curl's own meter otherwise.
+# Download a URL with a gradient progress bar. This is the single shared
+# download path for every channel (stable, pinned-version and nightly); the
+# CONTENT-LENGTH is fetched up front when a terminal is available so the bar
+# fills against a known total, and degrades to a byte counter when no length
+# is advertised. Fully non-interactive runs (stderr redirected) skip the
+# drawing but still use the same curl underneath.
 #   download_gradient <url> <outfile>
 download_gradient() {
-  local url="$1" out="$2" total="" bytes=0 prog
-  if [ -t 1 ] || [ -t 2 ]; then
+  local url="$1" out="$2" total="" bytes=0 prog label shown=0
+  if [ -t 2 ]; then
     total=$(curl -sfIL "$url" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2; exit}')
-  fi
-  if [ -z "$total" ] || [ "$total" -le 0 ]; then
-    curl -#fL "$url" -o "$out"
-    return $?
+    case "${total}" in '' | *[!0-9]*) total="" ;; esac
   fi
   curl -fL "$url" -o "$out" 2>/dev/null &
   local pid=$!
-  local shown=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ -f "$out" ]; then
       bytes=$(wc -c < "$out" 2>/dev/null || echo 0)
-      prog=$(awk -v b="$bytes" -v t="$total" 'BEGIN{ if(t<=0)printf "0"; else printf "%.3f", (b<t?b:t)/t }')
+    else
+      bytes=0
+    fi
+    if [ -n "$total" ]; then
+      prog=$(awk -v b="$bytes" -v t="$total" 'BEGIN{ if(t<=0){print "0"; exit} b=(b<t?b:t); printf "%.3f", b/t }')
+      label=$(awk -v b="$bytes" -v t="$total" 'BEGIN{ printf "%.1f", b/1048576; printf " of "; printf "%.1f", t/1048576; printf " MB" }')
     else
       prog=0
+      label=$(awk -v b="$bytes" 'BEGIN{ printf "%.1f", b/1048576; printf " MB" }')
     fi
-    draw_progress "$prog" "$(awk -v b="$bytes" 'BEGIN{ printf "%.1f", b/1048576 }') / $(awk -v t="$total" 'BEGIN{ printf "%.1f", t/1048576 }') MB" >&2
-    shown=1
+    if [ -t 2 ]; then
+      draw_progress "$prog" "$label" >&2
+      shown=1
+    fi
     sleep 0.15
   done
   wait "$pid"
   local rc=$?
   if [ "$shown" = 1 ]; then
-    draw_progress 1 "$(awk -v b="$bytes" 'BEGIN{ printf "%.1f", b/1048576 }') / $(awk -v t="$total" 'BEGIN{ printf "%.1f", t/1048576 }') MB" >&2
+    draw_progress "$prog" "$label" >&2
     printf '\n' >&2
   fi
   return "$rc"
@@ -208,15 +219,12 @@ detect_platform() {
   elif [ "${OS}" = "darwin" ]; then
     PLATFORM="aarch64-darwin"
   else
-    # Linux — pick the glibc (Debian 12) or musl (Alpine-style) archive.
-    if [ -f /etc/alpine-release ]; then
-      is_musl=true
+    # Linux — Arch, musl (Alpine-style) or glibc (Debian) archive.
+    if [ -f /etc/arch-release ] || command -v pacman >/dev/null 2>&1; then
+      PLATFORM="arch-${ARCH}"
+    elif [ -f /etc/alpine-release ]; then
+      PLATFORM="${ARCH}-linux-musl"
     elif command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
-      is_musl=true
-    else
-      is_musl=false
-    fi
-    if [ "${is_musl}" = true ]; then
       PLATFORM="${ARCH}-linux-musl"
     else
       PLATFORM="debian-12-${ARCH}"
@@ -230,6 +238,35 @@ resolve_latest_stable_tag() {
     | sed -n 's/.*"tag_name": *"v\([^"]*\)".*/\1/p' || true)"
   [ -n "${tag}" ] || die "could not resolve the latest stable release from GitHub"
   echo "${tag}"
+}
+
+# Resolve the download URL for <archive> on the release <tag>.
+#
+# The public GitHub API is consulted first: it omits draft releases, so a
+# nightly that is mid-build (temporarily toggled to a draft) resolves to "not
+# published yet" instead of a silent 404 from releases/download/nightly/….
+# When the caller passes `strict` (nightly), a failed resolution aborts so we
+# never ask curl to fetch a URL that cannot exist; otherwise (stable) we fall
+# back to the conventional release URL so installs keep working even when the
+# API is unreachable or rate-limited.
+#   resolve_asset_url <tag> <archive> [strict]
+resolve_asset_url() {
+  local tag="$1" archive="$2" strict="${3:-0}"
+  local direct="https://github.com/${REPO}/releases/download/${tag}/${archive}"
+  local names
+  names="$(curl -sf "https://api.github.com/repos/${REPO}/releases/tags/${tag}" 2>/dev/null \
+    | sed 's/}, *{/\n/g' \
+    | grep -o '"name": *"[^"]*"' \
+    | sed 's/^"name": *"//; s/"$//')" || true
+  if printf '%s\n' "${names}" | grep -qxF "${archive}"; then
+    printf '%s\n' "${direct}"
+    return 0
+  fi
+  if [ "${strict}" = 1 ]; then
+    return 1
+  fi
+  printf '%s\n' "${direct}"
+  return 0
 }
 
 # ── Bootstrap mode: download this system's archive, extract, re-run ───────────
@@ -253,7 +290,16 @@ bootstrap_install() {
   fi
 
   local archive_name="gtm-${PLATFORM}.tar.gz"
-  local url="https://github.com/${REPO}/releases/download/${tag}/${archive_name}"
+  local url=""
+  if [ "${CHANNEL}" = "nightly" ]; then
+    # Resolve strictly against the published nightly so a draft (mid-build)
+    # resolves to a clear "try again" instead of a dead 404 URL.
+    url="$(resolve_asset_url "${tag}" "${archive_name}" 1)" || {
+      die "nightly archive '${archive_name}' is not published yet — the latest nightly build may still be running or failed. Retry in a few minutes, or install a stable release with: install.sh --version <ver>"
+    }
+  else
+    url="$(resolve_asset_url "${tag}" "${archive_name}")"
+  fi
 
   # Script-scope variable (no `local`): the EXIT trap below must still be
   # able to read it after this function returns, or `set -u` would trip on
@@ -321,16 +367,18 @@ install_from_archive() {
   fi
 
   log "installing to ${prefix} (bin: ${bindir})"
+  log ""
 
   # Binaries
   if [ ! -d "bin" ]; then
     die "archive is missing its bin/ directory"
   fi
   mkdir -p "${bindir}"
+  step "binaries"
   for name in gtm gtmd; do
     if [ -f "bin/${name}" ]; then
       install -m 0755 "bin/${name}" "${bindir}/${name}"
-      ok "${name} -> ${bindir}/${name}"
+      ok "  ${name} -> ${bindir}/${name}"
     else
       warn "missing bin/${name} — skipping"
     fi
@@ -338,16 +386,18 @@ install_from_archive() {
 
   # Man pages
   if [ -d "man/man1" ]; then
+    step "man pages"
     mkdir -p "${mandir}"
     for f in man/man1/*.1; do
       [ -f "${f}" ] || continue
       install -m 0644 "${f}" "${mandir}/$(basename "${f}")"
     done
-    ok "man pages -> ${mandir}/"
+    ok "  ${mandir}/"
   fi
 
   # Completions — place each file into the conventional directory for its shell.
   if [ -d "completions" ]; then
+    step "shell completions"
     for f in completions/*; do
       [ -f "${f}" ] || continue
       base="$(basename "${f}")"
@@ -379,9 +429,10 @@ install_from_archive() {
 
   # systemd user unit (Linux only — not macOS/Android)
   if [ "${OS}" = "linux" ] && [ -f "systemd/gtmd.service" ]; then
+    step "systemd user unit"
     mkdir -p "${systemd_dir}"
     install -m 0644 "systemd/gtmd.service" "${systemd_dir}/gtmd.service"
-    ok "systemd user unit -> ${systemd_dir}/gtmd.service"
+    ok "  ${systemd_dir}/gtmd.service"
     log "enable with: systemctl --user enable --now gtmd"
   elif [ -f "systemd/gtmd.service" ]; then
     info "skipping systemd unit (no systemd on ${OS})"
@@ -389,14 +440,16 @@ install_from_archive() {
 
   # Desktop entry + icon
   if [ -f "desktop/gtm.desktop" ]; then
+    step "desktop entry"
     mkdir -p "${applications_dir}"
     install -m 0644 "desktop/gtm.desktop" "${applications_dir}/gtm.desktop"
-    ok "desktop entry -> ${applications_dir}/gtm.desktop"
+    ok "  ${applications_dir}/gtm.desktop"
   fi
   if [ -f "icons/gtm.svg" ]; then
+    step "icon"
     mkdir -p "${icons_dir}"
     install -m 0644 "icons/gtm.svg" "${icons_dir}/gtm.svg"
-    ok "icon -> ${icons_dir}/gtm.svg"
+    ok "  ${icons_dir}/gtm.svg"
   fi
 
   ok "installation complete"

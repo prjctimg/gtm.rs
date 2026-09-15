@@ -5,6 +5,7 @@
 //
 // This is free software released under the GPL-3.0 license.
 
+use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
@@ -17,6 +18,7 @@ use gtm_core::global::{EQ_DEFAULT_Q, EQ_FREQUENCIES};
 
 use crate::buffer::{DecodeControl, SharedRingBuffer};
 use crate::eq::EqGains;
+use crate::stretch::{SpeedControl, TimeStretchSource};
 use crate::symphonia::SymphoniaSource;
 
 // ---------------------------------------------------------------------------
@@ -159,19 +161,77 @@ impl SpectrumAnalyzer {
 }
 
 // ---------------------------------------------------------------------------
+// Thread priority: protect the decode thread from CPU-bound siblings
+// ---------------------------------------------------------------------------
+
+/// Best-effort bump of the current thread above the CFS default so a busy
+/// desktop (rendering, builds, the network stack) can't preempt decoding.
+/// Tries SCHED_FIFO first (needs CAP_SYS_NICE / rtkit), then SCHED_RR, then
+/// a moderated nice value.  All failures are intentional and ignored — this
+/// is an optimization, never a requirement.
+#[cfg(target_os = "linux")]
+fn boost_thread_priority() {
+    unsafe {
+        // glibc exposes only `sched_priority` (private rest), while musl
+        // exposes the POSIX sporadic-scheduling fields too — zero-initialise
+        // so the literal works on every libc variant.
+        let mut param: libc::sched_param = std::mem::zeroed();
+        param.sched_priority = 1;
+        let allowed_sched = [
+            libc::SCHED_FIFO,
+            libc::SCHED_RR,
+            libc::sched_getscheduler(0),
+        ];
+        for sched in allowed_sched {
+            if libc::pthread_setschedparam(libc::pthread_self(), sched, &param) == 0 {
+                return;
+            }
+        }
+        // SCHED_OTHER twist: keep the thread out of the top of the CFS queue;
+        // lowering below the parent's nice needs privilege, but nudging the
+        // process doesn't hurt when permitted.
+        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+    }
+}
+
+// Other unix platforms (macOS, BSDs): sched_param/FIFO/RR are Linux-only, so
+// fall back to a nice-value nudge.
+#[cfg(all(unix, not(target_os = "linux")))]
+fn boost_thread_priority() {
+    unsafe {
+        let _ = libc::setpriority(libc::PRIO_PROCESS, 0, -10);
+    }
+}
+
+#[cfg(not(unix))]
+fn boost_thread_priority() {}
+
+// ---------------------------------------------------------------------------
 // DecodeThread owns a dedicated std::thread
 // ---------------------------------------------------------------------------
 
 pub struct DecodeThread {
-    path: String,
+    source: DecodeSource,
     shared: SharedRingBuffer,
     control: Arc<DecodeControl>,
     eq_gains: EqGains,
     eq_enabled: Arc<AtomicBool>,
     reverb_enabled: Arc<AtomicBool>,
     reverb_room_size: Arc<Mutex<f32>>,
+    speed: SpeedControl,
     spectrum: Arc<Mutex<Vec<f32>>>,
     prebuffer_samples: usize,
+}
+
+/// What the decode thread reads its samples from. Local files reopen on seek;
+/// live transport byte streams are consumed once (seeks are reported as
+/// not-supported and the request is dropped).
+enum DecodeSource {
+    /// Local file opened with `SymphoniaSource::from_file` (seek = reopen).
+    File { path: String },
+    /// Live byte stream handed straight to `SymphoniaSource::from_reader`
+    /// with no re-opener. Declared so one-shot readers never race a seek.
+    Reader(Option<Box<dyn Read + Send>>),
 }
 
 impl DecodeThread {
@@ -184,17 +244,50 @@ impl DecodeThread {
         eq_enabled: Arc<AtomicBool>,
         reverb_enabled: Arc<AtomicBool>,
         reverb_room_size: Arc<Mutex<f32>>,
+        speed: SpeedControl,
         spectrum: Arc<Mutex<Vec<f32>>>,
         prebuffer_samples: usize,
     ) -> Self {
         Self {
-            path,
+            source: DecodeSource::File { path },
             shared,
             control,
             eq_gains,
             eq_enabled,
             reverb_enabled,
             reverb_room_size,
+            speed,
+            spectrum,
+            prebuffer_samples,
+        }
+    }
+
+    /// Same as [`DecodeThread::new`] but samples come from a live byte
+    /// transport (radio/HTTP stream) instead of a seekable file. The reader
+    /// is owned and drained by this thread; seeking a live source is
+    /// unsupported and logged as a no-op.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_reader(
+        reader: Box<dyn Read + Send>,
+        shared: SharedRingBuffer,
+        control: Arc<DecodeControl>,
+        eq_gains: EqGains,
+        eq_enabled: Arc<AtomicBool>,
+        reverb_enabled: Arc<AtomicBool>,
+        reverb_room_size: Arc<Mutex<f32>>,
+        speed: SpeedControl,
+        spectrum: Arc<Mutex<Vec<f32>>>,
+        prebuffer_samples: usize,
+    ) -> Self {
+        Self {
+            source: DecodeSource::Reader(Some(reader)),
+            shared,
+            control,
+            eq_gains,
+            eq_enabled,
+            reverb_enabled,
+            reverb_room_size,
+            speed,
             spectrum,
             prebuffer_samples,
         }
@@ -203,13 +296,16 @@ impl DecodeThread {
     pub fn spawn(self) -> Result<JoinHandle<()>, String> {
         std::thread::Builder::new()
             .name("gtm-decode".into())
-            .spawn(move || self.run())
+            .spawn(move || {
+                boost_thread_priority();
+                self.run()
+            })
             .map_err(|e| format!("failed to spawn decode thread: {e}"))
     }
 }
 
 impl DecodeThread {
-    fn run(self) {
+    fn run(mut self) {
         let mut start_pos = 0.0_f64;
 
         loop {
@@ -218,13 +314,37 @@ impl DecodeThread {
             }
 
             // Create decoder for current position
-            let raw = match SymphoniaSource::from_file(&self.path, start_pos) {
-                Ok(s) => s,
-                Err(e) => {
-                    log::error!("decode thread: failed to open {}: {e}", self.path);
-                    self.shared.set_finished(true);
-                    self.control.ready.store(true, Ordering::Release);
-                    break;
+            let raw = match &mut self.source {
+                DecodeSource::File { path } => match SymphoniaSource::from_file(path, start_pos) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        log::error!("decode thread: failed to open {}: {e}", path);
+                        self.shared.set_finished(true);
+                        self.control.ready.store(true, Ordering::Release);
+                        break;
+                    }
+                },
+                DecodeSource::Reader(reader) => {
+                    // Live transport: consume the reader once. A probe or
+                    // read failure terminates the thread (the ring signals
+                    // finished so the consumer can end cleanly); `ready` stays
+                    // false so the launching mixer surfaces a clean error
+                    // instead of appending an empty source.
+                    let Some(r) = reader.take() else {
+                        log::error!("decode thread: live reader already consumed");
+                        self.shared.set_finished(true);
+                        self.control.finished.store(true, Ordering::Release);
+                        return;
+                    };
+                    match SymphoniaSource::from_reader(r, None, 0.0) {
+                        Ok(s) => Box::new(s) as Box<dyn Source<Item = f32> + Send>,
+                        Err(e) => {
+                            log::error!("decode thread: failed to open live stream: {e}");
+                            self.shared.set_finished(true);
+                            self.control.finished.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
                 }
             };
 
@@ -267,7 +387,7 @@ impl DecodeThread {
 
             // Decode loop: read from SymphoniaSource, process, write to ring buffer
             // Use an explicit loop over the iterator so we can check seek/running flags.
-            let mut source_iter = raw;
+            let mut source_iter = TimeStretchSource::new(raw, self.speed.clone());
 
             loop {
                 // Check for stop
@@ -279,11 +399,21 @@ impl DecodeThread {
 
                 // Check for seek request
                 if let Some(target_secs) = self.control.consume_seek() {
-                    log::info!("decode thread: seek to {target_secs:.2}s");
-                    start_pos = target_secs;
-                    self.shared.flush();
                     self.control.seeking.store(false, Ordering::Release);
-                    break; // restart decoder at new position
+                    match &self.source {
+                        DecodeSource::Reader(_) => {
+                            // Live transports cannot seek: the request is
+                            // dropped so a stale seek can never mask EOF or
+                            // strand the consumer on the seeking flag.
+                            log::debug!("decode thread: seek ignored on live stream");
+                        }
+                        DecodeSource::File { .. } => {
+                            log::info!("decode thread: seek to {target_secs:.2}s");
+                            start_pos = target_secs;
+                            self.shared.flush();
+                            break; // restart decoder at new position
+                        }
+                    }
                 }
 
                 // Check ring buffer space: when nearly full, sleep briefly so
@@ -358,8 +488,8 @@ impl DecodeThread {
                                         let (out_l, out_r) =
                                             rev.process_stereo(eq_sample, right_eq);
                                         // Write left now, push right to ring buffer
-                                        self.shared.push_blocking(out_l);
-                                        self.shared.push_blocking(out_r);
+                                        self.shared.push_blocking(out_l, &self.control.running);
+                                        self.shared.push_blocking(out_r, &self.control.running);
                                         sample_count += 1;
                                         prebuffer_check(
                                             &self.shared,
@@ -369,8 +499,8 @@ impl DecodeThread {
                                         );
                                         continue; // both channels written
                                     } else {
-                                        self.shared.push_blocking(eq_sample);
-                                        self.shared.push_blocking(right_eq);
+                                        self.shared.push_blocking(eq_sample, &self.control.running);
+                                        self.shared.push_blocking(right_eq, &self.control.running);
                                         sample_count += 1;
                                         prebuffer_check(
                                             &self.shared,
@@ -382,7 +512,7 @@ impl DecodeThread {
                                     }
                                 }
                                 None => {
-                                    self.shared.push_blocking(eq_sample);
+                                    self.shared.push_blocking(eq_sample, &self.control.running);
                                     self.shared.set_finished(true);
                                     self.control.ready.store(true, Ordering::Release);
                                     return;
@@ -404,7 +534,8 @@ impl DecodeThread {
                     eq_sample
                 };
 
-                self.shared.push_blocking(final_sample);
+                self.shared
+                    .push_blocking(final_sample, &self.control.running);
                 sample_count += 1;
 
                 // Accumulate (decimated) samples for spectrum analysis.
@@ -451,7 +582,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn log_bands_are_monotonic_and_covered() {
+    fn log_bands_cover() {
         let a = SpectrumAnalyzer::new(44_100.0);
         for b in 0..SPECTRUM_BINS {
             assert!(a.band_edges[b + 1] > a.band_edges[b]);
@@ -459,7 +590,7 @@ mod tests {
     }
 
     #[test]
-    fn sine_energy_lands_in_expected_band() {
+    fn sine_energy_band() {
         let sr = 44_100.0;
         let freq = 440.0f32;
         let mut a = SpectrumAnalyzer::new(sr);
