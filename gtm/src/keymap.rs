@@ -43,12 +43,21 @@ pub enum KeyboardAction {
     Stop,
     VolumeUp,
     VolumeDown,
+    SpeedUp,
+    SpeedDown,
+    ToggleLowPower,
     SeekForward,
     SeekBackward,
     ToggleShuffle,
     CycleRepeat,
     ToggleMute,
+    /// Toggle mono downmix (`Alt+1`).
+    ToggleMono,
     ToggleFavourite,
+    /// Love / un-love the current track on Last.fm (`*`).
+    ToggleLove,
+    /// Toggle Last.fm scrobbling for this session (`&`).
+    ToggleScrobble,
 
     // Queue
     ClearQueue,
@@ -343,11 +352,42 @@ pub fn default_keybindings() -> Keybindings {
                     contexts: vec![KeyContext::Normal],
                 },
             ),
+            // Speed up/down: > / < (pitch-preserving)
+            (
+                KeyCode::Char('>').into(),
+                BoundCommand {
+                    action: KeyboardAction::SpeedUp,
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            (
+                KeyCode::Char('<').into(),
+                BoundCommand {
+                    action: KeyboardAction::SpeedDown,
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            // Low-power mode: z
+            (
+                KeyCode::Char('z').into(),
+                BoundCommand {
+                    action: KeyboardAction::ToggleLowPower,
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
             // Mute: m
             (
                 KeyCode::Char('m').into(),
                 BoundCommand {
                     action: KeyboardAction::ToggleMute,
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            // Mono downmix: Alt+1
+            (
+                KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT),
+                BoundCommand {
+                    action: KeyboardAction::ToggleMono,
                     contexts: vec![KeyContext::Normal],
                 },
             ),
@@ -371,6 +411,22 @@ pub fn default_keybindings() -> Keybindings {
                 KeyCode::Char('f').into(),
                 BoundCommand {
                     action: KeyboardAction::ToggleFavourite,
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            // Last.fm love/unlove: *
+            (
+                KeyCode::Char('*').into(),
+                BoundCommand {
+                    action: KeyboardAction::ToggleLove,
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            // Last.fm session scrobble toggle: &
+            (
+                KeyCode::Char('&').into(),
+                BoundCommand {
+                    action: KeyboardAction::ToggleScrobble,
                     contexts: vec![KeyContext::Normal],
                 },
             ),
@@ -561,9 +617,51 @@ pub fn default_keybindings() -> Keybindings {
                 },
             ),
             (
+                KeyEvent::new(KeyCode::Char('u'), KeyModifiers::ALT),
+                BoundCommand {
+                    action: KeyboardAction::OpenOverlay(PickerId::SubsonicSearch),
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
+                BoundCommand {
+                    action: KeyboardAction::OpenOverlay(PickerId::LoadStream),
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT),
+                BoundCommand {
+                    action: KeyboardAction::OpenOverlay(PickerId::PodcastFeeds),
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
+                BoundCommand {
+                    action: KeyboardAction::OpenOverlay(PickerId::RadioTop),
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('t'), KeyModifiers::ALT),
+                BoundCommand {
+                    action: KeyboardAction::OpenOverlay(PickerId::RadioBrowse),
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            (
                 KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT),
                 BoundCommand {
                     action: KeyboardAction::OpenOverlay(PickerId::Notifications),
+                    contexts: vec![KeyContext::Normal],
+                },
+            ),
+            (
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+                BoundCommand {
+                    action: KeyboardAction::OpenOverlay(PickerId::Setup),
                     contexts: vec![KeyContext::Normal],
                 },
             ),
@@ -754,12 +852,18 @@ impl KeyboardAction {
             "stop" => KeyboardAction::Stop,
             "volume_up" | "vol_up" => KeyboardAction::VolumeUp,
             "volume_down" | "vol_down" => KeyboardAction::VolumeDown,
+            "speed_up" => KeyboardAction::SpeedUp,
+            "speed_down" => KeyboardAction::SpeedDown,
+            "toggle_low_power" | "low_power" => KeyboardAction::ToggleLowPower,
             "seek_forward" | "seek_fwd" => KeyboardAction::SeekForward,
             "seek_backward" | "seek_back" => KeyboardAction::SeekBackward,
             "toggle_shuffle" | "shuffle" => KeyboardAction::ToggleShuffle,
             "cycle_repeat" | "repeat" => KeyboardAction::CycleRepeat,
             "toggle_mute" | "mute" => KeyboardAction::ToggleMute,
+            "toggle_mono" | "mono" => KeyboardAction::ToggleMono,
             "toggle_favourite" | "favourite" | "fav" => KeyboardAction::ToggleFavourite,
+            "toggle_love" | "love" => KeyboardAction::ToggleLove,
+            "toggle_scrobble" | "scrobble" => KeyboardAction::ToggleScrobble,
             "clear_queue" => KeyboardAction::ClearQueue,
             "back" => KeyboardAction::Back,
             "focus_left" => KeyboardAction::FocusLeft,
@@ -795,6 +899,14 @@ impl KeyboardAction {
             "open_spotify_search" | "open_spotify" => {
                 KeyboardAction::OpenOverlay(PickerId::SpotifySearch)
             }
+            "open_subsonic_search" | "open_subsonic" => {
+                KeyboardAction::OpenOverlay(PickerId::SubsonicSearch)
+            }
+            "open_podcast" | "open_podcasts" => KeyboardAction::OpenOverlay(PickerId::PodcastFeeds),
+            "open_radio" | "open_radios" => KeyboardAction::OpenOverlay(PickerId::RadioTop),
+            "open_radio_browse" | "browse_radio" => {
+                KeyboardAction::OpenOverlay(PickerId::RadioBrowse)
+            }
             "open_notifications" | "notifications" => {
                 KeyboardAction::OpenOverlay(PickerId::Notifications)
             }
@@ -809,6 +921,7 @@ impl KeyboardAction {
             "open_command_palette" | "commands" => {
                 KeyboardAction::OpenOverlay(PickerId::CommandPalette)
             }
+            "open_setup" | "setup" => KeyboardAction::OpenOverlay(PickerId::Setup),
             _ => return None,
         })
     }
@@ -849,7 +962,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_uses_lowercase_d_and_del() {
+    fn delete_lowercase_keys() {
         // d / Del remove an item…
         assert!(matches!(
             dispatch(KeyCode::Char('d').into(), KeyContext::Normal),
@@ -867,7 +980,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_picker_shortcut_not_shadowed_by_chords() {
+    fn picker_shortcut_unique() {
         // Alt+, opens the Settings picker; plain `,` seeks backward.
         assert!(matches!(
             dispatch(
@@ -895,7 +1008,7 @@ mod tests {
     }
 
     #[test]
-    fn colon_opens_command_palette_only() {
+    fn colon_opens_palette() {
         // `:` is the command palette; the removed duplicate (health check)
         // binding must not shadow it.
         assert!(matches!(

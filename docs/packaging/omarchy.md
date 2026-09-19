@@ -59,7 +59,7 @@ build() {
 
   mkdir -p artifacts
   ./scripts/build/manpages.sh artifacts
-  cargo run --release --bin release-gen completions artifacts
+  GTM_GEN_COMPLETIONS="$(pwd)/artifacts" cargo build --release --quiet
 }
 
 package() {

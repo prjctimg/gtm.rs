@@ -12,11 +12,18 @@ use chrono::{Duration, Utc};
 use futures::StreamExt;
 use rspotify::AuthCodePkceSpotify;
 use rspotify::clients::{BaseClient, OAuthClient};
-use rspotify::model::{AdditionalType, PlayableItem, SearchType, Token};
+use rspotify::model::{
+    AdditionalType, AlbumId, AlbumType, ArtistId, PlayableItem, SearchType, Token,
+};
 use rspotify::{CallbackError, Config, Credentials, OAuth, TokenCallback};
 use tracing::{debug, info, warn};
 
-use gtm_core::spotify::{SpotifyPlaylist, SpotifyStatus, SpotifyTrack};
+use gtm::shared::secret::{
+    SPOTIFY_CLIENT_ID, SPOTIFY_TOKEN_KEY, delete_secret, get_secret, set_secret,
+};
+use gtm::shared::spotify::{
+    LIBRESPOT_CLIENT_ID, SpotifyPlaylist, SpotifySearchKind, SpotifyStatus, SpotifyTrack,
+};
 
 const TOKEN_FILE: &str = "spotify.json";
 const TOKEN_ACCESS_PERMS: u32 = 0o600;
@@ -73,7 +80,8 @@ impl SpotifyManager {
 
     /// Read the token file and set up the client + cached playlists.
     pub async fn load(&mut self) -> Result<(), String> {
-        let raw = std::fs::read_to_string(self.token_path())
+        let raw = tokio::fs::read_to_string(self.token_path())
+            .await
             .map_err(|e| format!("read token file: {e}"))?;
         let token = parse_token(&raw)?;
         self.init_client(token).await
@@ -86,7 +94,7 @@ impl SpotifyManager {
         self.save_token(&token)?;
         // Mirror the token into the OS keychain so it survives the file-based
         // token being cleared and can be restored without a re-login.
-        gtm_core::secret::set_secret(gtm_core::secret::SPOTIFY_TOKEN_KEY, raw);
+        set_secret(SPOTIFY_TOKEN_KEY, raw);
         self.init_client(token).await
     }
 
@@ -105,8 +113,8 @@ impl SpotifyManager {
             Err(e) => warn!("failed to remove spotify token file: {e}"),
         }
         // Drop any keychain-stored credentials too.
-        gtm_core::secret::delete_secret(gtm_core::secret::SPOTIFY_TOKEN_KEY);
-        gtm_core::secret::delete_secret(gtm_core::secret::SPOTIFY_CLIENT_ID_KEY);
+        delete_secret(SPOTIFY_TOKEN_KEY);
+        delete_secret(SPOTIFY_CLIENT_ID);
     }
 
     /// Snapshot of the current link state for the Settings UI.
@@ -133,7 +141,6 @@ impl SpotifyManager {
 
     /// Current OAuth access token, if a client is linked.
     pub async fn access_token(&self) -> Option<String> {
-        use rspotify::clients::BaseClient;
         let client = self.client.as_ref()?;
         let arc = client.get_token();
         let guard = arc.lock().await.ok()?;
@@ -145,6 +152,12 @@ impl SpotifyManager {
     /// an access token and a Premium subscription.
     pub async fn can_stream(&self) -> bool {
         self.access_token().await.is_some() && self.premium
+    }
+
+    /// Whether the linked account is a Premium subscriber (probed via the
+    /// playback endpoint).
+    pub fn is_premium(&self) -> bool {
+        self.premium
     }
 
     /// The cached playlist list (playlists keep their tracks embedded).
@@ -226,12 +239,31 @@ impl SpotifyManager {
     /// Refresh the account profile and every playlist from the Web API.
     pub async fn sync(&mut self) -> Result<(), String> {
         let client = self
-            .client
-            .as_ref()
+            .sync_client()
             .ok_or_else(|| "spotify not linked".to_string())?;
+        let (user, playlists) = Self::run_sync(client).await?;
+        self.commit_sync(user, playlists);
+        // Probe `/me/player` so the Premium flag is established at sync time
+        // and native streaming is unlocked without the user visiting Settings.
+        self.refresh_playback().await;
+        Ok(())
+    }
 
+    /// Clone the underlying Web API client so a sync can paginate without
+    /// holding the manager mutex. `None` when not linked.
+    pub fn sync_client(&self) -> Option<AuthCodePkceSpotify> {
+        self.client.clone()
+    }
+
+    /// Paginate the full account profile, every playlist, and every playlist's
+    /// tracks on a cloned client so the caller never holds the manager mutex
+    /// across the network pass. Returns the snapshot to commit via
+    /// [`Self::commit_sync`].
+    pub async fn run_sync(
+        client: AuthCodePkceSpotify,
+    ) -> Result<(Option<String>, Vec<SpotifyPlaylist>), String> {
         let me = client.me().await.map_err(|e| format!("me: {e}"))?;
-        self.user = me.display_name.or_else(|| Some(me.id.as_ref().to_string()));
+        let user = me.display_name.or_else(|| Some(me.id.as_ref().to_string()));
         // NOTE: rspotify's `me().product` was removed upstream (Spotify no
         // longer exposes the plan); Premium is instead probed via the
         // playback endpoint in `refresh_playback()`.
@@ -241,18 +273,24 @@ impl SpotifyManager {
         let mut metas = Vec::new();
         let mut paginator = client.current_user_playlists();
         while let Some(item) = paginator.next().await {
-            let pl = item.map_err(|e| format!("playlists: {e}"))?;
-            metas.push(pl);
+            match item {
+                Ok(pl) => metas.push(pl),
+                Err(e) => {
+                    // A transient failure on one page must not abort the whole
+                    // sync (which previously cleared the entire cache): skip the
+                    // remaining pages gracefully instead.
+                    warn!("spotify playlists: {e} — skipping remainder");
+                    break;
+                }
+            }
         }
-        debug!(
-            "fetched {} spotify playlists for {:?}",
-            metas.len(),
-            self.user
-        );
+        debug!("fetched {} spotify playlists for {:?}", metas.len(), user);
 
         let mut playlists = Vec::new();
         for meta in &metas {
-            let tracks = self.fetch_playlist_tracks(client, meta.id.clone()).await;
+            // Per-playlist failures are already tolerated inside
+            // `fetch_playlist_tracks`; an unparseable playlist only logs.
+            let tracks = Self::fetch_playlist_tracks(&client, meta.id.clone()).await;
             playlists.push(SpotifyPlaylist {
                 id: meta.id.as_ref().to_string(),
                 name: meta.name.clone(),
@@ -260,12 +298,19 @@ impl SpotifyManager {
                 tracks,
             });
         }
+        Ok((user, playlists))
+    }
+
+    /// Swap a completed sync snapshot into the manager. `status()` and
+    /// `playlists()` only ever contend for this brief swap, never for the
+    /// minutes of network pagination that preceded it.
+    pub fn commit_sync(&mut self, user: Option<String>, playlists: Vec<SpotifyPlaylist>) {
+        self.error = None;
+        self.user = user;
         self.playlists = playlists;
-        Ok(())
     }
 
     async fn fetch_playlist_tracks(
-        &self,
         client: &AuthCodePkceSpotify,
         playlist_id: rspotify::model::PlaylistId<'static>,
     ) -> Vec<SpotifyTrack> {
@@ -287,17 +332,45 @@ impl SpotifyManager {
         tracks
     }
 
-    async fn init_client(&mut self, token: Token) -> Result<(), String> {
+    /// Accept a token, persist it, then build a usable client WITHOUT syncing
+    /// playlists. `linked()` becomes true immediately so the TUI can close its
+    /// OAuth picker and start loading playlists while the sync runs in the
+    /// background. Returns once the client is ready.
+    pub async fn link(&mut self, raw: &str) -> Result<(), String> {
+        let token = parse_token(raw)?;
+        self.save_token(&token)?;
+        // Mirror the token into the OS keychain so it survives the file-based
+        // token being cleared and can be restored without a re-login.
+        set_secret(SPOTIFY_TOKEN_KEY, raw);
+        self.set_client(token).await?;
+        // Populate the display name eagerly so the TUI can greet the user as
+        // soon as the picker closes; the playlist sync continues in the
+        // background and refreshes the cache when it finishes.
+        if let Some(client) = self.client.clone()
+            && let Ok(me) = client.me().await
+        {
+            self.user = me.display_name.or_else(|| Some(me.id.as_ref().to_string()));
+        }
+        // Probe `/me/player` right after linking so `premium` is set before any
+        // play command arrives (playlists sync purely via the Web API and never
+        // implied Premium).
+        self.refresh_playback().await;
+        Ok(())
+    }
+
+    /// Build a usable rspotify client from a token (persist-free). Does not
+    /// touch the playlist cache or call the network; `linked()` becomes true
+    /// once this returns.
+    async fn set_client(&mut self, token: Token) -> Result<(), String> {
         let refreshable = token.refresh_token.is_some();
-        let client_id = gtm_core::secret::get_secret(gtm_core::secret::SPOTIFY_CLIENT_ID_KEY)
-            .unwrap_or_default();
+        let client_id = get_secret(SPOTIFY_CLIENT_ID).unwrap_or_default();
         // Fall back to librespot's public desktop client id when the user
         // linked with a plain pasted access token (which never stores a
         // client id). `Credentials::default()` is a dead end: rspotify's
         // bundled demo id cannot refresh, so such tokens silently expire and
         // every later Web API call fails with a 401.
         let creds = if client_id.is_empty() {
-            Credentials::new_pkce(gtm_core::spotify::LIBRESPOT_CLIENT_ID)
+            Credentials::new_pkce(LIBRESPOT_CLIENT_ID)
         } else {
             Credentials::new_pkce(&client_id)
         };
@@ -334,6 +407,12 @@ impl SpotifyManager {
             token, creds, oauth, config,
         ));
         self.error = None;
+        Ok(())
+    }
+
+    async fn init_client(&mut self, token: Token) -> Result<(), String> {
+        let refreshable = token.refresh_token.is_some();
+        self.set_client(token).await?;
         match self.sync().await {
             Ok(()) => {
                 info!(
@@ -345,7 +424,10 @@ impl SpotifyManager {
             }
             Err(e) => {
                 self.error = Some(e.clone());
-                self.client = None;
+                // Keep the linked client: a transient network failure is not an
+                // unlink. Dropping it here removed the credentials, made every
+                // follow-up call fail with "spotify not linked", and left the
+                // account linked in name only until a full OAuth re-link.
                 Err(e)
             }
         }
@@ -366,16 +448,15 @@ impl SpotifyManager {
         let Some(client) = self.client.as_ref() else {
             return Vec::new();
         };
-        let q = format!("track:{query}");
-        match client
-            .search(&q, SearchType::Track, None, None, Some(limit), None)
+        let mut tracks: Vec<SpotifyTrack> = Vec::new();
+
+        // Track results first (the most useful).
+        if let Ok(rspotify::model::SearchResult::Tracks(page)) = client
+            .search(query, SearchType::Track, None, None, Some(limit), None)
             .await
         {
-            Ok(rspotify::model::SearchResult::Tracks(page)) => page
-                .items
-                .iter()
-                .enumerate()
-                .map(|(i, t)| SpotifyTrack {
+            tracks.extend(page.items.iter().enumerate().map(|(i, t)| {
+                SpotifyTrack {
                     index: i,
                     name: t.name.clone(),
                     artists: t
@@ -387,10 +468,181 @@ impl SpotifyManager {
                     album: Some(t.album.name.clone()),
                     duration_ms: Some(t.duration.num_milliseconds().max(0) as u64),
                     uri: t.id.as_ref().map(|id| format!("spotify:track:{id}")),
-                })
-                .collect(),
-            _ => Vec::new(),
+                    image_url: pick_largest_image(&t.album.images),
+                    kind: None,
+                }
+            }));
         }
+
+        let mut idx = tracks.len();
+        let album_limit = (limit / 3).max(5);
+        let artist_limit = (limit / 4).max(4);
+
+        // Album results.
+        if let Ok(rspotify::model::SearchResult::Albums(page)) = client
+            .search(
+                query,
+                SearchType::Album,
+                None,
+                None,
+                Some(album_limit),
+                None,
+            )
+            .await
+        {
+            for a in &page.items {
+                tracks.push(SpotifyTrack {
+                    index: idx,
+                    name: a.name.clone(),
+                    artists: a
+                        .artists
+                        .iter()
+                        .map(|a| a.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    album: Some(a.name.clone()),
+                    duration_ms: None,
+                    uri: a.id.as_ref().map(|id| format!("spotify:album:{id}")),
+                    image_url: pick_largest_image(&a.images),
+                    kind: Some(SpotifySearchKind::Album),
+                });
+                idx += 1;
+            }
+        }
+
+        // Artist results.
+        if let Ok(rspotify::model::SearchResult::Artists(page)) = client
+            .search(
+                query,
+                SearchType::Artist,
+                None,
+                None,
+                Some(artist_limit),
+                None,
+            )
+            .await
+        {
+            for a in &page.items {
+                tracks.push(SpotifyTrack {
+                    index: idx,
+                    name: a.name.clone(),
+                    artists: String::new(),
+                    album: None,
+                    duration_ms: None,
+                    uri: Some(format!("spotify:artist:{}", a.id)),
+                    image_url: pick_largest_image(&a.images),
+                    kind: Some(SpotifySearchKind::Artist),
+                });
+                idx += 1;
+            }
+        }
+
+        tracks
+    }
+
+    /// Resolve a web-search album result to its track list.
+    pub async fn album_tracks(&self, uri: &str) -> Result<Vec<SpotifyTrack>, String> {
+        let Some(client) = self.client.as_ref() else {
+            return Err("spotify not linked".into());
+        };
+        let album_id = AlbumId::from_uri(uri).map_err(|e| format!("bad album uri: {e}"))?;
+        let page = client
+            .album_track_manual(album_id, None, Some(50), Some(0))
+            .await
+            .map_err(|e| format!("album tracks: {e}"))?;
+        let mut tracks = Vec::new();
+        for (i, t) in page.items.into_iter().enumerate() {
+            tracks.push(SpotifyTrack {
+                index: i,
+                name: t.name.clone(),
+                artists: t
+                    .artists
+                    .iter()
+                    .map(|a| a.name.clone())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                album: t.album.as_ref().map(|a| a.name.clone()),
+                duration_ms: Some(t.duration.num_milliseconds().max(0) as u64),
+                uri: t.id.as_ref().map(|id| format!("spotify:track:{id}")),
+                image_url: t.album.as_ref().and_then(|a| pick_largest_image(&a.images)),
+                kind: Some(SpotifySearchKind::Track),
+            });
+        }
+        Ok(tracks)
+    }
+
+    /// Resolve an artist URI to their top tracks via their most recent albums.
+    /// Spotify removed the dedicated top-tracks endpoint, so we collect tracks
+    /// from the artist's newest albums/singles instead.
+    pub async fn artist_top_tracks(&self, uri: &str) -> Result<Vec<SpotifyTrack>, String> {
+        let Some(client) = self.client.as_ref() else {
+            return Err("spotify not linked".into());
+        };
+        let artist_id = ArtistId::from_uri(uri).map_err(|e| format!("bad artist uri: {e}"))?;
+        let page = client
+            .artist_albums_manual(
+                artist_id,
+                [AlbumType::Album, AlbumType::Single],
+                None,
+                Some(20),
+                Some(0),
+            )
+            .await
+            .map_err(|e| format!("artist albums: {e}"))?;
+
+        let mut tracks: Vec<SpotifyTrack> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let target = 50u32;
+        let mut albums_fetched = 0u32;
+
+        for album in page.items {
+            if tracks.len() as u32 >= target || albums_fetched >= 4 {
+                break;
+            }
+            let Some(album_id) = album.id else {
+                continue;
+            };
+            let page = match client
+                .album_track_manual(album_id, None, Some(50), Some(0))
+                .await
+            {
+                Ok(p) => p,
+                Err(_) => continue,
+            };
+            albums_fetched += 1;
+            for t in page.items {
+                let Some(track_id) = t.id.as_ref() else {
+                    continue;
+                };
+                let track_uri = format!("spotify:track:{track_id}");
+                if !seen.insert(track_uri.clone()) {
+                    continue;
+                }
+                tracks.push(SpotifyTrack {
+                    index: tracks.len(),
+                    name: t.name.clone(),
+                    artists: t
+                        .artists
+                        .iter()
+                        .map(|a| a.name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", "),
+                    album: t
+                        .album
+                        .as_ref()
+                        .map(|a| a.name.clone())
+                        .or(Some(album.name.clone())),
+                    duration_ms: Some(t.duration.num_milliseconds().max(0) as u64),
+                    uri: Some(track_uri),
+                    image_url: t.album.as_ref().and_then(|a| pick_largest_image(&a.images)),
+                    kind: Some(SpotifySearchKind::Track),
+                });
+                if tracks.len() as u32 >= target {
+                    break;
+                }
+            }
+        }
+        Ok(tracks)
     }
 
     /// Fetch the largest album-cover image bytes for an artist + album via the
@@ -447,6 +699,16 @@ impl SpotifyManager {
         let bytes = resp.bytes().await.ok()?;
         (!bytes.is_empty()).then_some(bytes.to_vec())
     }
+
+    /// Fetch the raw bytes of an album-cover image located at `image_url`
+    /// (as exposed via `SpotifyTrack::image_url`), without an extra search.
+    pub async fn image_by_url(&self, image_url: &str) -> Option<Vec<u8>> {
+        let image_url = image_url.trim();
+        if image_url.is_empty() {
+            return None;
+        }
+        self.download_image(image_url).await
+    }
 }
 
 /// Pick the largest (first-sorted-by-area) image URL from a set of Spotify
@@ -477,6 +739,8 @@ fn track_from_playable(item: &PlayableItem) -> Option<SpotifyTrack> {
             album: Some(t.album.name.clone()),
             duration_ms: Some(t.duration.num_milliseconds().max(0) as u64),
             uri: t.id.as_ref().map(|id| format!("spotify:track:{id}")),
+            image_url: pick_largest_image(&t.album.images),
+            kind: None,
         }),
         PlayableItem::Episode(_) | PlayableItem::Unknown(_) => None,
     }
@@ -517,7 +781,7 @@ mod tests {
     use super::{TOKEN_ACCESS_PERMS, parse_token};
 
     #[test]
-    fn parse_token_plain_access_token() {
+    fn token_plain() {
         let tok =
             parse_token("BQC8xYt0aBcDeFgHiJkLmNoPqRsTuVwXyZ").expect("plain token should parse");
         assert_eq!(tok.access_token, "BQC8xYt0aBcDeFgHiJkLmNoPqRsTuVwXyZ");
@@ -525,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn parse_token_full_json() {
+    fn token_full_json() {
         let json = r#"{"access_token":"abc","expires_in":3600,"scopes":""}"#;
         let tok = parse_token(json).expect("full token json should parse");
         assert_eq!(tok.access_token, "abc");
@@ -533,13 +797,13 @@ mod tests {
     }
 
     #[test]
-    fn parse_token_rejects_empty() {
+    fn token_rejects_empty() {
         assert!(parse_token("").is_err());
         assert!(parse_token("   ").is_err());
     }
 
     #[test]
-    fn token_permissions_are_owner_only() {
+    fn token_owner_only() {
         assert_eq!(TOKEN_ACCESS_PERMS, 0o600);
     }
 }

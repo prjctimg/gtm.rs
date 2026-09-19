@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use gtm_audio::{SPECTRUM_BINS, SpectrumAnalyzer};
+use gtm::audio::{SPECTRUM_BINS, SpectrumAnalyzer};
+use gtm::shared::spotify::LIBRESPOT_CLIENT_ID;
 use librespot_core::SessionConfig;
 use librespot_core::authentication::Credentials;
 use librespot_core::cache::Cache;
@@ -26,7 +27,7 @@ use tracing::info;
 // custom librespot `Sink` through a bounded std channel; on the rodio side a
 // [`PcmStreamSource`] pulls from that channel, feeds the spectrum analyzer
 // used for visualizer levels, and implements `rodio::Source` so it can be
-// handed to the existing gtm-audio mixer chain (`load_active_decoded`) —
+// handed to the existing audio mixer chain (`load_active_decoded`) —
 // EQ, reverb, volume, and output routing all behave exactly like local
 // files.
 
@@ -111,7 +112,7 @@ impl PcmStreamSource {
     ) -> Self {
         Self {
             rx,
-            pending: VecDeque::new(),
+            pending: VecDeque::with_capacity(4096),
             analyzer: SpectrumAnalyzer::new(44_100.0),
             levels: [0.0; SPECTRUM_BINS],
             spectrum_out,
@@ -270,7 +271,7 @@ impl StreamManager {
         .map_err(|e| format!("spotify cache: {e}"))?;
 
         let session_config = SessionConfig {
-            client_id: gtm_core::spotify::LIBRESPOT_CLIENT_ID.to_string(),
+            client_id: LIBRESPOT_CLIENT_ID.to_string(),
             device_id: "gtm-rs-stream".to_string(),
             ..Default::default()
         };

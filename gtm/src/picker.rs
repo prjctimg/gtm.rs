@@ -30,6 +30,34 @@ pub enum PickerId {
     Settings,
     Notifications,
     NotificationSettings,
+    SubsonicSearch,
+    /// Album browser of the configured Subsonic server.
+    SubsonicAlbums,
+    /// Track list of a selected Subsonic album.
+    SubsonicAlbumTracks,
+    /// Subsonic server setup (URL, user, password).
+    SubsonicSetup,
+    PodcastFeeds,
+    /// Episode list of a selected podcast feed.
+    PodcastEpisodes,
+    /// Podcast feed subscribe form (URL input).
+    PodcastSubscribe,
+    RadioSearch,
+    /// Top-voted stations from the Radio Browser directory.
+    RadioTop,
+    /// Radio Browser browse entry: browse by tag or by country.
+    RadioBrowse,
+    /// Tag or country list picked at `RadioBrowse`.
+    RadioBrowseList,
+    /// Stations carrying the tag / from the country selected at
+    /// `RadioBrowseList`.
+    RadioBrowseStations,
+    /// Play an arbitrary HTTP(S) stream URL (Alt+O).
+    LoadStream,
+    /// `gtm setup` entry: choose which service to configure.
+    Setup,
+    /// Last.fm setup form (API key/secret) plus the OAuth browser flow.
+    LastfmAuth,
 }
 
 /// Which list a fuzzy-finder picker searches. `Tab` cycles through these.
@@ -41,6 +69,7 @@ pub enum PickerSource {
     Artists,
     Albums,
     Playlists,
+    Radio,
 }
 
 impl PickerSource {
@@ -51,6 +80,7 @@ impl PickerSource {
             Self::Artists => "Artists",
             Self::Albums => "Albums",
             Self::Playlists => "Playlists",
+            Self::Radio => "Radio",
         }
     }
 
@@ -60,7 +90,8 @@ impl PickerSource {
             Self::Tracks => Self::Artists,
             Self::Artists => Self::Albums,
             Self::Albums => Self::Playlists,
-            Self::Playlists => Self::All,
+            Self::Playlists => Self::Radio,
+            Self::Radio => Self::All,
         }
     }
 }

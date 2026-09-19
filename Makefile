@@ -54,7 +54,7 @@ man:
 	./scripts/build/manpages.sh artifacts
 
 completions: release
-	cargo run --release --bin release-gen completions artifacts
+	GTM_GEN_COMPLETIONS="$(CURDIR)/artifacts" cargo build --workspace --quiet
 	cp install.sh artifacts/install.sh
 
 install: release man completions
@@ -77,17 +77,13 @@ install: release man completions
 
 deb: release man completions
 	@command -v cargo-deb >/dev/null 2>&1 || { echo "cargo-deb not found. Install with: cargo install cargo-deb"; exit 1; }
-	for pkg in gtmd gtm; do \
-		mkdir -p "$$pkg/deb-assets/man" "$$pkg/deb-assets/completions"; \
-		cp artifacts/man/* "$$pkg/deb-assets/man/"; \
-		cp artifacts/completions/* "$$pkg/deb-assets/completions/"; \
-	done
+	mkdir -p "gtm/deb-assets/man" "gtm/deb-assets/completions"
+	cp artifacts/man/* "gtm/deb-assets/man/"
+	cp artifacts/completions/* "gtm/deb-assets/completions/"
 	cp target/release/gtmd gtm/deb-assets/gtmd
 	cp dist/gtmd.service gtm/deb-assets/
-	cp dist/gtmd.service gtmd/deb-assets/
 	cargo deb --package gtm
-	cargo deb --package gtmd
-	for pkg in gtmd gtm; do rm -rf "$$pkg/deb-assets"; done
+	rm -rf gtm/deb-assets
 
 rpm: release
 	@command -v rpmbuild >/dev/null 2>&1 || { echo "rpmbuild not found."; exit 1; }

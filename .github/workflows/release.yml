@@ -10,7 +10,7 @@
 #   aarch64-linux-arch    Arch Linux container (aarch64)   → gtm-arch-aarch64.tar.gz + .pkg.tar.zst
 #   aarch64-darwin        macOS runner                     → tar.gz
 #   aarch64-android       Ubuntu runner + cargo-ndk        → tar.gz + Termux deb
-#   x86_64-linux-musl     Alpine 3.22 container (musl)      → tar.gz + apk
+#   x86_64-linux-musl     Alpine 3.22 ad-hoc container      → tar.gz + apk
 #   aarch64-linux-musl    Alpine 3.22 ad-hoc container      → tar.gz + apk
 #
 # Each build job stages everything it produces into a single release-assets/
@@ -23,8 +23,9 @@
 #     │          (stable: vX.Y.Z on main, nightly: `nightly` at latest dev)
 #     ▼
 #   build job  → per OS/arch:
-#     │         1. cargo build --release (cargo-ndk for Android; native musl for Alpine)
-#     │         2. Generate manpages (pandoc) + completions (release-gen)
+#     │         1. cargo build --release (cargo-ndk for Android; musl in the
+#     │            Alpine ad-hoc container for both Linux musl targets)
+#     │         2. Generate manpages (pandoc) + completions (GTM_GEN_COMPLETIONS)
 #     │         3. Assemble a complete per-target archive:
 #     │            gtm-{platform}.tar.gz for macOS/Alpine/Android,
 #     │            gtm-debian-12-{x86_64,aarch64}.tar.gz for the Debian 12
@@ -40,8 +41,7 @@
 #   release job → download all artifacts, print the asset manifest, generate
 #                 checksums.txt, and create/update the GitHub Release.
 #
-#   crates-io job → publish the workspace crates to crates.io in dependency
-#                   order (gtm-core → gtm-audio → gtm-mpris → gtmd → gtm).
+#   crates-io job → publish the single `gtm` crate to crates.io.
 #                   Stable releases only (nightly shares the manifest version
 #                   and would hit duplicate-version errors). Already-published
 #                   versions are skipped so re-running a release after a
@@ -69,6 +69,15 @@ on:
         description: "Release version (e.g. 0.1.2) for stable releases"
         required: false
         type: string
+      bench_seconds:
+        description: "Benchmark sampling window in seconds (CI default 15)"
+        required: false
+        default: "30"
+        type: string
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: always
@@ -100,11 +109,16 @@ jobs:
       - name: Derive tag
         id: set-tag
         run: |
+          short_sha="${GITHUB_SHA::7}"
+          manifest_version="$(grep -m1 '^version = ' Cargo.toml | sed 's/^version = "\(.*\)"/\1/')"
           if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
             echo "skip=false" >> "$GITHUB_OUTPUT"
             if [[ "${{ github.event.inputs.release_type }}" == "nightly" ]]; then
+              # Nightly package version: <manifest>+<sha>+nightly. Starts with a
+              # digit and uses only +/. — valid for .deb, .rpm, .apk and .pkg.tar.zst
+              # control fields, and unique per commit so no stale assets collide.
               tag="nightly"
-              version="$(grep -m1 '^version = ' Cargo.toml | sed 's/^version = "\(.*\)"/\1/')"
+              version="${manifest_version}+${short_sha}+nightly"
               nightly="true"
             else
               version="${{ github.event.inputs.version }}"
@@ -126,7 +140,7 @@ jobs:
             fi
             echo "skip=false" >> "$GITHUB_OUTPUT"
             tag="nightly"
-            version="$(grep -m1 '^version = ' Cargo.toml | sed 's/^version = "\(.*\)"/\1/')"
+            version="${manifest_version}+${short_sha}+nightly"
             nightly="true"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -137,6 +151,19 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
           echo "nightly=${nightly}" >> "$GITHUB_OUTPUT"
+
+      - name: Validate release version
+        if: steps.set-tag.outputs.skip != 'true'
+        run: |
+          version="${{ steps.set-tag.outputs.version }}"
+          # Guard the package-control version so a malformed string can never
+          # fail a build job again: must start with a digit and use only
+          # [0-9A-Za-z.+~] (no '-' — rpm splits Version-Release on it). A
+          # version that sorts as a valid deb/rpm/apk version is required.
+          if ! [[ "$version" =~ ^[0-9][0-9A-Za-z.+~]*$ ]]; then
+            echo "::error::invalid release version '$version' — must start with a digit and contain only [0-9A-Za-z.+~]" >&2
+            exit 1
+          fi
 
       - name: Capture previous nightly SHA
         if: steps.set-tag.outputs.skip != 'true'
@@ -165,6 +192,9 @@ jobs:
     # dynamically against the container's musl libc and libasound.so.2
     # (the .apk and archives declare an alsa-lib runtime dependency).
     env:
+      # Bake the exact commit into the binary so About shows a real SHA
+      # instead of "unknown" (build.rs prefers this var over git rev-parse).
+      VERGEN_GIT_SHA: ${{ github.sha }}
       # Link release binaries with clang + mold for faster, reproducible links.
       # Android builds link via cargo-ndk's injected NDK clang and do not use
       # mold, so they suppress both overrides. musl targets additionally need
@@ -221,8 +251,13 @@ jobs:
             mold_arg: -C link-arg=-fuse-ld=mold
           - os: ubuntu-22.04
             platform: x86_64-linux-musl
-            container: alpine:3.22
-            family: alpine
+            # This job runs on the host and performs the Alpine build via
+            # `docker run` (see the build step below). Inside an Alpine
+            # container the busybox /bin/tar cannot save the rust-cache (it
+            # lacks the GNU tar flags), so every run was a full cold ~15 min
+            # build; on the host the cargo cache persists normally.
+            container: null
+            family: musl
             link_override: -C linker=gcc
             mold_arg: -C link-arg=-fuse-ld=mold
           - os: ubuntu-24.04-arm
@@ -231,7 +266,7 @@ jobs:
             # containers on ARM64 runners, so this job runs on the host and
             # performs the Alpine build via `docker run` (see build step).
             container: null
-            family: alpine-arm
+            family: musl
             link_override: -C linker=gcc
             mold_arg: -C link-arg=-fuse-ld=mold
     steps:
@@ -261,20 +296,6 @@ jobs:
             base-devel rust pandoc alsa-lib cmake clang lld mold git \
             libarchive zstd
 
-      - name: Bootstrap tooling (Alpine container)
-        if: matrix.container == 'alpine:3.22'
-        run: |
-          apk add --no-cache \
-            ca-certificates curl git bash build-base cmake musl-dev \
-            clang lld mold \
-            pkgconfig alsa-lib-dev pandoc
-
-      - name: Install Rust (Alpine container)
-        if: matrix.container == 'alpine:3.22'
-        run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
-          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
-
       - uses: actions/checkout@v7
       - name: Cache cargo dependencies
         uses: Swatinem/rust-cache@v2
@@ -302,16 +323,21 @@ jobs:
 
       # Alpine-on-ARM64 cannot run JavaScript actions inside a container, so the
       # aarch64-musl build runs the whole Alpine pipeline in an ad-hoc container.
+      # The x86_64-musl build uses the same ad-hoc container so the rust-cache
+      # (busybox tar in Alpine can't save it) runs on the host instead.
       - name: Build musl binaries + packages (Alpine container)
-        if: matrix.family == 'alpine-arm'
+        if: matrix.family == 'musl'
         run: |
+          platform="${{ matrix.platform }}"
+          arch="${platform%-linux-musl}"
           docker run --rm \
             -v "$PWD":/work \
             -w /work \
             -e HOME=/root \
+            -e VERGEN_GIT_SHA="$VERGEN_GIT_SHA" \
             alpine:3.22 \
             /bin/sh -c "apk add --no-cache bash && /bin/bash /work/scripts/build/musl-in-container.sh \
-              aarch64-linux-musl ${{ needs.tag.outputs.version }} aarch64"
+              ${platform} ${{ needs.tag.outputs.version }} ${arch}"
 
       # Arch-on-ARM64 cannot run JavaScript actions inside a container, so the
       # aarch64-arch build runs the whole Arch pipeline in an ad-hoc container.
@@ -326,6 +352,7 @@ jobs:
             -v "$PWD":/work \
             -w /work \
             -e HOME=/root \
+            -e VERGEN_GIT_SHA="$VERGEN_GIT_SHA" \
             lfdevs/archlinuxarm:base-devel \
             /bin/bash -c "
               echo 'DisableSandboxFilesystem' >> /etc/pacman.conf &&
@@ -358,7 +385,7 @@ jobs:
           cmake --build termux-elf-cleaner/build -j
 
       - name: Build release binaries
-        if: matrix.family != 'android' && matrix.family != 'alpine-arm' && matrix.family != 'arch-arm'
+        if: matrix.family != 'android' && matrix.family != 'musl' && matrix.family != 'arch-arm'
         run: cargo build --release
 
       # Debian 12 ships glibc 2.36; guard the Linux glibc targets so a binary
@@ -380,7 +407,10 @@ jobs:
       - name: Build Android release binaries
         if: matrix.family == 'android'
         run: |
-          CARGO_INCREMENTAL=0 cargo ndk -t arm64-v8a -P 27 \
+          # Completions ride on this build (gtm's build script emits them):
+          # a separate host `cargo build` would try to compile rodio/ALSA
+          # for x86_64 Linux, which the runner lacks libraries for.
+          GTM_GEN_COMPLETIONS="$(pwd)/artifacts" CARGO_INCREMENTAL=0 cargo ndk -t arm64-v8a -P 27 \
             build --release --no-default-features --features pulseaudio
 
       - name: Clean Android ELF sections
@@ -390,12 +420,12 @@ jobs:
           termux-elf-cleaner/build/termux-elf-cleaner target/aarch64-linux-android/release/gtm
 
       - name: Generate manpages (pandoc)
-        if: matrix.family != 'alpine-arm' && matrix.family != 'arch-arm'
+        if: matrix.family != 'musl' && matrix.family != 'arch-arm'
         run: ./scripts/build/manpages.sh artifacts
 
       - name: Generate shell completions
-        if: matrix.family != 'alpine-arm' && matrix.family != 'arch-arm'
-        run: cargo run --release --bin release-gen completions artifacts
+        if: matrix.family != 'musl' && matrix.family != 'arch-arm' && matrix.family != 'android'
+        run: GTM_GEN_COMPLETIONS="$(pwd)/artifacts" cargo build --release --quiet
 
       # ── Complete per-target archive (bin + man + completions + service) ──
       # Debian 12 glibc builds are labelled explicitly in release assets
@@ -426,27 +456,6 @@ jobs:
           cp LICENSE            "$root/"
           cp install.sh         "$root/"
           tar czf "release-assets/${root}.tar.gz" "$root"
-
-      - name: Package complete archive (Alpine musl)
-        if: matrix.family == 'alpine'
-        shell: bash
-        run: |
-          set -euo pipefail
-          platform="${{ matrix.platform }}"
-          root="gtm-${platform}"
-          mkdir -p release-assets \
-            "$root/bin" "$root/man/man1" "$root/completions" \
-            "$root/systemd" "$root/desktop" "$root/icons"
-          cp target/release/gtm  "$root/bin/"
-          cp target/release/gtmd "$root/bin/"
-          cp artifacts/man/*.1        "$root/man/man1/"
-          cp artifacts/completions/*  "$root/completions/"
-          cp dist/gtmd.service  "$root/systemd/"
-          cp dist/gtm.desktop   "$root/desktop/"
-          cp assets/gtm.svg     "$root/icons/"
-          cp LICENSE            "$root/"
-          cp install.sh         "$root/"
-          tar czf "release-assets/gtm-${platform}.tar.gz" "$root"
 
       - name: Package complete archive (Arch Linux)
         if: matrix.family == 'arch'
@@ -610,51 +619,6 @@ jobs:
           ./scripts/build/arch-pkg.sh "$version" "$arch" stage \
             "release-assets/gtm-${version}-${arch}.pkg.tar.zst"
 
-      - name: Stage rootfs tree (Alpine .apk)
-        if: matrix.family == 'alpine'
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p stage/usr/bin \
-            stage/usr/lib/systemd/user \
-            stage/usr/share/man/man1 \
-            stage/usr/share/bash-completion/completions \
-            stage/usr/share/zsh/site-functions \
-            stage/usr/share/fish/vendor_completions.d \
-            stage/usr/share/elvish/lib \
-            stage/usr/share/powershell/Modules \
-            stage/usr/share/applications \
-            stage/usr/share/icons/hicolor/scalable/apps \
-            stage/usr/share/licenses/gtm
-          cp target/release/gtm  stage/usr/bin/
-          cp target/release/gtmd stage/usr/bin/
-          cp dist/gtmd.service stage/usr/lib/systemd/user/
-          cp artifacts/man/*.1 stage/usr/share/man/man1/
-          cp artifacts/completions/gtm.bash  stage/usr/share/bash-completion/completions/gtm
-          cp artifacts/completions/gtmd.bash stage/usr/share/bash-completion/completions/gtmd
-          cp artifacts/completions/_gtm  stage/usr/share/zsh/site-functions/_gtm
-          cp artifacts/completions/_gtmd stage/usr/share/zsh/site-functions/_gtmd
-          cp artifacts/completions/gtm.fish  stage/usr/share/fish/vendor_completions.d/
-          cp artifacts/completions/gtmd.fish stage/usr/share/fish/vendor_completions.d/
-          cp artifacts/completions/gtm.elv  stage/usr/share/elvish/lib/
-          cp artifacts/completions/gtmd.elv stage/usr/share/elvish/lib/
-          cp artifacts/completions/gtm.ps1  stage/usr/share/powershell/Modules/
-          cp artifacts/completions/gtmd.ps1 stage/usr/share/powershell/Modules/
-          cp dist/gtm.desktop stage/usr/share/applications/
-          cp assets/gtm.svg stage/usr/share/icons/hicolor/scalable/apps/
-          cp LICENSE stage/usr/share/licenses/gtm/
-
-      - name: Build Alpine .apk
-        if: matrix.family == 'alpine'
-        shell: bash
-        run: |
-          set -euo pipefail
-          version="${{ needs.tag.outputs.version }}"
-          arch="x86_64"
-          [[ "${{ matrix.platform }}" == "aarch64-linux-musl" ]] && arch="aarch64"
-          ./scripts/build/alpine-apk.sh "$version" "$arch" stage \
-            "release-assets/gtm-${version}-r0-${arch}.apk"
-
       - name: Build Termux .deb packages
         if: matrix.family == 'android'
         run: |
@@ -723,17 +687,6 @@ jobs:
           bash scripts/build/release-notes.sh "${prev_tag}" "${{ github.sha }}" "$version" release-notes.md
           ls -l release-notes.md
 
-      - name: Prune stale nightly assets
-        if: needs.tag.outputs.nightly == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh release view nightly --json assets -q '.assets[].name' 2>/dev/null \
-            | while IFS= read -r name; do
-              [ -n "$name" ] || continue
-              gh release delete-asset nightly "$name" -y || true
-            done
-
       - name: Print release asset manifest
         run: |
           echo "=== Release assets ==="
@@ -750,7 +703,12 @@ jobs:
       - uses: softprops/action-gh-release@v3
         with:
           tag_name: ${{ needs.tag.outputs.tag }}
-          name: ${{ needs.tag.outputs.tag }}
+          name: ${{ needs.tag.outputs.version }}
+          # Never leave the release as a draft: drafts hide every asset behind
+          # 404s on releases/download/<tag>/<name>. The action toggles the
+          # release into a draft while overwriting assets; publishing is what
+          # makes the nightly installer's URLs resolve.
+          draft: false
           prerelease: ${{ needs.tag.outputs.nightly == 'true' }}
           generate_release_notes: true
           overwrite_files: true
@@ -763,15 +721,174 @@ jobs:
             checksums.txt
             release-notes.md
 
-  # Publishes the workspace crates to crates.io in dependency order
-  # (gtm-core → gtm-audio → gtm-mpris → gtmd → gtm). Runs only after every
-  # target in the build matrix succeeded, and only for stable releases
+      # Prune stale nightly assets AFTER the upload instead of before: the old
+      # step deleted every existing asset first, so between the wipe and the
+      # softprops upload it toggles the release into a draft, every
+      # releases/download/nightly/<name> URL 404'd for users during that window.
+      # Only assets that were NOT part of this run's fresh upload set are
+      # removed, so the live assets (or the previous ones on a failed build)
+      # stay downloadable the whole time.
+      - name: Prune stale nightly assets
+        if: needs.tag.outputs.nightly == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mapfile -t kept < <(
+            ls gtm-*.tar.gz *.deb *.rpm *.pkg.tar.zst *.apk \
+              checksums.txt release-notes.md 2>/dev/null | xargs -n1 basename
+          )
+          gh release view nightly --json assets -q '.assets[].name' 2>/dev/null \
+            | while IFS= read -r name; do
+                [ -n "$name" ] || continue
+                [[ " ${kept[*]} " == *" $name "* ]] && continue
+                gh release delete-asset nightly "$name" -y || true
+              done
+
+      # If any step above fails after the release was toggled into a draft
+      # (softprops drafts it to overwrite assets), the nightly would stay a
+      # draft and `releases/download/nightly/<asset>` would 404 for every
+      # user. Force-publish again even when a step failed so the previous
+      # nightly assets remain downloadable.
+      - name: Force-publish nightly (draft guard)
+        if: always() && needs.tag.outputs.nightly == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
+            -X PATCH -f draft=false >/dev/null || \
+            echo "::warning::could not un-draft nightly release"
+
+  # Benchmarks gtm against the just-published x86_64-linux binary (through its
+  # headless daemon, NullMixer — no audio device needed) and the reference
+  # player cliamp when an audio backend is available. Writes
+  # bench-results/<version>.json + latest.json, re-renders BENCHMARK.md (diff
+  # vs the last run), and — on dev runs — commits the results back. The commit
+  # is pushed with the APPROVE_PAT human token (not GITHUB_TOKEN): pushing as a
+  # bot would put the pull_request CI runs behind an approval gate while dev is
+  # the head of an open PR. The commit message still carries the [skip nightly]
+  # marker so even a triggered run skips straight to the (change-free) bench
+  # job. Runs on every dev push (nightly) and on manual dispatch.
+  bench:
+    needs: [tag, release]
+    if: needs.tag.outputs.skip != 'true' && (github.ref == 'refs/heads/dev' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-assets-*
+          merge-multiple: true
+
+      - name: Install runtime dependencies
+        run: |
+          sudo apt-get update
+          # libasound2t64 is the 24.04 (noble) name; older images use libasound2.
+          sudo apt-get install -y jq libasound2t64 || sudo apt-get install -y libasound2
+          # Dev headers for building cliamp via `go install` (it links against
+          # the ALSA/Ogg/Vorbis/FLAC codecs at build time, not just runtime).
+          sudo apt-get install -y libasound2-dev libogg-dev libvorbis-dev libflac-dev
+
+      - name: Install cliamp (reference player)
+        uses: actions/setup-go@v6
+        with:
+          go-version: stable
+          # No go.mod in this repo (a Go tool is only installed ad hoc):
+          # disable setup-go's module cache to avoid its go.mod lookup warning.
+          cache: false
+      # go install talks to proxy.golang.org / sum.golang.org which flake
+      # intermittently (stream errors); retry instead of failing the run.
+      - name: Build cliamp binary
+        shell: bash
+        run: |
+          for attempt in 1 2 3 4 5; do
+            if go install github.com/bjarneo/cliamp@latest; then
+              exit 0
+            fi
+            echo "cliamp install attempt ${attempt} failed; retrying in 10s..."
+            sleep 10
+          done
+          echo "::error::could not install cliamp after 5 attempts" >&2
+          exit 1
+
+      - name: Extract gtm binaries from published archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          [ -f gtm-debian-12-x86_64.tar.gz ] || { echo "::error::x86_64-linux archive not found (bench uses the Debian 12 glibc build)" >&2; exit 1; }
+          tar xzf gtm-debian-12-x86_64.tar.gz
+          mkdir -p bench-bins
+          cp gtm-debian-12-x86_64/bin/gtm gtm-debian-12-x86_64/bin/gtmd bench-bins/
+          chmod +x bench-bins/gtm bench-bins/gtmd
+          ls -l bench-bins/
+
+      - name: Collect benchmark results
+        shell: bash
+        env:
+          GTM_BIN: bench-bins/gtm
+          GTMD_BIN: bench-bins/gtmd
+          GITHUB_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          echo "$HOME/go/bin" >> "$GITHUB_PATH"
+          ./scripts/bench/collect.sh "${{ needs.tag.outputs.version }}" "${{ github.event.inputs.bench_seconds || '30' }}"
+
+      - name: Render BENCHMARK.md
+        shell: bash
+        run: ./scripts/bench/render-bench.sh --tag "${{ needs.tag.outputs.version }}"
+
+      - name: Commit benchmark results back (dev only)
+        if: github.ref == 'refs/heads/dev'
+        env:
+          GH_BOT_TOKEN: ${{ secrets.APPROVE_PAT }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          push_url="https://x-access-token:${GH_BOT_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          attempt=0
+          while true; do
+            if git diff --cached --quiet; then
+              git add -f BENCHMARK.md assets/fixtures
+            fi
+            if git diff --cached --quiet; then
+              echo "no benchmark changes to commit"
+              exit 0
+            fi
+            git commit -m "bench: results for ${{ needs.tag.outputs.version }} [skip nightly]" >/dev/null
+            if git push "${push_url}" dev 2>/dev/null; then
+              break
+            fi
+            attempt=$((attempt + 1))
+            if [ "${attempt}" -ge 3 ]; then
+              echo "::error::could not push benchmark results after 3 attempts (concurrent run?)" >&2
+              exit 1
+            fi
+            sleep 5
+            git pull --rebase origin dev 2>/dev/null || true
+          done
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: bench-results
+          path: |
+            BENCHMARK.md
+          if-no-files-found: error
+
+  # Publishes the `gtm` crate to crates.io (the single workspace crate; the
+  # daemon, core, audio, and MPRIS subsystems ship inside it). Runs only after
+  # every target in the build matrix succeeded, and only for stable releases
   # (nightly shares the manifest version and would hit duplicate-version
   # errors). Already-published versions are skipped so re-running a release
-  # after a partial publish resumes cleanly. Publishing uses crates.io Trusted
-  # Publishing (OIDC) — no API-token secret is stored. Each crate needs a
-  # Trusted Publisher configured on crates.io (owner: prjctimg, repo: gtm.rs,
-  # workflow: release.yml) or the token exchange is rejected.
+  # resumes cleanly. Publishing uses crates.io Trusted Publishing (OIDC) — no
+  # API-token secret is stored. The `gtm` crate needs a Trusted Publisher
+  # configured on crates.io (owner: prjctimg, repo: gtm.rs, workflow:
+  # release.yml) or the token exchange is rejected.
   crates-io:
     needs: [tag, build]
     if: needs.tag.outputs.skip != 'true' && needs.tag.outputs.nightly == 'false'
@@ -791,40 +908,27 @@ jobs:
       - name: Set crates.io token
         run: echo "CARGO_REGISTRY_TOKEN=${{ steps.auth.outputs.token }}" >> "${GITHUB_ENV}"
 
-      - name: Publish crates
+      - name: Publish crate
         run: |
           set -euo pipefail
           version="${{ needs.tag.outputs.version }}"
 
-          publish_crate() {
-            local crate="$1"
-            local attempt
-            for attempt in 1 2 3 4 5 6; do
-              local out
-              if out="$(cargo publish -p "${crate}" 2>&1)"; then
-                echo "${crate} v${version} published"
-                return 0
-              fi
-              if grep -q "already exists" <<<"${out}"; then
-                echo "${crate} v${version}: already published, skipping"
-                return 0
-              fi
-              # gtm-core (or another gtm- dep) just went live but the crates.io
-              # index hasn't propagated yet — retry instead of failing the whole
-              # chain of downstream crates.
-              if grep -q "failed to select a version for the requirement \`gtm-" <<<"${out}"; then
-                echo "${crate} v${version}: waiting for gtm- index propagation (attempt ${attempt}/6)..."
-                sleep 30
-                continue
-              fi
-              echo "${out}"
-              return 1
-            done
-            return 1
-          }
-          for crate in gtm-core gtm-audio gtm-mpris gtmd gtm; do
-            echo "Publishing ${crate} v${version}..."
-            publish_crate "${crate}"
+          for attempt in 1 2 3 4 5 6; do
+            out="$(cargo publish -p gtm 2>&1)"
+            if [[ $? -eq 0 ]]; then
+              echo "gtm v${version} published"
+              exit 0
+            fi
+            if grep -q "already exists" <<<"${out}"; then
+              echo "gtm v${version}: already published, skipping"
+              exit 0
+            fi
+            # crates.io index propagation can lag the upload by ~30-60 s; retry
+            # before failing the release.
+            echo "gtm v${version}: publish failed, retrying (attempt ${attempt}/6)..."
+            echo "${out}"
+            sleep 30
           done
+          exit 1
 
 
