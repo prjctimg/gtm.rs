@@ -11,8 +11,10 @@
 # When run from inside a gtm release archive (bin/gtm + bin/gtmd sit next to
 # this script) the same file installs the bundled assets directly. The
 # standalone form is a thin bootstrap: it downloads the per-platform archive,
-# extracts it, and runs ./install.sh from inside the archive — so the installer
-# logic lives in a single file that is shipped in every archive.
+# extracts it, and installs from it — using itself, not the copy inside the
+# archive, so that installer changes do not wait for a release. The installer
+# logic still lives in a single file that is shipped in every archive, for the
+# case where someone downloads an archive and runs ./install.sh directly.
 #
 # Recognised standard environment variables (all overridable):
 #   PREFIX DATAROOTDIR DATADIR BINDIR MANDIR SYSTEMD_DIR APPLICATIONS_DIR
@@ -27,8 +29,8 @@ REPO="prjctimg/gtm.rs"
 NC='\033[0m'
 MUTED='\033[0;2m'
 RED='\033[0;31m'
-ORANGE='\033[38;5;214m'
 GREEN='\033[0;32m'
+BOLD='\033[1m'
 
 usage() {
   cat <<EOF
@@ -41,7 +43,7 @@ Options:
   -v, --version <ver>   Install a specific version (e.g. 0.2.73)
       --nightly         Install the latest nightly prerelease
   -p, --prefix <dir>    Install prefix for the tarball (default: \$HOME/.local)
-  -y, --yes             Non-interactive (accepted for compatibility)
+  -y, --yes             Non-interactive: never prompt (e.g. to enable gtmd)
 
 When run from inside a release archive this file installs the bundled
 binaries, man pages, completions, systemd unit, desktop entry and icon.
@@ -54,10 +56,12 @@ EOF
 }
 
 # Logging helpers — all go to stderr so `install.sh | tee log` stays usable.
+# Each stage prints its heading (emoji kept, no `==>`) followed by a single
+# colour-coded ✔ / ✘ marker for the outcome, like the download line below.
 info() { printf "${MUTED}%s${NC}\n" "$*" >&2; }
 log() { printf "${NC}%s\n" "$*" >&2; }
-ok() { printf "${GREEN}%s${NC}\n" "$*" >&2; }
-warn() { printf "${ORANGE}%s${NC}\n" "$*" >&2; }
+ok() { printf "${GREEN}✔${NC} %s\n" "$*" >&2; }
+fail() { printf "${RED}✘${NC} %s\n" "$*" >&2; }
 die() {
   printf "${RED}%s${NC}\n" "$*" >&2
   exit 1
@@ -66,74 +70,24 @@ need() {
   command -v "$1" >/dev/null 2>&1 || die "requires '$1' — install it first, or download a release archive manually"
 }
 
-CLR_RESET=$'\033[0m'
-CLR_DIM=$'\033[2m'
+# Stage heading (no `==>`, no trailing newline) + outcome markers.
+stage() { printf "${BOLD}%s${NC}" "$*" >&2; }
+stage_ok() { printf " ${GREEN}✔${NC}\n" >&2; }
+stage_fail() { printf " ${RED}✘${NC}\n" >&2; }
 
-# ANSI 256-color gradient (foreground). Maps a 0..1 fraction onto a
-# cyan->magenta ramp for the download progress bar.
-gradient_color() {
-  local f
-  f=$((16 + ($(awk -v f="$1" 'BEGIN{printf "%d", f*235}') % 236)))
-  printf '38;5;%d' "$f"
-}
-
-# Render a gradient-filled progress bar followed by a carriage return.
-#   draw_progress <frac> <label>
-# `<frac>` is 0..1; `<label>` e.g. "3.2 MB of 12.0 MB". Printable row is 46
-# columns wide so it stays on one line of a default 80-col terminal.
-draw_progress() {
-  local frac="$1" label="$2" width=36 filled i color
-  filled=$(awk -v f="$frac" -v w="$width" 'BEGIN{ n=int(f*w); if(n<0)n=0; if(n>w)n=w; print n }')
-  printf '\r%*s' 0 ""
-  for ((i = 0; i < filled; i++)); do
-    color=$(gradient_color "$(awk -v i="$i" -v w="$width" 'BEGIN{ if(w==0)w=1; printf "%.3f", i/w }')")
-    printf '\033[%sm█\033[0m' "$color"
-  done
-  for ((i = filled; i < width; i++)); do
-    printf '%s░%s' "$CLR_DIM" "$CLR_RESET"
-  done
-  printf ' %-3s%%  %s' "$(awk -v p="$frac" 'BEGIN{ printf "%d", p*100 }')" "$label"
-  printf '\033[0m'
-}
-
-# Download a URL with a gradient progress bar (when a terminal + content
-# length are available), falling back to curl's own meter otherwise.
-#   download_gradient <url> <outfile>
-download_gradient() {
-  local url="$1" out="$2" total="" bytes=0 prog
-  if [ -t 1 ] || [ -t 2 ]; then
-    total=$(curl -sfIL "$url" 2>/dev/null | tr -d '\r' | awk 'tolower($1)=="content-length:"{print $2; exit}')
-  fi
-  if [ -z "$total" ] || [ "$total" -le 0 ]; then
-    curl -#fL "$url" -o "$out"
-    return $?
-  fi
-  curl -fL "$url" -o "$out" 2>/dev/null &
-  local pid=$!
-  local shown=0
-  while kill -0 "$pid" 2>/dev/null; do
-    if [ -f "$out" ]; then
-      bytes=$(wc -c < "$out" 2>/dev/null || echo 0)
-      prog=$(awk -v b="$bytes" -v t="$total" 'BEGIN{ if(t<=0)printf "0"; else printf "%.3f", (b<t?b:t)/t }')
-    else
-      prog=0
-    fi
-    draw_progress "$prog" "$(awk -v b="$bytes" 'BEGIN{ printf "%.1f", b/1048576 }') / $(awk -v t="$total" 'BEGIN{ printf "%.1f", t/1048576 }') MB" >&2
-    shown=1
-    sleep 0.15
-  done
-  wait "$pid"
-  local rc=$?
-  if [ "$shown" = 1 ]; then
-    draw_progress 1 "$(awk -v b="$bytes" 'BEGIN{ printf "%.1f", b/1048576 }') / $(awk -v t="$total" 'BEGIN{ printf "%.1f", t/1048576 }') MB" >&2
-    printf '\n' >&2
-  fi
-  return "$rc"
+# Download a URL with a simple message. The progress indicator was removed
+# because it was showing incorrect file size and downloaded size.
+#   download_simple <url> <outfile>
+download_simple() {
+  local url="$1" out="$2"
+  curl -fL "$url" -o "$out" 2>/dev/null
+  return $?
 }
 
 VERSION=""
 CHANNEL="stable"
 PREFIX="${PREFIX:-$HOME/.local}"
+ASSUME_YES=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -162,6 +116,7 @@ while [[ $# -gt 0 ]]; do
       fi
       ;;
     -y | --yes)
+      ASSUME_YES=1
       shift
       ;;
     *)
@@ -208,15 +163,12 @@ detect_platform() {
   elif [ "${OS}" = "darwin" ]; then
     PLATFORM="aarch64-darwin"
   else
-    # Linux — pick the glibc (Debian 12) or musl (Alpine-style) archive.
-    if [ -f /etc/alpine-release ]; then
-      is_musl=true
+    # Linux — Arch, musl (Alpine-style) or glibc (Debian) archive.
+    if [ -f /etc/arch-release ] || command -v pacman >/dev/null 2>&1; then
+      PLATFORM="arch-${ARCH}"
+    elif [ -f /etc/alpine-release ]; then
+      PLATFORM="${ARCH}-linux-musl"
     elif command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; then
-      is_musl=true
-    else
-      is_musl=false
-    fi
-    if [ "${is_musl}" = true ]; then
       PLATFORM="${ARCH}-linux-musl"
     else
       PLATFORM="debian-12-${ARCH}"
@@ -232,6 +184,35 @@ resolve_latest_stable_tag() {
   echo "${tag}"
 }
 
+# Resolve the download URL for <archive> on the release <tag>.
+#
+# The public GitHub API is consulted first: it omits draft releases, so a
+# nightly that is mid-build (temporarily toggled to a draft) resolves to "not
+# published yet" instead of a silent 404 from releases/download/nightly/….
+# When the caller passes `strict` (nightly), a failed resolution aborts so we
+# never ask curl to fetch a URL that cannot exist; otherwise (stable) we fall
+# back to the conventional release URL so installs keep working even when the
+# API is unreachable or rate-limited.
+#   resolve_asset_url <tag> <archive> [strict]
+resolve_asset_url() {
+  local tag="$1" archive="$2" strict="${3:-0}"
+  local direct="https://github.com/${REPO}/releases/download/${tag}/${archive}"
+  local names
+  names="$(curl -sf "https://api.github.com/repos/${REPO}/releases/tags/${tag}" 2>/dev/null \
+    | sed 's/}, *{/\n/g' \
+    | grep -o '"name": *"[^"]*"' \
+    | sed 's/^"name": *"//; s/"$//')" || true
+  if printf '%s\n' "${names}" | grep -qxF "${archive}"; then
+    printf '%s\n' "${direct}"
+    return 0
+  fi
+  if [ "${strict}" = 1 ]; then
+    return 1
+  fi
+  printf '%s\n' "${direct}"
+  return 0
+}
+
 # ── Bootstrap mode: download this system's archive, extract, re-run ───────────
 
 bootstrap_install() {
@@ -239,7 +220,6 @@ bootstrap_install() {
   need tar
 
   detect_platform
-  info "platform: ${OS}/${ARCH} → ${PLATFORM}"
 
   local tag
   if [ "${CHANNEL}" = "nightly" ]; then
@@ -253,29 +233,47 @@ bootstrap_install() {
   fi
 
   local archive_name="gtm-${PLATFORM}.tar.gz"
-  local url="https://github.com/${REPO}/releases/download/${tag}/${archive_name}"
-
-  # Script-scope variable (no `local`): the EXIT trap below must still be
-  # able to read it after this function returns, or `set -u` would trip on
-  # an unbound variable at shutdown.
-  tmp="$(mktemp -d)"
-  trap 'rm -rf "${tmp:-}"' EXIT
-
-  log "downloading ${archive_name}..."
-  if ! download_gradient "${url}" "${tmp}/${archive_name}"; then
-    die "download failed: ${url}"
+  local url=""
+  if [ "${CHANNEL}" = "nightly" ]; then
+    # Resolve strictly against the published nightly so a draft (mid-build)
+    # resolves to a clear "try again" instead of a dead 404 URL.
+    url="$(resolve_asset_url "${tag}" "${archive_name}" 1)" || {
+      die "nightly archive '${archive_name}' is not published yet — the latest nightly build may still be running or failed. Retry in a few minutes, or install a stable release with: install.sh --version <ver>"
+    }
+  else
+    url="$(resolve_asset_url "${tag}" "${archive_name}")"
   fi
 
-  info "extracting ${archive_name}..."
-  tar -xzf "${tmp}/${archive_name}" -C "${tmp}"
+  # Script-scope on purpose (no `local`): the EXIT trap must still read it
+  # after this function returns, or `set -u` would trip on an unbound
+  # variable. Uniquely named so it can never collide with a caller-exported
+  # `$tmp`, and the trap uses `:?` so an empty value fails loudly instead of
+  # running `rm -rf ""`.
+  BOOTSTRAP_TMPDIR="$(mktemp -d)" || die "mktemp failed"
+  trap 'rm -rf "${BOOTSTRAP_TMPDIR:?}"' EXIT
 
-  local extracted_dir="${tmp}/${archive_name%.tar.gz}"
-  [ -d "${extracted_dir}" ] || die "archive did not extract to ${extracted_dir}"
+  log "📥 downloading ${archive_name}"
+  if ! download_simple "${url}" "${BOOTSTRAP_TMPDIR}/${archive_name}"; then
+    die "download failed: ${url}"
+  fi
+  ok "downloaded ${archive_name}"
 
-  info "running installer from the archive..."
+  tar -xzf "${BOOTSTRAP_TMPDIR}/${archive_name}" -C "${BOOTSTRAP_TMPDIR}"
+
+  local extracted_dir="${BOOTSTRAP_TMPDIR}/${archive_name%.tar.gz}"
+  [ -d "${extracted_dir}" ] || die "archive did not extract correctly"
+
+  # Install from the extracted archive using *this* script rather than the
+  # copy bundled in the archive. The two diverge: each release freezes
+  # install.sh at its own commit, so re-exec'ing the archived copy pins a
+  # stable install to the output format and behaviour of whatever release it
+  # came from, and no installer change reaches stable users until the next
+  # release. The archive is only a source of assets here (`install_from_archive`
+  # reads bin/, man/ and the rest relative to the current directory), and the
+  # options were already parsed above, so nothing is lost by not re-exec'ing.
   (
     cd "${extracted_dir}"
-    ./install.sh "$@"
+    install_from_archive
   )
 }
 
@@ -320,93 +318,178 @@ install_from_archive() {
     powershell_comp_dir="${POWERSHELL_COMPLETION_DIR:-${datadir}/powershell/Modules}"
   fi
 
-  log "installing to ${prefix} (bin: ${bindir})"
-
-  # Binaries
-  if [ ! -d "bin" ]; then
-    die "archive is missing its bin/ directory"
+  # ── Binaries ────────────────────────────────────────────────────────────────
+  if [ ! -d "bin" ] || [ ! -f "bin/gtm" ] || [ ! -f "bin/gtmd" ]; then
+    die "archive is missing its bin/ assets"
   fi
-  mkdir -p "${bindir}"
-  for name in gtm gtmd; do
-    if [ -f "bin/${name}" ]; then
-      install -m 0755 "bin/${name}" "${bindir}/${name}"
-      ok "${name} -> ${bindir}/${name}"
-    else
-      warn "missing bin/${name} — skipping"
-    fi
-  done
+  stage "📦 binaries"
+  if mkdir -p "${bindir}" \
+    && install -m 0755 "bin/gtm" "${bindir}/gtm" \
+    && install -m 0755 "bin/gtmd" "${bindir}/gtmd"; then
+    stage_ok
+  else
+    stage_fail
+    die "could not install binaries"
+  fi
 
-  # Man pages
+  # ── Man pages ───────────────────────────────────────────────────────────────
   if [ -d "man/man1" ]; then
-    mkdir -p "${mandir}"
-    for f in man/man1/*.1; do
-      [ -f "${f}" ] || continue
-      install -m 0644 "${f}" "${mandir}/$(basename "${f}")"
-    done
-    ok "man pages -> ${mandir}/"
+    stage "📖 man pages"
+    if install_man_pages; then
+      stage_ok
+    else
+      stage_fail
+      die "could not install man pages"
+    fi
   fi
 
-  # Completions — place each file into the conventional directory for its shell.
+  # ── Completions ─────────────────────────────────────────────────────────────
   if [ -d "completions" ]; then
-    for f in completions/*; do
-      [ -f "${f}" ] || continue
-      base="$(basename "${f}")"
-      case "${base}" in
-        gtm.bash | gtmd.bash)
-          mkdir -p "${bash_comp_dir}"
-          install -m 0644 "${f}" "${bash_comp_dir}/${base%.bash}"
-          ;;
-        _gtm | _gtmd)
-          mkdir -p "${zsh_comp_dir}"
-          install -m 0644 "${f}" "${zsh_comp_dir}/${base}"
-          ;;
-        gtm.fish | gtmd.fish)
-          mkdir -p "${fish_comp_dir}"
-          install -m 0644 "${f}" "${fish_comp_dir}/${base}"
-          ;;
-        gtm.elv | gtmd.elv)
-          mkdir -p "${elvish_comp_dir}"
-          install -m 0644 "${f}" "${elvish_comp_dir}/${base}"
-          ;;
-        gtm.ps1 | gtmd.ps1)
-          mkdir -p "${powershell_comp_dir}"
-          install -m 0644 "${f}" "${powershell_comp_dir}/${base}"
-          ;;
-      esac
-    done
-    ok "completions -> ${bash_comp_dir}, ${zsh_comp_dir}, ${fish_comp_dir}, ..."
+    stage "⌨️  shell completions"
+    if install_completions; then
+      stage_ok
+    else
+      stage_fail
+      die "could not install shell completions"
+    fi
   fi
 
-  # systemd user unit (Linux only — not macOS/Android)
+  # ── systemd user unit ───────────────────────────────────────────────────────
+  local systemd_unit=""
   if [ "${OS}" = "linux" ] && [ -f "systemd/gtmd.service" ]; then
+    stage "⚙️  systemd user unit"
     mkdir -p "${systemd_dir}"
-    install -m 0644 "systemd/gtmd.service" "${systemd_dir}/gtmd.service"
-    ok "systemd user unit -> ${systemd_dir}/gtmd.service"
-    log "enable with: systemctl --user enable --now gtmd"
-  elif [ -f "systemd/gtmd.service" ]; then
-    info "skipping systemd unit (no systemd on ${OS})"
+    if install -m 0644 "systemd/gtmd.service" "${systemd_dir}/gtmd.service"; then
+      systemd_unit="${systemd_dir}/gtmd.service"
+      stage_ok
+    else
+      stage_fail
+      die "could not install the systemd unit"
+    fi
   fi
 
-  # Desktop entry + icon
+  # ── Desktop entry + icon ────────────────────────────────────────────────────
   if [ -f "desktop/gtm.desktop" ]; then
+    stage "🖥️  desktop entry"
     mkdir -p "${applications_dir}"
-    install -m 0644 "desktop/gtm.desktop" "${applications_dir}/gtm.desktop"
-    ok "desktop entry -> ${applications_dir}/gtm.desktop"
+    if install -m 0644 "desktop/gtm.desktop" "${applications_dir}/gtm.desktop"; then
+      stage_ok
+    else
+      stage_fail
+      die "could not install the desktop entry"
+    fi
   fi
   if [ -f "icons/gtm.svg" ]; then
+    stage "🎨 icon"
     mkdir -p "${icons_dir}"
-    install -m 0644 "icons/gtm.svg" "${icons_dir}/gtm.svg"
-    ok "icon -> ${icons_dir}/gtm.svg"
+    if install -m 0644 "icons/gtm.svg" "${icons_dir}/gtm.svg"; then
+      stage_ok
+    else
+      stage_fail
+      die "could not install the icon"
+    fi
   fi
 
   ok "installation complete"
-  if ! echo ":${PATH}:" | grep -q ":${bindir}:"; then
-    warn "${bindir} is not in your \$PATH"
-    echo "  add it to your shell profile:" >&2
-    echo "" >&2
-    echo "    export PATH=\"${bindir}:\$PATH\"" >&2
-    echo "" >&2
+
+  # Everything is in place: offer to enable and start the daemon. Interactive
+  # terminals only; `-y` / non-interactive runs skip this without enabling.
+  if [ -n "${systemd_unit}" ] && [ "${ASSUME_YES}" != 1 ] && [ -t 0 ] \
+    && command -v systemctl >/dev/null 2>&1; then
+    local reply=""
+    printf "${BOLD}Enable and start the gtm daemon now? [y/N] ${NC}" >&2
+    read -r reply || reply=""
+    case "${reply}" in
+      [yY] | [yY][eE][sS])
+        systemctl --user daemon-reload 2>/dev/null || true
+        if systemctl --user enable --now gtmd 2>/dev/null; then
+          ok "gtmd enabled and started"
+        else
+          fail "could not enable gtmd"
+        fi
+        ;;
+      *) ;;
+    esac
   fi
+
+  if ! echo ":${PATH}:" | grep -q ":${bindir}:"; then
+    info "${bindir} is not in your \$PATH — adding it to your shell profiles..."
+
+    # bash: ~/.bashrc
+    if [ -f "${HOME}/.bashrc" ] && ! grep -q "export PATH=.*${bindir//\//\\/}" "${HOME}/.bashrc" 2>/dev/null; then
+      echo "" >> "${HOME}/.bashrc"
+      echo "# Added by gtm installer" >> "${HOME}/.bashrc"
+      echo "export PATH=\"${bindir}:\$PATH\"" >> "${HOME}/.bashrc"
+      ok "added PATH to ~/.bashrc"
+    fi
+
+    # zsh: ~/.zshrc
+    if [ -f "${HOME}/.zshrc" ] && ! grep -q "export PATH=.*${bindir//\//\\/}" "${HOME}/.zshrc" 2>/dev/null; then
+      echo "" >> "${HOME}/.zshrc"
+      echo "# Added by gtm installer" >> "${HOME}/.zshrc"
+      echo "export PATH=\"${bindir}:\$PATH\"" >> "${HOME}/.zshrc"
+      ok "added PATH to ~/.zshrc"
+    fi
+
+    # fish: ~/.config/fish/config.fish
+    local fish_config="${HOME}/.config/fish/config.fish"
+    if [ -f "${fish_config}" ] && ! grep -q "fish_add_path ${bindir//\//\\/}" "${fish_config}" 2>/dev/null; then
+      echo "" >> "${fish_config}"
+      echo "# Added by gtm installer" >> "${fish_config}"
+      echo "fish_add_path ${bindir}" >> "${fish_config}"
+      ok "added PATH to ~/.config/fish/config.fish"
+    elif [ ! -f "${fish_config}" ]; then
+      mkdir -p "${HOME}/.config/fish"
+      echo "# Added by gtm installer" > "${fish_config}"
+      echo "fish_add_path ${bindir}" >> "${fish_config}"
+      ok "added PATH to ~/.config/fish/config.fish"
+    fi
+
+    info "Restart your shell or source your shell profile to pick up the PATH change"
+  fi
+}
+
+# Install every man page in man/man1/ into ${mandir}. Exits non-zero on error
+# so the surrounding stage can print its ✘ marker.
+install_man_pages() {
+  local f
+  mkdir -p "${mandir}" || return 1
+  for f in man/man1/*.1; do
+    [ -f "${f}" ] || continue
+    install -m 0644 "${f}" "${mandir}/$(basename "${f}")" || return 1
+  done
+}
+
+# Place each completion file into the conventional directory for its shell.
+# Exits non-zero on error so the surrounding stage can print its ✘ marker.
+install_completions() {
+  local f base
+  for f in completions/*; do
+    [ -f "${f}" ] || continue
+    base="$(basename "${f}")"
+    case "${base}" in
+      gtm.bash | gtmd.bash)
+        mkdir -p "${bash_comp_dir}" || return 1
+        install -m 0644 "${f}" "${bash_comp_dir}/${base%.bash}" || return 1
+        ;;
+      _gtm | _gtmd)
+        mkdir -p "${zsh_comp_dir}" || return 1
+        install -m 0644 "${f}" "${zsh_comp_dir}/${base}" || return 1
+        ;;
+      gtm.fish | gtmd.fish)
+        mkdir -p "${fish_comp_dir}" || return 1
+        install -m 0644 "${f}" "${fish_comp_dir}/${base}" || return 1
+        ;;
+      gtm.elv | gtmd.elv)
+        mkdir -p "${elvish_comp_dir}" || return 1
+        install -m 0644 "${f}" "${elvish_comp_dir}/${base}" || return 1
+        ;;
+      gtm.ps1 | gtmd.ps1)
+        mkdir -p "${powershell_comp_dir}" || return 1
+        install -m 0644 "${f}" "${powershell_comp_dir}/${base}" || return 1
+        ;;
+    esac
+  done
 }
 
 # ── Entry point ────────────────────────────────────────────────────────────────

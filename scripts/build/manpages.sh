@@ -17,9 +17,12 @@ fi
 for src in "$docs_dir"/*.1.md; do
   [[ -e "$src" ]] || continue
   name="$(basename "$src" .1.md)"
-  if [[ ! -f "$outdir/man/$name.1" ]]; then
+  target="$outdir/man/$name.1"
+  if [[ ! -f "$target" ]] || [[ "$src" -nt "$target" ]]; then
     echo "Generating manpage (from local docs/man): $name.1"
-    pandoc -s -t man "$src" -o "$outdir/man/$name.1"
+    pandoc -s -t man "$src" -o "$target"
+  else
+    echo "Manpage up to date: $name.1"
   fi
 done
 

@@ -35,6 +35,8 @@ pub enum KeyboardAction {
 
     // Filter
     EnterFilter,
+    /// Contextual search: picks the search backend matching the focused list.
+    Search,
 
     // Playback
     PlayPause,
@@ -43,12 +45,29 @@ pub enum KeyboardAction {
     Stop,
     VolumeUp,
     VolumeDown,
+    SpeedUp,
+    SpeedDown,
+    ToggleLowPower,
+    /// Fullscreen "Zen mode" showing one of the enlarged-cover + progress,
+    /// lyrics, or visualizer surfaces at a time (`z`).
+    ToggleZen,
     SeekForward,
     SeekBackward,
     ToggleShuffle,
     CycleRepeat,
     ToggleMute,
+    /// Toggle mono downmix (`Alt+1`).
+    ToggleMono,
     ToggleFavourite,
+    /// Love / un-love the current track on Last.fm (`*`).
+    ToggleLove,
+    /// Save the track on air to Spotify Liked Songs (`L`).
+    LikeSpotify,
+    /// Pick Spotify destinations (Liked Songs and/or playlists) for the track
+    /// on air (`Alt+L`).
+    AddToSpotify,
+    /// Toggle Last.fm scrobbling for this session (`&`).
+    ToggleScrobble,
 
     // Queue
     ClearQueue,
@@ -145,532 +164,268 @@ fn key_matches(event: &KeyEvent, binding: &KeyEvent) -> bool {
 ///   List   : j/k, enter, delete
 ///
 /// Bindings are scanned in order; the first match wins.
+/// Build the default set of key bindings.  Layered by context:
+///
+///   Global : q (quit), ? (help), space (play/pause)
+///   Normal : tab switching, cursor, volume, filters, playback control
+///   List   : j/k, enter, delete
+///
+/// Bindings are scanned in order; the first match wins.
+///
+/// The table is a flat list of `(key, action, contexts)` triples and `b!`
+/// expands one triple into the `(KeyEvent, BoundCommand)` pair, so adding a
+/// binding is a single line instead of a seven-line struct literal.
+macro_rules! b {
+    ($key:expr, $action:expr, GLOBAL) => {
+        (
+            $key.into(),
+            BoundCommand {
+                action: $action,
+                contexts: vec![KeyContext::Global, KeyContext::Normal],
+            },
+        )
+    };
+    ($key:expr, $action:expr, NORMAL) => {
+        (
+            $key.into(),
+            BoundCommand {
+                action: $action,
+                contexts: vec![KeyContext::Normal],
+            },
+        )
+    };
+    ($key:expr, $action:expr, LIST) => {
+        (
+            $key.into(),
+            BoundCommand {
+                action: $action,
+                contexts: vec![KeyContext::List, KeyContext::Normal],
+            },
+        )
+    };
+    ($key:expr, $action:expr, LIST_ONLY) => {
+        (
+            $key.into(),
+            BoundCommand {
+                action: $action,
+                contexts: vec![KeyContext::List],
+            },
+        )
+    };
+}
+
 pub fn default_keybindings() -> Keybindings {
     Keybindings {
         bindings: vec![
-            // Global: Quit
-            (
-                KeyCode::Char('q').into(),
-                BoundCommand {
-                    action: KeyboardAction::Quit,
-                    contexts: vec![KeyContext::Global, KeyContext::Normal],
-                },
-            ),
-            // Global: ToggleHelp
-            (
-                KeyCode::Char('?').into(),
-                BoundCommand {
-                    action: KeyboardAction::ToggleHelp,
-                    contexts: vec![KeyContext::Global, KeyContext::Normal],
-                },
-            ),
-            // Ctrl+H: hide/show help bar in library view
-            (
+            b!(KeyCode::Char('q'), KeyboardAction::Quit, GLOBAL),
+            b!(KeyCode::Char('?'), KeyboardAction::ToggleHelp, GLOBAL),
+            b!(
                 KeyEvent::new(KeyCode::Char('h'), KeyModifiers::CONTROL),
-                BoundCommand {
-                    action: KeyboardAction::HideHelpBar,
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::HideHelpBar,
+                NORMAL
             ),
-            // Command palette (:)
-            (
-                KeyCode::Char(':').into(),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::CommandPalette),
-                    contexts: vec![KeyContext::Normal],
-                },
+            b!(
+                KeyCode::Char(':'),
+                KeyboardAction::OpenOverlay(PickerId::CommandPalette),
+                NORMAL
             ),
-            // Pane cycling: Tab / Shift-Tab
-            (
-                KeyCode::Tab.into(),
-                BoundCommand {
-                    action: KeyboardAction::NextPane,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::BackTab.into(),
-                BoundCommand {
-                    action: KeyboardAction::PrevPane,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Alt+,: open settings picker
-            (
+            b!(KeyCode::Tab, KeyboardAction::NextPane, NORMAL),
+            b!(KeyCode::BackTab, KeyboardAction::PrevPane, NORMAL),
+            b!(
                 KeyEvent::new(KeyCode::Char(','), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::Settings),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::Settings),
+                NORMAL
             ),
-            // Cursor: arrow keys
-            (
-                KeyCode::Up.into(),
-                BoundCommand {
-                    action: KeyboardAction::MoveUp,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Down.into(),
-                BoundCommand {
-                    action: KeyboardAction::MoveDown,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            // Multiselect: Shift+Up/Down
-            (
+            b!(KeyCode::Up, KeyboardAction::MoveUp, LIST),
+            b!(KeyCode::Down, KeyboardAction::MoveDown, LIST),
+            b!(
                 KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
-                BoundCommand {
-                    action: KeyboardAction::MultiselectUp,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
+                KeyboardAction::MultiselectUp,
+                LIST
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Down, KeyModifiers::SHIFT),
-                BoundCommand {
-                    action: KeyboardAction::MultiselectDown,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
+                KeyboardAction::MultiselectDown,
+                LIST
             ),
-            // Cursor: vim-style j/k
-            (
-                KeyCode::Char('k').into(),
-                BoundCommand {
-                    action: KeyboardAction::MoveUp,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char('j').into(),
-                BoundCommand {
-                    action: KeyboardAction::MoveDown,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            // Cursor: page up/down (PgUp/PgDn, Ctrl+U/Ctrl+D)
-            (
-                KeyCode::PageUp.into(),
-                BoundCommand {
-                    action: KeyboardAction::PageUp,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::PageDown.into(),
-                BoundCommand {
-                    action: KeyboardAction::PageDown,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            (
+            b!(KeyCode::Char('k'), KeyboardAction::MoveUp, LIST),
+            b!(KeyCode::Char('j'), KeyboardAction::MoveDown, LIST),
+            b!(KeyCode::PageUp, KeyboardAction::PageUp, LIST),
+            b!(KeyCode::PageDown, KeyboardAction::PageDown, LIST),
+            b!(
                 KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL),
-                BoundCommand {
-                    action: KeyboardAction::PageUp,
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::PageUp,
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
-                BoundCommand {
-                    action: KeyboardAction::PageDown,
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::PageDown,
+                NORMAL
             ),
-            // Cursor: jump to top/bottom (Home/End)
-            (
-                KeyCode::Home.into(),
-                BoundCommand {
-                    action: KeyboardAction::Top,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
+            b!(KeyCode::Home, KeyboardAction::Top, LIST),
+            b!(KeyCode::End, KeyboardAction::Bottom, LIST),
+            b!(KeyCode::Char(' '), KeyboardAction::PlayPause, GLOBAL),
+            b!(KeyCode::Char('n'), KeyboardAction::Next, GLOBAL),
+            b!(KeyCode::Char('p'), KeyboardAction::Prev, GLOBAL),
+            b!(KeyCode::Char('s'), KeyboardAction::Stop, NORMAL),
+            b!(KeyCode::Char('+'), KeyboardAction::VolumeUp, NORMAL),
+            b!(KeyCode::Char('='), KeyboardAction::VolumeUp, NORMAL),
+            b!(KeyCode::Char('-'), KeyboardAction::VolumeDown, NORMAL),
+            b!(KeyCode::Char('>'), KeyboardAction::SpeedUp, NORMAL),
+            b!(KeyCode::Char('<'), KeyboardAction::SpeedDown, NORMAL),
+            b!(KeyCode::Char('z'), KeyboardAction::ToggleZen, NORMAL),
+            b!(KeyCode::Char('m'), KeyboardAction::ToggleMute, NORMAL),
+            b!(
+                KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT),
+                KeyboardAction::ToggleMono,
+                NORMAL
             ),
-            (
-                KeyCode::End.into(),
-                BoundCommand {
-                    action: KeyboardAction::Bottom,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            // Playback: space, n, p, Ctrl+N/P, s (stop)
-            (
-                KeyCode::Char(' ').into(),
-                BoundCommand {
-                    action: KeyboardAction::PlayPause,
-                    contexts: vec![KeyContext::Global, KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char('n').into(),
-                BoundCommand {
-                    action: KeyboardAction::Next,
-                    contexts: vec![KeyContext::Global, KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char('p').into(),
-                BoundCommand {
-                    action: KeyboardAction::Prev,
-                    contexts: vec![KeyContext::Global, KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char('s').into(),
-                BoundCommand {
-                    action: KeyboardAction::Stop,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Volume: +, =, -
-            (
-                KeyCode::Char('+').into(),
-                BoundCommand {
-                    action: KeyboardAction::VolumeUp,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char('=').into(),
-                BoundCommand {
-                    action: KeyboardAction::VolumeUp,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char('-').into(),
-                BoundCommand {
-                    action: KeyboardAction::VolumeDown,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Mute: m
-            (
-                KeyCode::Char('m').into(),
-                BoundCommand {
-                    action: KeyboardAction::ToggleMute,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Quit daemon: Q / Ctrl+Q
-            (
-                KeyCode::Char('Q').into(),
-                BoundCommand {
-                    action: KeyboardAction::QuitDaemon,
-                    contexts: vec![KeyContext::Global, KeyContext::Normal],
-                },
-            ),
-            (
+            b!(KeyCode::Char('Q'), KeyboardAction::QuitDaemon, GLOBAL),
+            b!(
                 KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
-                BoundCommand {
-                    action: KeyboardAction::QuitDaemon,
-                    contexts: vec![KeyContext::Global, KeyContext::Normal],
-                },
+                KeyboardAction::QuitDaemon,
+                GLOBAL
             ),
-            // Favourite: f
-            (
-                KeyCode::Char('f').into(),
-                BoundCommand {
-                    action: KeyboardAction::ToggleFavourite,
-                    contexts: vec![KeyContext::Normal],
-                },
+            b!(KeyCode::Char('f'), KeyboardAction::ToggleFavourite, NORMAL),
+            b!(KeyCode::Char('*'), KeyboardAction::ToggleLove, NORMAL),
+            b!(KeyCode::Char('L'), KeyboardAction::LikeSpotify, NORMAL),
+            b!(
+                KeyEvent::new(KeyCode::Char('l'), KeyModifiers::ALT),
+                KeyboardAction::AddToSpotify,
+                NORMAL
             ),
-            // Clear queue: D
-            (
-                KeyCode::Char('D').into(),
-                BoundCommand {
-                    action: KeyboardAction::ClearQueue,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Focus navigation: [, ]
-            (
-                KeyCode::Char('[').into(),
-                BoundCommand {
-                    action: KeyboardAction::FocusLeft,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char(']').into(),
-                BoundCommand {
-                    action: KeyboardAction::FocusRight,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Lyrics: l
-            (
-                KeyCode::Char('l').into(),
-                BoundCommand {
-                    action: KeyboardAction::FetchLyrics,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Repeat: r, Shift+R
-            (
-                KeyCode::Char('r').into(),
-                BoundCommand {
-                    action: KeyboardAction::CycleRepeat,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char('R').into(),
-                BoundCommand {
-                    action: KeyboardAction::CycleRepeat,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Shuffle: Shift+S only (s is reserved for Stop)
-            (
-                KeyCode::Char('S').into(),
-                BoundCommand {
-                    action: KeyboardAction::ToggleShuffle,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Seek: comma/period
-            (
-                KeyCode::Char('.').into(),
-                BoundCommand {
-                    action: KeyboardAction::SeekForward,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char(',').into(),
-                BoundCommand {
-                    action: KeyboardAction::SeekBackward,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Filter mode: Ctrl+F (the '/' key now opens the library search picker)
-            (
-                KeyCode::Char('/').into(),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::SearchLibrary),
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            (
+            b!(KeyCode::Char('&'), KeyboardAction::ToggleScrobble, NORMAL),
+            b!(KeyCode::Char('D'), KeyboardAction::ClearQueue, NORMAL),
+            b!(KeyCode::Char('['), KeyboardAction::FocusLeft, NORMAL),
+            b!(KeyCode::Char(']'), KeyboardAction::FocusRight, NORMAL),
+            b!(KeyCode::Char('l'), KeyboardAction::FetchLyrics, NORMAL),
+            b!(KeyCode::Char('r'), KeyboardAction::CycleRepeat, NORMAL),
+            b!(KeyCode::Char('R'), KeyboardAction::CycleRepeat, NORMAL),
+            b!(KeyCode::Char('S'), KeyboardAction::ToggleShuffle, NORMAL),
+            b!(KeyCode::Char('.'), KeyboardAction::SeekForward, NORMAL),
+            b!(KeyCode::Char(','), KeyboardAction::SeekBackward, NORMAL),
+            b!(KeyCode::Char('/'), KeyboardAction::Search, NORMAL),
+            b!(
                 KeyEvent::new(KeyCode::Char('f'), KeyModifiers::CONTROL),
-                BoundCommand {
-                    action: KeyboardAction::EnterFilter,
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::EnterFilter,
+                NORMAL
             ),
-            // Select: Enter
-            (
-                KeyCode::Enter.into(),
-                BoundCommand {
-                    action: KeyboardAction::Select,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            // Back: Backspace (go back in library drill-down / move focus left)
-            (
-                KeyCode::Backspace.into(),
-                BoundCommand {
-                    action: KeyboardAction::Back,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Delete: Del / d (with confirmation)
-            (
-                KeyCode::Delete.into(),
-                BoundCommand {
-                    action: KeyboardAction::Delete,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            (
-                KeyCode::Char('d').into(),
-                BoundCommand {
-                    action: KeyboardAction::Delete,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
-            ),
-            // Overlay triggers: Alt+key
-            (
+            b!(KeyCode::Enter, KeyboardAction::Select, LIST),
+            b!(KeyCode::Backspace, KeyboardAction::Back, NORMAL),
+            b!(KeyCode::Delete, KeyboardAction::Delete, LIST),
+            b!(KeyCode::Char('d'), KeyboardAction::Delete, LIST),
+            b!(
                 KeyEvent::new(KeyCode::Char('q'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::Queue),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::Queue),
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('y'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::YTSearch),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::YTSearch),
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('/'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::SearchLibrary),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::Search,
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('a'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::About),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::About),
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('z'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::SleepTimer),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::SleepTimer),
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('c'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::ThemePicker),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::ThemePicker),
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::Equalizer),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::Equalizer),
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::ProgressStyle),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::ProgressStyle),
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('v'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::VisualizerPreset),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::VisualizerPreset),
+                NORMAL
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('s'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::SpotifySearch),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::SpotifySearch),
+                NORMAL
             ),
-            (
+            b!(
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::ALT),
+                KeyboardAction::OpenOverlay(PickerId::LoadStream),
+                NORMAL
+            ),
+            b!(
+                KeyEvent::new(KeyCode::Char('p'), KeyModifiers::ALT),
+                KeyboardAction::OpenOverlay(PickerId::PodcastFeeds),
+                NORMAL
+            ),
+            b!(
+                KeyEvent::new(KeyCode::Char('r'), KeyModifiers::ALT),
+                KeyboardAction::OpenOverlay(PickerId::Radio),
+                NORMAL
+            ),
+            b!(
                 KeyEvent::new(KeyCode::Char('n'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::OpenOverlay(PickerId::Notifications),
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::OpenOverlay(PickerId::Notifications),
+                NORMAL
             ),
-            // Library motions: vim-style
-            // v: toggle multiselect mode
-            (
-                KeyCode::Char('v').into(),
-                BoundCommand {
-                    action: KeyboardAction::ToggleMultiselect,
-                    contexts: vec![KeyContext::Normal],
-                },
+            b!(
+                KeyEvent::new(KeyCode::Char('x'), KeyModifiers::ALT),
+                KeyboardAction::OpenOverlay(PickerId::Setup),
+                NORMAL
             ),
-            // a: add selected to queue
-            (
-                KeyCode::Char('a').into(),
-                BoundCommand {
-                    action: KeyboardAction::AddToQueue,
-                    contexts: vec![KeyContext::Normal],
-                },
+            b!(
+                KeyCode::Char('v'),
+                KeyboardAction::ToggleMultiselect,
+                NORMAL
             ),
-            // A (Shift): add to playlist
-            (
-                KeyCode::Char('A').into(),
-                BoundCommand {
-                    action: KeyboardAction::AddToPlaylist,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // x: delete from list
-            (
-                KeyCode::Char('x').into(),
-                BoundCommand {
-                    action: KeyboardAction::DeleteFromList,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // gg: jump to start (handled via pending_motion in app.rs)
-            // g alone is not bound; the app checks for double-press.
-            // G (Shift): jump to end
-            (
-                KeyCode::Char('G').into(),
-                BoundCommand {
-                    action: KeyboardAction::JumpToEnd,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // e: edit metadata
-            (
-                KeyCode::Char('e').into(),
-                BoundCommand {
-                    action: KeyboardAction::EditMetadata,
-                    contexts: vec![KeyContext::Normal],
-                },
-            ),
-            // Ctrl+V: toggle visualizer
-            (
+            b!(KeyCode::Char('a'), KeyboardAction::AddToQueue, NORMAL),
+            b!(KeyCode::Char('A'), KeyboardAction::AddToPlaylist, NORMAL),
+            b!(KeyCode::Char('x'), KeyboardAction::DeleteFromList, NORMAL),
+            b!(KeyCode::Char('G'), KeyboardAction::JumpToEnd, NORMAL),
+            b!(KeyCode::Char('e'), KeyboardAction::EditMetadata, NORMAL),
+            b!(
                 KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL),
-                BoundCommand {
-                    action: KeyboardAction::ToggleVisualizer,
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::ToggleVisualizer,
+                NORMAL
             ),
-            // Alt+T: cycle theme (dark/light variants)
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('T'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::ToggleTheme,
-                    contexts: vec![KeyContext::Normal],
-                },
+                KeyboardAction::ToggleTheme,
+                NORMAL
             ),
-            // Alt+S: cycle the library track list sort order
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('S'), KeyModifiers::ALT),
-                BoundCommand {
-                    action: KeyboardAction::CycleSort,
-                    contexts: vec![KeyContext::List, KeyContext::Normal],
-                },
+                KeyboardAction::CycleSort,
+                LIST
             ),
-            // Queue move mode: Ctrl+j/k to move, Enter to confirm, Esc to cancel
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL),
-                BoundCommand {
-                    action: KeyboardAction::QueueMoveDown,
-                    contexts: vec![KeyContext::List],
-                },
+                KeyboardAction::QueueMoveDown,
+                LIST_ONLY
             ),
-            (
+            b!(
                 KeyEvent::new(KeyCode::Char('k'), KeyModifiers::CONTROL),
-                BoundCommand {
-                    action: KeyboardAction::QueueMoveUp,
-                    contexts: vec![KeyContext::List],
-                },
+                KeyboardAction::QueueMoveUp,
+                LIST_ONLY
             ),
-            (
-                KeyCode::Enter.into(),
-                BoundCommand {
-                    action: KeyboardAction::QueueMoveConfirm,
-                    contexts: vec![KeyContext::List],
-                },
-            ),
-            (
-                KeyCode::Esc.into(),
-                BoundCommand {
-                    action: KeyboardAction::QueueMoveCancel,
-                    contexts: vec![KeyContext::List],
-                },
-            ),
+            b!(KeyCode::Enter, KeyboardAction::QueueMoveConfirm, LIST_ONLY),
+            b!(KeyCode::Esc, KeyboardAction::QueueMoveCancel, LIST_ONLY),
         ],
     }
 }
@@ -688,7 +443,11 @@ pub fn parse_key_event(s: &str) -> Option<KeyEvent> {
             "shift" => modifiers |= KeyModifiers::SHIFT,
             "super" | "meta" | "cmd" | "command" => modifiers |= KeyModifiers::SUPER,
             _ => {
-                let c = match p {
+                // Named keys match case-insensitively, like the modifier arms
+                // above, so `"Space"` and `"Ctrl+Space"` both work. The
+                // single-character fallback keeps the original casing: `S` and
+                // `s` are different bindings.
+                let c = match p.to_lowercase().as_str() {
                     "space" => KeyCode::Char(' '),
                     "enter" | "return" => KeyCode::Enter,
                     "tab" => {
@@ -723,7 +482,9 @@ pub fn parse_key_event(s: &str) -> Option<KeyEvent> {
                     "f10" => KeyCode::F(10),
                     "f11" => KeyCode::F(11),
                     "f12" => KeyCode::F(12),
-                    _ if p.len() == 1 => KeyCode::Char(p.chars().next()?),
+                    // `chars().count()`, not `len()`: a single non-ASCII
+                    // character is more than one byte.
+                    _ if p.chars().count() == 1 => KeyCode::Char(p.chars().next()?),
                     _ => return None,
                 };
                 code = Some(c);
@@ -731,6 +492,57 @@ pub fn parse_key_event(s: &str) -> Option<KeyEvent> {
         }
     }
     Some(KeyEvent::new(code?, modifiers))
+}
+
+/// Inverse of [`parse_key_event`]: the spelling of a key event as it appears in
+/// `config.toml` and the help screen. Lets the footer echo the key a command
+/// was triggered with instead of the command's name.
+///
+/// A shifted letter arrives as an already-uppercase `Char` with the `SHIFT`
+/// modifier set, so the modifier is folded into the character rather than
+/// spelled out; every other shifted key keeps an explicit `Shift+`.
+pub fn format_key_event(key: &KeyEvent) -> String {
+    let mut out = String::new();
+    if key.modifiers.contains(KeyModifiers::CONTROL) {
+        out.push_str("Ctrl+");
+    }
+    if key.modifiers.contains(KeyModifiers::ALT) {
+        out.push_str("Alt+");
+    }
+    if key.modifiers.contains(KeyModifiers::SUPER) {
+        out.push_str("Super+");
+    }
+    let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+    if shift && !matches!(key.code, KeyCode::Char(_)) {
+        out.push_str("Shift+");
+    }
+    match key.code {
+        KeyCode::Char(' ') => out.push_str("Space"),
+        KeyCode::Char(c) => out.push(if shift { c.to_ascii_uppercase() } else { c }),
+        KeyCode::Enter => out.push_str("Enter"),
+        KeyCode::Tab => out.push_str("Tab"),
+        KeyCode::BackTab => out.push_str("BackTab"),
+        KeyCode::Backspace => out.push_str("Backspace"),
+        KeyCode::Delete => out.push_str("Delete"),
+        KeyCode::Esc => out.push_str("Esc"),
+        KeyCode::Home => out.push_str("Home"),
+        KeyCode::End => out.push_str("End"),
+        KeyCode::PageUp => out.push_str("PageUp"),
+        KeyCode::PageDown => out.push_str("PageDown"),
+        KeyCode::Up => out.push_str("Up"),
+        KeyCode::Down => out.push_str("Down"),
+        KeyCode::Left => out.push_str("Left"),
+        KeyCode::Right => out.push_str("Right"),
+        KeyCode::Insert => out.push_str("Insert"),
+        KeyCode::F(n) => {
+            out.push('F');
+            out.push_str(&n.to_string());
+        }
+        // A key the user has not bound; showing nothing would be worse than
+        // an honest placeholder.
+        _ => out.push('?'),
+    }
+    out
 }
 
 impl KeyboardAction {
@@ -748,18 +560,28 @@ impl KeyboardAction {
             "select" | "enter" => KeyboardAction::Select,
             "delete" | "del" => KeyboardAction::Delete,
             "enter_filter" | "filter" => KeyboardAction::EnterFilter,
+            "search" => KeyboardAction::Search,
             "play_pause" | "toggle_playback" => KeyboardAction::PlayPause,
             "next" => KeyboardAction::Next,
             "prev" | "previous" => KeyboardAction::Prev,
             "stop" => KeyboardAction::Stop,
             "volume_up" | "vol_up" => KeyboardAction::VolumeUp,
             "volume_down" | "vol_down" => KeyboardAction::VolumeDown,
+            "speed_up" => KeyboardAction::SpeedUp,
+            "speed_down" => KeyboardAction::SpeedDown,
+            "toggle_low_power" | "low_power" => KeyboardAction::ToggleLowPower,
+            "toggle_zen" | "zen" => KeyboardAction::ToggleZen,
             "seek_forward" | "seek_fwd" => KeyboardAction::SeekForward,
             "seek_backward" | "seek_back" => KeyboardAction::SeekBackward,
             "toggle_shuffle" | "shuffle" => KeyboardAction::ToggleShuffle,
             "cycle_repeat" | "repeat" => KeyboardAction::CycleRepeat,
             "toggle_mute" | "mute" => KeyboardAction::ToggleMute,
+            "toggle_mono" | "mono" => KeyboardAction::ToggleMono,
             "toggle_favourite" | "favourite" | "fav" => KeyboardAction::ToggleFavourite,
+            "toggle_love" | "love" => KeyboardAction::ToggleLove,
+            "like_spotify" | "spotify_like" => KeyboardAction::LikeSpotify,
+            "add_to_spotify" | "spotify_add" => KeyboardAction::AddToSpotify,
+            "toggle_scrobble" | "scrobble" => KeyboardAction::ToggleScrobble,
             "clear_queue" => KeyboardAction::ClearQueue,
             "back" => KeyboardAction::Back,
             "focus_left" => KeyboardAction::FocusLeft,
@@ -788,12 +610,14 @@ impl KeyboardAction {
             // Overlay openers
             "open_queue" => KeyboardAction::OpenOverlay(PickerId::Queue),
             "open_yt_search" | "open_youtube" => KeyboardAction::OpenOverlay(PickerId::YTSearch),
-            "open_search" | "open_library_search" => {
-                KeyboardAction::OpenOverlay(PickerId::SearchLibrary)
-            }
+            "open_search" | "open_library_search" => KeyboardAction::Search,
             "open_settings" | "settings" => KeyboardAction::OpenOverlay(PickerId::Settings),
             "open_spotify_search" | "open_spotify" => {
                 KeyboardAction::OpenOverlay(PickerId::SpotifySearch)
+            }
+            "open_podcast" | "open_podcasts" => KeyboardAction::OpenOverlay(PickerId::PodcastFeeds),
+            "open_radio" | "open_radios" | "open_radio_browse" | "browse_radio" => {
+                KeyboardAction::OpenOverlay(PickerId::Radio)
             }
             "open_notifications" | "notifications" => {
                 KeyboardAction::OpenOverlay(PickerId::Notifications)
@@ -809,6 +633,7 @@ impl KeyboardAction {
             "open_command_palette" | "commands" => {
                 KeyboardAction::OpenOverlay(PickerId::CommandPalette)
             }
+            "open_setup" | "setup" => KeyboardAction::OpenOverlay(PickerId::Setup),
             _ => return None,
         })
     }
@@ -849,7 +674,7 @@ mod tests {
     }
 
     #[test]
-    fn delete_uses_lowercase_d_and_del() {
+    fn delete_lowercase_keys() {
         // d / Del remove an item…
         assert!(matches!(
             dispatch(KeyCode::Char('d').into(), KeyContext::Normal),
@@ -867,7 +692,7 @@ mod tests {
     }
 
     #[test]
-    fn settings_picker_shortcut_not_shadowed_by_chords() {
+    fn picker_shortcut_unique() {
         // Alt+, opens the Settings picker; plain `,` seeks backward.
         assert!(matches!(
             dispatch(
@@ -895,12 +720,97 @@ mod tests {
     }
 
     #[test]
-    fn colon_opens_command_palette_only() {
+    fn colon_opens_palette() {
         // `:` is the command palette; the removed duplicate (health check)
         // binding must not shadow it.
         assert!(matches!(
             dispatch(KeyCode::Char(':').into(), KeyContext::Normal),
             Some(KeyboardAction::OpenOverlay(PickerId::CommandPalette))
         ));
+    }
+
+    #[test]
+    fn parse_named_keys_ignore_case_but_chars_do_not() {
+        // Modifier arms have always been case-insensitive, so `Ctrl+d` parsed
+        // while `Space` did not. Named keys must behave the same way, and the
+        // single-character fallback must keep its case or `S` and `s` would
+        // collide.
+        let space = KeyCode::Char(' ').into();
+        assert_eq!(parse_key_event("Space"), Some(space));
+        assert_eq!(parse_key_event("space"), Some(space));
+        assert_eq!(parse_key_event("SPACE"), Some(space));
+        assert_eq!(
+            parse_key_event("Shift+Space"),
+            Some(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::SHIFT))
+        );
+        let upper = KeyCode::Char('S').into();
+        assert_eq!(parse_key_event("S"), Some(upper));
+        assert_ne!(parse_key_event("S"), parse_key_event("s"));
+        // A single non-ASCII character is one key, not two bytes.
+        assert_eq!(
+            parse_key_event("é"),
+            Some(KeyEvent::new(KeyCode::Char('é'), KeyModifiers::NONE))
+        );
+    }
+
+    #[test]
+    fn format_is_readable() {
+        let show = |k: KeyEvent| format_key_event(&k);
+        assert_eq!(show(KeyCode::Char('n').into()), "n");
+        assert_eq!(show(KeyCode::Char(' ').into()), "Space");
+        assert_eq!(show(KeyCode::Up.into()), "Up");
+        assert_eq!(show(KeyCode::F(5).into()), "F5");
+        assert_eq!(
+            show(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+            "Ctrl+d"
+        );
+        assert_eq!(
+            show(KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT)),
+            "Alt+1"
+        );
+    }
+
+    #[test]
+    fn shifted_letter_has_no_shift_prefix() {
+        // A terminal sends `S` with SHIFT set for shift+s; the character
+        // already carries the shift, so `Shift+S` would be redundant.
+        assert_eq!(
+            format_key_event(&KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT)),
+            "S"
+        );
+        // A shifted non-letter still needs the modifier spelled out.
+        assert_eq!(
+            format_key_event(&KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT)),
+            "Shift+Up"
+        );
+    }
+
+    #[test]
+    fn format_round_trips_through_parse() {
+        // `config.toml` spells bindings with `parse_key_event`; the footer
+        // echo must be a string a user could paste back into `keybindings` and
+        // still get the same binding. The key must survive, and the modifiers
+        // must still *match* — not be spelled identically, since `key_matches`
+        // deliberately treats a lone Shift as fuzzy.
+        for key in [
+            KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL),
+            KeyEvent::new(KeyCode::Char('S'), KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Char('1'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Char('S'), KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::SHIFT),
+            KeyEvent::new(KeyCode::Up, KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::F(5), KeyModifiers::NONE),
+        ] {
+            let text = format_key_event(&key);
+            let back =
+                parse_key_event(&text).unwrap_or_else(|| panic!("{text} did not parse back"));
+            assert_eq!(back.code, key.code, "{text} changed the key");
+            assert!(
+                key_matches(&key, &back),
+                "{text} no longer matches the press it came from"
+            );
+        }
     }
 }

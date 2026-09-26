@@ -23,6 +23,9 @@ pub enum PickerId {
     /// can be picked (persistently highlighted) before Ctrl+Enter commits them.
     PlaylistTrackSelect,
     EditMetadata,
+    /// OS audio output device list. The first entry is always "System default",
+    /// which clears the saved device so the mixer uses the platform sink.
+    AudioDevice,
     Crossfade,
     VisualizerPreset,
     FooterPreset,
@@ -30,6 +33,27 @@ pub enum PickerId {
     Settings,
     Notifications,
     NotificationSettings,
+    PodcastFeeds,
+    /// Episode list of a selected podcast feed.
+    PodcastEpisodes,
+    /// Podcast feed subscribe form (URL input).
+    PodcastSubscribe,
+    /// Unified Radio Browser picker (Alt+R): saved stations, top stations,
+    /// tags/countries drill-down, and a search box filtered by field.
+    Radio,
+    /// Play an arbitrary HTTP(S) stream URL (Alt+O).
+    LoadStream,
+    /// `gtm setup` entry: choose which service to configure.
+    Setup,
+    /// Last.fm setup form (API key/secret) plus the OAuth browser flow.
+    LastfmAuth,
+    /// YouTube cookie-file path form (`gtm setup` → YouTube). Single text
+    /// input, Enter commits to the daemon's yt-dlp config (empty clears).
+    YoutubeSetup,
+    /// Multi-select list of Spotify destinations for the track on air: Liked
+    /// Songs plus the user's playlists. Row 0 is Liked Songs; the rest are the
+    /// synced playlists, filterable by the picker's query.
+    SpotifyDest,
 }
 
 /// Which list a fuzzy-finder picker searches. `Tab` cycles through these.
@@ -41,6 +65,7 @@ pub enum PickerSource {
     Artists,
     Albums,
     Playlists,
+    Radio,
 }
 
 impl PickerSource {
@@ -51,6 +76,7 @@ impl PickerSource {
             Self::Artists => "Artists",
             Self::Albums => "Albums",
             Self::Playlists => "Playlists",
+            Self::Radio => "Radio",
         }
     }
 
@@ -60,7 +86,8 @@ impl PickerSource {
             Self::Tracks => Self::Artists,
             Self::Artists => Self::Albums,
             Self::Albums => Self::Playlists,
-            Self::Playlists => Self::All,
+            Self::Playlists => Self::Radio,
+            Self::Radio => Self::All,
         }
     }
 }

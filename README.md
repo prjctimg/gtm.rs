@@ -12,6 +12,19 @@ A terminal music player (**gtm** — "goto music") with background playback and
 YouTube/Spotify integration. It is a background daemon (`gtmd`) with a client
 (`gtm`); you control it through the terminal.
 
+## On this page
+
+- [Features](#features)
+- [Install](#install)
+  - [Build from Source](#build-from-source)
+  - [Termux](#termux-native-on-device)
+- [Spotify](#spotify)
+- [Screenshots](#screenshots)
+- [Documentation](#documentation)
+- [Contributing](#contributing)
+- [Acknowledgements](#acknowledgements)
+- [Contributors](#contributors)
+
 ## Why another (terminal) audio player ?
 
 You can read about it in [this post.](https://prjctimg.me/blg/feature-rich-terminal-audio-player)
@@ -19,8 +32,8 @@ You can read about it in [this post.](https://prjctimg.me/blg/feature-rich-termi
 ## Features
 
 - **Background playback**: reattach to the client from anywhere in the terminal
-- **YouTube, Spotify, Deezer**: search & download from YouTube, sync
-  Spotify playlists, and fetch missing metadata/lyrics/cover art via Deezer.
+- **YouTube & Spotify**: search & download from YouTube and sync Spotify
+  playlists; missing metadata/cover art is backfilled from Deezer's public API.
 - **Crossfade**: gapless-ish transitions with a configurable duration.
 - **Lyrics**: automatic fetch from LRCLIB (default provider)
 - **Metadata sync**: backfill missing tags, cover art, and lyrics for local files

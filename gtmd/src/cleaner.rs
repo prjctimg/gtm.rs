@@ -7,109 +7,46 @@
 use regex::Regex;
 use std::sync::OnceLock;
 
+/// Compiled once, then shared: every call strips the same token set.
+fn noise_patterns() -> &'static [Regex] {
+    static PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
+    PATTERNS.get_or_init(|| {
+        [
+            // Bracketed tags. `explicit`/`clean` are deliberately only removed
+            // here, never as bare words, so "Some Clean Song" survives.
+            r"(?i)[\(\[]\s*(?:explicit|clean|official(?:\s+audio|\s+music\s+video|\s+video|\s+lyric\s+video|\s+visualizer)?|lyric\s*video|audio|video|music\s+video)\s*[\)\]]",
+            // Multi-word phrases, longest first. These must run before the
+            // single-word pass so "Audio Only" does not become "Only".
+            r"(?i)\b(?:official\s+music\s+video|official\s+lyric\s+video|official\s+visualizer|official\s+audio|official\s+video|radio\s+edit|album\s+version|single\s+version|lyrics\s*video|lyric\s*video|music\s+video|with\s+lyrics|audio\s+only|full\s+album|full\s+track|various\s+artists?|remaster(?:ed)?)\b",
+            // Resolution tags.
+            r"(?i)\b(?:1080p|720p|480p|4k|8k|hd)\b",
+            // Single noise words.
+            r"(?i)\b(?:visuali[sz]er|screensaver|performance|instrumental|acoustic|background|compilation|karaoke|ambient|extended|official|remix|version|lyrics?|audio|live|original|mix|edit)\b",
+            // Brackets emptied by the passes above.
+            r"[\(\[]\s*[\)\]]",
+        ]
+        .iter()
+        .map(|p| Regex::new(p).expect("noise pattern must compile"))
+        .collect()
+    })
+}
+
 /// Returns `(artist_option, cleaned_title)`.
 pub fn clean_youtube_title(title: &str) -> (Option<String>, String) {
     let mut result = title.to_string();
 
-    // Case-insensitive regex patterns for noise removal.
-    // Each pattern removes every occurrence (global replace).
-    // Ordered: longer/more specific patterns first.
-    static NOISE_PATTERNS: OnceLock<Vec<Regex>> = OnceLock::new();
-    let patterns = NOISE_PATTERNS.get_or_init(|| {
-        vec![
-            // Visualizers and similar
-            Regex::new(r"(?i)\bvisualizer\b").unwrap(),
-            Regex::new(r"(?i)\bvisualiser\b").unwrap(),
-            // Lyric variants
-            Regex::new(r"(?i)\blyric\s*video\b").unwrap(),
-            Regex::new(r"(?i)\blyrics\s*video\b").unwrap(),
-            Regex::new(r"(?i)\bwith\s*lyrics\b").unwrap(),
-            Regex::new(r"(?i)\blyrics?\b").unwrap(),
-            // Karaoke / sing-along
-            Regex::new(r"(?i)\bkaraoke\b").unwrap(),
-            // Screensaver / ambient / background
-            Regex::new(r"(?i)\bscreensaver\b").unwrap(),
-            Regex::new(r"(?i)\bambient\b").unwrap(),
-            Regex::new(r"(?i)\bbackground\b").unwrap(),
-            // Audio only / instrumental / acoustic
-            Regex::new(r"(?i)\baudio\s*only\b").unwrap(),
-            Regex::new(r"(?i)\binstrumental\b").unwrap(),
-            Regex::new(r"(?i)\bacoustic\b").unwrap(),
-            // Live / performance
-            Regex::new(r"(?i)\blive\b").unwrap(),
-            Regex::new(r"(?i)\bperformance\b").unwrap(),
-            // Remix / edit / version variants
-            Regex::new(r"(?i)\bremix\b").unwrap(),
-            Regex::new(r"(?i)\bedit\b").unwrap(),
-            Regex::new(r"(?i)\bextended\b").unwrap(),
-            Regex::new(r"(?i)\bversion\b").unwrap(),
-            Regex::new(r"(?i)\boriginal\b").unwrap(),
-            Regex::new(r"(?i)\bmix\b").unwrap(),
-            Regex::new(r"(?i)\bradio\s*edit\b").unwrap(),
-            Regex::new(r"(?i)\balbum\s*version\b").unwrap(),
-            Regex::new(r"(?i)\bsingle\s*version\b").unwrap(),
-            // Quality tags
-            Regex::new(r"(?i)\bhd\b").unwrap(),
-            Regex::new(r"(?i)\b4k\b").unwrap(),
-            Regex::new(r"(?i)\b8k\b").unwrap(),
-            Regex::new(r"(?i)\b1080p\b").unwrap(),
-            Regex::new(r"(?i)\b720p\b").unwrap(),
-            Regex::new(r"(?i)\b480p\b").unwrap(),
-            // Explicit / clean (only in brackets/parens)
-            Regex::new(r"(?i)\(explicit\)").unwrap(),
-            Regex::new(r"(?i)\(clean\)").unwrap(),
-            Regex::new(r"(?i)\[explicit\]").unwrap(),
-            Regex::new(r"(?i)\[clean\]").unwrap(),
-            Regex::new(r"(?i)\(official\s*audio\)").unwrap(),
-            Regex::new(r"(?i)\(official\s*music\s*video\)").unwrap(),
-            Regex::new(r"(?i)\(official\s*video\)").unwrap(),
-            Regex::new(r"(?i)\(official\s*lyric\s*video\)").unwrap(),
-            Regex::new(r"(?i)\(official\s*visualizer\)").unwrap(),
-            Regex::new(r"(?i)\(lyric\s*video\)").unwrap(),
-            Regex::new(r"(?i)\(audio\)").unwrap(),
-            Regex::new(r"(?i)\(video\)").unwrap(),
-            Regex::new(r"(?i)\(music\s*video\)").unwrap(),
-            Regex::new(r"(?i)\(official\)").unwrap(),
-            Regex::new(r"(?i)\(explicit\)").unwrap(),
-            Regex::new(r"(?i)\(clean\)").unwrap(),
-            Regex::new(r"(?i)\[official\s*audio\]").unwrap(),
-            Regex::new(r"(?i)\[official\s*music\s*video\]").unwrap(),
-            Regex::new(r"(?i)\[official\s*video\]").unwrap(),
-            Regex::new(r"(?i)\[official\s*lyric\s*video\]").unwrap(),
-            Regex::new(r"(?i)\[official\s*visualizer\]").unwrap(),
-            Regex::new(r"(?i)\[lyric\s*video\]").unwrap(),
-            Regex::new(r"(?i)\[explicit\]").unwrap(),
-            Regex::new(r"(?i)\[clean\]").unwrap(),
-            // Official tags without brackets (common on YouTube)
-            Regex::new(r"(?i)\bofficial\s+audio\b").unwrap(),
-            Regex::new(r"(?i)\bofficial\s+music\s+video\b").unwrap(),
-            Regex::new(r"(?i)\bofficial\s+video\b").unwrap(),
-            Regex::new(r"(?i)\bofficial\s+lyric\s+video\b").unwrap(),
-            Regex::new(r"(?i)\bofficial\s+visualizer\b").unwrap(),
-            Regex::new(r"(?i)\blyric\s+video\b").unwrap(),
-            Regex::new(r"(?i)\baudio\b").unwrap(),
-            Regex::new(r"(?i)\bmusic\s+video\b").unwrap(),
-            Regex::new(r"(?i)\bofficial\b").unwrap(),
-            // Remaster / remastered
-            Regex::new(r"(?i)\bremaster(?:ed)?\b").unwrap(),
-            // Empty brackets
-            Regex::new(r"\(\s*\)").unwrap(),
-            Regex::new(r"\[\s*\]").unwrap(),
-            // Full album / full track
-            Regex::new(r"(?i)\bfull\s*album\b").unwrap(),
-            Regex::new(r"(?i)\bfull\s*track\b").unwrap(),
-            // Compilation / various artists
-            Regex::new(r"(?i)\bcompilation\b").unwrap(),
-            Regex::new(r"(?i)\bvarious\s*artists?\b").unwrap(),
-        ]
-    });
+    // Case-insensitive noise removal. Grouped into a few alternations rather
+    // than one compiled program per token: same coverage, a fraction of the
+    // programs. Order matters and runs most-specific first, so "Radio Edit"
+    // is removed whole instead of leaving "Radio " behind.
+    let patterns = noise_patterns();
 
     for re in patterns {
         result = re.replace_all(&result, "").to_string();
     }
 
     // Strip year: (2024), [2024]
-    result = strip_bracket_content_matching(&result, |s| {
+    result = strip_bracket_match(&result, |s| {
         s.chars().all(|c| c.is_ascii_digit()) && s.len() == 4
     });
 
@@ -194,12 +131,12 @@ pub fn clean_youtube_title(title: &str) -> (Option<String>, String) {
 }
 
 /// Strip bracket content `(...)` or `[...]` where the inner content matches a predicate.
-fn strip_bracket_content_matching(s: &str, pred: impl Fn(&str) -> bool) -> String {
+fn strip_bracket_match(s: &str, pred: impl Fn(&str) -> bool) -> String {
     let mut result = s.to_string();
     loop {
         let mut found = false;
         // Find last matched bracket pair
-        if let Some((_open_ch, _close_ch, open_pos, close_pos)) = find_last_bracket_pair(&result) {
+        if let Some((_open_ch, _close_ch, open_pos, close_pos)) = last_bracket_pair(&result) {
             let inner = &result[open_pos + 1..close_pos];
             if pred(inner) {
                 // Remove the bracket and its content, plus any trailing space
@@ -220,7 +157,7 @@ fn strip_bracket_content_matching(s: &str, pred: impl Fn(&str) -> bool) -> Strin
 
 /// Strip a suffix parenthesized group matching a predicate.
 fn strip_suffix_parenthesized(s: &str, pred: impl Fn(&str) -> bool) -> String {
-    if let Some((_open_ch, _close_ch, open_pos, close_pos)) = find_last_bracket_pair(s)
+    if let Some((_open_ch, _close_ch, open_pos, close_pos)) = last_bracket_pair(s)
         && close_pos == s.len() - 1
     {
         let inner = &s[open_pos + 1..close_pos];
@@ -237,7 +174,7 @@ fn strip_suffix_parenthesized(s: &str, pred: impl Fn(&str) -> bool) -> String {
 }
 
 /// Find the last matched bracket pair in a string.
-fn find_last_bracket_pair(s: &str) -> Option<(char, char, usize, usize)> {
+fn last_bracket_pair(s: &str) -> Option<(char, char, usize, usize)> {
     let bytes = s.as_bytes();
     let mut last = None;
     for (i, &b) in bytes.iter().enumerate() {
@@ -353,26 +290,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_strip_official_audio() {
+    fn strip_official() {
         let (artist, title) = clean_youtube_title("Drake - God's Plan (Official Audio)");
         assert_eq!(artist.as_deref(), Some("Drake"));
         assert_eq!(title, "God's Plan");
     }
 
     #[test]
-    fn test_strip_multiple_tags() {
+    fn strip_multi_tags() {
         let (_, title) = clean_youtube_title("Song Title (Official Video) [HD] (2024)");
         assert_eq!(title, "Song Title");
     }
 
     #[test]
-    fn test_strip_topic_prefix() {
+    fn strip_topic() {
         let (_, title) = clean_youtube_title("Pink Floyd - Topic - Comfortably Numb");
         assert_eq!(title, "Comfortably Numb");
     }
 
     #[test]
-    fn test_strip_feature_tag() {
+    fn strip_feature_tag() {
         let (_, title) = clean_youtube_title("Song Title | feat. Someone");
         assert_eq!(title, "Song Title");
     }
@@ -383,14 +320,55 @@ mod tests {
     }
 
     #[test]
-    fn test_passthrough_clean_title() {
+    fn clean_title_pass() {
         let (artist, title) = clean_youtube_title("Some Clean Song Title");
         assert!(artist.is_none());
         assert_eq!(title, "Some Clean Song Title");
     }
 
     #[test]
-    fn test_normalize_filename_stem() {
+    fn strip_multiword_before_single() {
+        // "Audio Only" must vanish whole, not degrade to "Only".
+        let (_, title) = clean_youtube_title("Song Title (Audio Only)");
+        assert_eq!(title, "Song Title");
+        // Specific before generic: the generic "edit" must not eat "Radio"
+        // and leave it behind.
+        let (_, title) = clean_youtube_title("Song Title (Radio Edit)");
+        assert_eq!(title, "Song Title");
+        let (_, title) = clean_youtube_title("Song Title (Album Version)");
+        assert_eq!(title, "Song Title");
+    }
+
+    #[test]
+    fn strip_bracket_variants() {
+        for tag in [
+            "[Explicit]",
+            "(Clean)",
+            "[Official Music Video]",
+            "(Lyric Video)",
+            "[Official Audio]",
+        ] {
+            let (_, title) = clean_youtube_title(&format!("Song Title {tag}"));
+            assert_eq!(title, "Song Title", "tag {tag} should be stripped");
+        }
+    }
+
+    #[test]
+    fn keep_bare_clean_and_explicit() {
+        // Only the bracketed forms are noise; the words are valid title text.
+        let (artist, title) = clean_youtube_title("Some Clean Song (Explicit)");
+        assert!(artist.is_none());
+        assert_eq!(title, "Some Clean Song");
+    }
+
+    #[test]
+    fn strip_resolution_tags() {
+        let (_, title) = clean_youtube_title("Song Title 1080p");
+        assert_eq!(title, "Song Title");
+    }
+
+    #[test]
+    fn normalize_stem() {
         assert_eq!(
             normalize_filename_stem("Bazzi_-_Beautiful_feat._Camila_Official_Audio"),
             "Bazzi - Beautiful feat. Camila Official Audio"
@@ -400,14 +378,14 @@ mod tests {
     }
 
     #[test]
-    fn test_clean_filename_stem() {
+    fn clean_stem() {
         let (artist, title) = clean_filename_stem("Bazzi_-_Beautiful_feat._Camila_Official_Audio");
         assert_eq!(artist.as_deref(), Some("Bazzi"));
         assert_eq!(title, "Beautiful feat. Camila");
     }
 
     #[test]
-    fn test_title_is_unreliable() {
+    fn title_unreliable() {
         assert!(title_is_unreliable(
             "Hello",
             "Hello",
@@ -431,7 +409,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tags_need_enrichment() {
+    fn tags_need_enrich() {
         // Good title/artist/album but missing genre -> enrich.
         assert!(tags_need_enrichment(
             "Song",
@@ -466,7 +444,7 @@ mod tests {
     }
 
     #[test]
-    fn test_is_filename_like() {
+    fn filename_like_matches() {
         assert!(is_filename_like(
             "Bazzi_-_Beautiful_feat._Camila_Official_Audio",
             "Bazzi_-_Beautiful_feat._Camila__Audio"

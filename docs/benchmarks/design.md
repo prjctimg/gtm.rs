@@ -57,8 +57,8 @@ run loudly:
 
 | Fixture | Purpose |
 |---------|---------|
-| `fixtures/sample.flac` | lossless decode path |
-| `fixtures/sample.mp3` | lossy decode path |
+| `assets/fixtures/bench.flac` | lossless decode path |
+| `assets/fixtures/bench.mp3` | lossy decode path |
 
 Each played for 30 s, sampled every 100 ms, then SIGTERM.
 
@@ -74,8 +74,8 @@ Each played for 30 s, sampled every 100 ms, then SIGTERM.
 
 ## Harness plan
 
-`scripts/bench/run-bench.sh <player> <file> <seconds>` emits one JSON line per
-run; `scripts/bench/render.py` turns a results JSON into `BENCHMARK.md` with
+`scripts/bench/run.sh <player> <file> <seconds>` emits one JSON line per
+run; `scripts/bench/render.sh` turns a results JSON into `BENCHMARK.md` with
 mermaid bar/line charts and a delta table vs the previous tagged results.
 
 ## Automation ("update on every release")

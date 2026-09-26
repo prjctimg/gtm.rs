@@ -4,6 +4,7 @@
 //
 // This is free software released under the GPL-3.0 license.
 
+use crate::shared::state::ThemeMode;
 use ratatui::style::Color;
 use std::borrow::Cow;
 
@@ -114,9 +115,9 @@ pub fn readable_fg(fg: Color, bg: Color) -> Color {
     if (fg_l - bg_l).abs() >= CONTRAST_THRESHOLD {
         fg
     } else if bg_l > 128.0 {
-        Color::Rgb(20, 20, 20)
+        Color::Black
     } else {
-        Color::Rgb(240, 240, 240)
+        Color::White
     }
 }
 
@@ -430,17 +431,17 @@ fn catppuccin_latte() -> AppTheme {
         fg_dim: hex(0x4a5063),
         fg_bright: hex(0x14161d),
         accent: hex(0x1e66f5),
-        secondary_accent: hex(0x40a02b),
-        tertiary_accent: hex(0xfe640b),
+        secondary_accent: hex(0x2f7a20),
+        tertiary_accent: hex(0xb35400),
         error: hex(0xd20f39),
-        warning: hex(0xfe640b),
-        success: hex(0x40a02b),
+        warning: hex(0xb35400),
+        success: hex(0x2f7a20),
         selection_fg: hex(0xfdf6e3),
         selection_bg: hex(0x1e66f5),
         border: hex(0xcec8b4),
         border_active: hex(0x1e66f5),
-        volume_low: hex(0x40a02b),
-        volume_medium: hex(0xfe640b),
+        volume_low: hex(0x2f7a20),
+        volume_medium: hex(0xb35400),
         volume_high: hex(0xd20f39),
         sidebar_active_border: hex(0x1e66f5),
         notification_border: hex(0x1e66f5),
@@ -461,17 +462,17 @@ fn kanagawa_lotus() -> AppTheme {
         fg_dim: hex(0x4f4f5a),
         fg_bright: hex(0x23232b),
         accent: hex(0x2d6a9f),
-        secondary_accent: hex(0x6a9589),
-        tertiary_accent: hex(0xb47e2b),
+        secondary_accent: hex(0x476f63),
+        tertiary_accent: hex(0x8a5f1e),
         error: hex(0xc84053),
-        warning: hex(0xb47e2b),
-        success: hex(0x6a9589),
+        warning: hex(0x8a5f1e),
+        success: hex(0x476f63),
         selection_fg: hex(0xfdf6e3),
         selection_bg: hex(0x2d6a9f),
         border: hex(0xcec8b4),
         border_active: hex(0x2d6a9f),
-        volume_low: hex(0x6a9589),
-        volume_medium: hex(0xb47e2b),
+        volume_low: hex(0x476f63),
+        volume_medium: hex(0x8a5f1e),
         volume_high: hex(0xc84053),
         sidebar_active_border: hex(0x2d6a9f),
         notification_border: hex(0x2d6a9f),
@@ -492,21 +493,21 @@ fn solarized_light() -> AppTheme {
         fg: hex(0x073642),
         fg_dim: hex(0x586e75),
         fg_bright: hex(0x002b36),
-        accent: hex(0x268bd2),
-        secondary_accent: hex(0x2aa198),
-        tertiary_accent: hex(0xcb4b16),
-        error: hex(0xdc322f),
-        warning: hex(0xcb4b16),
-        success: hex(0x859900),
+        accent: hex(0x1e6fa8),
+        secondary_accent: hex(0x1f7a6e),
+        tertiary_accent: hex(0xb64612),
+        error: hex(0xc62e2a),
+        warning: hex(0xb64612),
+        success: hex(0x687500),
         selection_fg: hex(0xfdf6e3),
-        selection_bg: hex(0x268bd2),
+        selection_bg: hex(0x1e6fa8),
         border: hex(0x93a1a1),
-        border_active: hex(0x268bd2),
-        volume_low: hex(0x859900),
-        volume_medium: hex(0xcb4b16),
-        volume_high: hex(0xdc322f),
-        sidebar_active_border: hex(0x268bd2),
-        notification_border: hex(0x268bd2),
+        border_active: hex(0x1e6fa8),
+        volume_low: hex(0x687500),
+        volume_medium: hex(0xb64612),
+        volume_high: hex(0xc62e2a),
+        sidebar_active_border: hex(0x1e6fa8),
+        notification_border: hex(0x1e6fa8),
         monochromatic: false,
     }
 }
@@ -880,8 +881,7 @@ pub fn merged_themes() -> Vec<ThemeEntry> {
 ///
 /// Returns `None` when every probe is unavailable so the caller keeps its
 /// existing (persisted) choice instead of flipping the theme.
-pub fn detect_os_theme() -> Option<gtm_core::state::ThemeMode> {
-    use gtm_core::state::ThemeMode;
+pub fn detect_os_theme() -> Option<ThemeMode> {
     // Explicit override always wins.
     if let Ok(v) = std::env::var("GTM_THEME_MODE") {
         match v.to_ascii_lowercase().as_str() {
@@ -972,7 +972,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parse_color_accepts_hash_hex() {
+    fn color_accepts_hex() {
         assert_eq!(
             parse_color("#7aa2f7").unwrap(),
             Color::Rgb(0x7a, 0xa2, 0xf7)
@@ -981,19 +981,19 @@ mod tests {
     }
 
     #[test]
-    fn parse_color_rejects_bad_input() {
+    fn color_rejects_input() {
         assert!(parse_color("#abc").is_err());
         assert!(parse_color("zzzzzz").is_err());
         assert!(parse_color("").is_err());
     }
 
     #[test]
-    fn builtin_themes_have_unique_names() {
+    fn builtin_themes_unique() {
         assert_unique_names(builtin_themes().iter().map(|t| t.name.as_ref()), "theme");
     }
 
     #[test]
-    fn tokyonight_storm_derives_from_chadrula() {
+    fn storm_from_chadrula() {
         let base = chadrula();
         let storm = tokyonight_storm();
         // Shared fields stay in sync with the base.
@@ -1006,7 +1006,7 @@ mod tests {
     }
 
     #[test]
-    fn light_themes_are_flagged() {
+    fn light_themes_flag() {
         for t in builtin_themes() {
             let luma = match t.theme.bg {
                 Color::Rgb(r, g, b) => 0.299 * r as f64 + 0.587 * g as f64 + 0.114 * b as f64,
@@ -1021,8 +1021,60 @@ mod tests {
         }
     }
 
+    /// WCAG relative luminance for an sRGB color.
+    fn rel_luminance(c: &Color) -> f64 {
+        let linear = |v: u8| {
+            let s = f64::from(v) / 255.0;
+            if s <= 0.03928 {
+                s / 12.92
+            } else {
+                ((s + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        match c {
+            Color::Rgb(r, g, b) => 0.2126 * linear(*r) + 0.7152 * linear(*g) + 0.0722 * linear(*b),
+            _ => 0.5,
+        }
+    }
+
+    fn contrast_ratio(a: &Color, b: &Color) -> f64 {
+        let (hi, lo) = {
+            let (x, y) = (rel_luminance(a), rel_luminance(b));
+            if x > y { (x, y) } else { (y, x) }
+        };
+        (hi + 0.05) / (lo + 0.05)
+    }
+
     #[test]
-    fn user_theme_round_trip() {
+    fn light_themes_text_contrast() {
+        // Every light theme's text-role colors must hit WCAG AA (4.5:1) for
+        // normal text against the pane background: list rows, durations and
+        // accent highlights are all small body text on `pane_bg`.
+        for t in builtin_themes().iter().filter(|t| t.light) {
+            let text_roles = [
+                ("fg", t.theme.fg),
+                ("fg_dim", t.theme.fg_dim),
+                ("fg_bright", t.theme.fg_bright),
+                ("accent", t.theme.accent),
+                ("secondary_accent", t.theme.secondary_accent),
+                ("tertiary_accent", t.theme.tertiary_accent),
+                ("error", t.theme.error),
+                ("warning", t.theme.warning),
+                ("success", t.theme.success),
+            ];
+            for (role, color) in text_roles {
+                let ratio = contrast_ratio(&color, &t.theme.pane_bg);
+                assert!(
+                    ratio >= 4.5,
+                    "light theme {} role {role} contrast {ratio:.2}:1 < 4.5:1",
+                    t.name,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn theme_roundtrip() {
         let toml = r##"
             name = "Test"
             light = true
@@ -1056,7 +1108,7 @@ mod tests {
     }
 
     #[test]
-    fn user_theme_missing_c0_fields_fall_back() {
+    fn theme_missing_fields() {
         // Pre-C0 TOML without elevated_bg/muted_border must still parse.
         let toml = r##"
             name = "Legacy"
@@ -1086,7 +1138,7 @@ mod tests {
     }
 
     #[test]
-    fn merged_themes_replaces_on_collision() {
+    fn merged_theme_collision() {
         let mut v: Vec<ThemeEntry> = builtin_themes().to_vec();
         let custom = ThemeEntry {
             name: Cow::Borrowed("Chadrula"),

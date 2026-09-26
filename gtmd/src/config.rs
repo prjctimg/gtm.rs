@@ -7,6 +7,9 @@
 use std::path::PathBuf;
 
 use clap::Parser;
+
+use crate::cover::CoverProvider;
+use gtm::shared::{is_termux, resolve_command_socket, resolve_pulse_socket, termux_music_dirs};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -21,14 +24,12 @@ pub enum AudioBackendKind {
 pub struct DaemonConfig {
     pub socket_path: PathBuf,
     pub socket_pulse_path: PathBuf,
-    pub library_path: PathBuf,
     pub config_dir: PathBuf,
     pub cache_dir: PathBuf,
     pub data_dir: PathBuf,
     pub state_file: PathBuf,
     pub library_paths: Vec<PathBuf>,
     pub log_file: Option<PathBuf>,
-    pub verbose: bool,
     pub test_mode: bool,
     pub audio_backend: AudioBackendKind,
     /// Permit the daemon to physically delete audio files (and their `.lrc`
@@ -37,7 +38,9 @@ pub struct DaemonConfig {
     /// Defaults to allowing deletion (matches pre-flag behaviour).
     pub allow_delete_files: bool,
     /// Artwork source preference, read from the TUI's config.toml.
-    pub cover_provider: crate::cover::CoverProvider,
+    pub cover_provider: CoverProvider,
+    /// Combined on-disk cover cache budget in bytes, from `cover_cache_mb`.
+    pub cover_cache_bytes: u64,
 }
 
 #[derive(Parser, Debug)]
@@ -103,25 +106,17 @@ impl DaemonConfig {
         let socket_path = if let Some(ref s) = args.socket {
             PathBuf::from(s)
         } else {
-            gtm_core::resolve_command_socket()
+            resolve_command_socket()
         };
 
         let socket_pulse_path = if let Some(ref s) = args.socket {
+            // Mirror the client and `resolve_pulse_socket`: replace the socket
+            // extension with `pulse` so both ends agree on the path.
             let mut p = PathBuf::from(s);
-            let name = p
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "gtmd.sock".into());
-            p.set_file_name(format!("{name}.pulse"));
+            p.set_extension("pulse");
             p
         } else {
-            gtm_core::resolve_pulse_socket()
-        };
-
-        let library_path = if let Some(ref l) = args.library {
-            PathBuf::from(l)
-        } else {
-            data_dir.join("library.db")
+            resolve_pulse_socket()
         };
 
         let log_file = if args.test_mode {
@@ -137,7 +132,7 @@ impl DaemonConfig {
             // No explicit backend: on Termux, rodio/cpal cannot open an audio
             // device, so default to PulseAudio when it is compiled in.
             #[cfg(feature = "pulseaudio")]
-            _ if gtm_core::is_termux() => {
+            _ if is_termux() => {
                 eprintln!(
                     "gtmd: Termux detected: using the PulseAudio backend. \
                      The server will be started automatically if needed."
@@ -145,7 +140,7 @@ impl DaemonConfig {
                 AudioBackendKind::PulseAudio
             }
             #[cfg(not(feature = "pulseaudio"))]
-            _ if gtm_core::is_termux() => {
+            _ if is_termux() => {
                 eprintln!(
                     "gtmd: Termux detected but this build lacks the `pulseaudio` feature. \
                      Rebuild with `--features pulseaudio` so audio can be output on Termux."
@@ -164,37 +159,44 @@ impl DaemonConfig {
             }
         }
         // Termux: also scan shared storage (/sdcard/Music)
-        library_paths.extend(gtm_core::termux_music_dirs());
+        library_paths.extend(termux_music_dirs());
 
         let state_file = data_dir.join("state.json");
 
         // `cover_provider` lives in the same config.toml the gtm TUI edits.
         // Known keys are honored; anything unrecognized falls back to Auto.
-        let cover_provider = std::fs::read_to_string(config_dir.join("config.toml"))
+        let toml = std::fs::read_to_string(config_dir.join("config.toml"))
             .ok()
-            .and_then(|s| toml::from_str::<toml::Value>(&s).ok())
+            .and_then(|s| toml::from_str::<toml::Value>(&s).ok());
+        let cover_provider = toml
+            .as_ref()
             .and_then(|v| {
                 v.get("cover_provider")
                     .and_then(|p| p.as_str())
-                    .map(crate::cover::CoverProvider::from_str_lossy)
+                    .map(CoverProvider::from_str_lossy)
             })
             .unwrap_or_default();
+        let cover_cache_bytes = toml
+            .as_ref()
+            .and_then(|v| v.get("cover_cache_mb").and_then(|m| m.as_integer()))
+            .filter(|mb| *mb > 0)
+            .map(|mb| (mb as u64) * 1024 * 1024)
+            .unwrap_or(crate::cover::DISK_CACHE_DEFAULT);
 
         DaemonConfig {
             socket_path,
             socket_pulse_path,
-            library_path,
             config_dir,
             cache_dir,
             data_dir,
             state_file,
             library_paths,
             log_file,
-            verbose: args.verbose,
             test_mode: args.test_mode,
             audio_backend,
             allow_delete_files: true,
             cover_provider,
+            cover_cache_bytes,
         }
     }
 

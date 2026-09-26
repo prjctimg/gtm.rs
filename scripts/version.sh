@@ -1,6 +1,4 @@
 #!/usr/bin/env bash
-# Bump the project version across every file that references it.
-# Usage: scripts/version.sh <new-version>   (e.g. scripts/version.sh 0.2.6)
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
@@ -16,28 +14,19 @@ fi
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Workspace Cargo.toml — first 'version = "..." line is the workspace version,
-# plus the internal workspace-dependency version literals.
 sed -i -E '0,/^version = "[0-9.]+"$/s//version = "'"$NEW"'"/' "$ROOT/Cargo.toml"
-for dep in gtm-core gtm-audio gtm-mpris; do
-  sed -i -E 's/('"$dep"' = \{ path = "'"$dep"'", version = ")[0-9.]+("\s*\})/\1'"$NEW"'\2/' "$ROOT/Cargo.toml"
-done
 
-# flake.nix
 sed -i -E 's/(version = ")[0-9.]+(";)/\1'"$NEW"'\2/' "$ROOT/flake.nix"
 
-# Termux package manifest (local make deb-termux)
 sed -i -E 's/(Version: )[0-9.]+/\1'"$NEW"'/' "$ROOT/dist/termux/gtm.yml"
 
-# Arch PKGBUILD
 sed -i -E 's/(pkgver=)[0-9.]+/\1'"$NEW"'/' "$ROOT/dist/arch/PKGBUILD"
 
-# Arch (gtmd) RPM spec
 sed -i -E 's/(Version: )[0-9.]+/\1'"$NEW"'/' "$ROOT/dist/rpm/gtmd.spec"
 sed -i -E 's/( - )[0-9]+\.[0-9]+\.[0-9]+-1/\1'"$NEW"'-1/' "$ROOT/dist/rpm/gtmd.spec"
 
 echo "Bumped version to $NEW in:"
-echo "  Cargo.toml (workspace + internal deps)"
+echo "  Cargo.toml (workspace version)"
 echo "  flake.nix"
 echo "  dist/termux/gtm.yml"
 echo "  dist/arch/PKGBUILD"

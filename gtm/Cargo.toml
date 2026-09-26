@@ -10,30 +10,79 @@ keywords.workspace = true
 categories.workspace = true
 readme = "README.md"
 
+[features]
+default = ["mpris"]
+# MPRIS D-Bus integration (consumed by the gtmd daemon crate via gtmd/mpris).
+mpris = ["dep:zbus", "dep:zvariant"]
+# PulseAudio output backend (consumed by the gtmd daemon crate via
+# gtmd/pulseaudio).
+pulseaudio = ["dep:pulseaudio"]
+# Test/debug helper that forces IPC failures (tripwire).
+debug-fail = ["dep:rustc-hash"]
+
 [dependencies]
-gtm-core.workspace = true
-gtm-audio.workspace = true
 ratatui = "0.30"
 crossterm = { version = "0.28", features = ["bracketed-paste"] }
 tachyonfx = "0.22"
-tokio = { version = "1", features = ["full"] }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "io-util", "sync", "time", "macros", "process", "io-std", "signal"] }
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
 image = "0.25"
 color-thief = "0.2"
 ratatui-image = { version = "11", default-features = false, features = ["crossterm", "image-defaults"] }
 base64 = "0.22"
-serde = "1"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 toml = "0.8"
 libc = "0.2"
 webbrowser = "1"
 chrono = { version = "0.4", features = ["serde"] }
 rpassword = "7"
-reqwest = { version = "0.12", default-features = false, features = ["stream", "rustls-tls-native-roots"] }
+rmp-serde = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+async-trait = "0.1"
+keyring = "3"
+dirs = "5"
+rodio = { version = "0.22", default-features = false, features = ["playback", "symphonia-all"] }
+symphonia = { version = "0.6", default-features = false, features = ["all-codecs", "all-formats", "all-meta"] }
+symphonia-adapter-libopus = "0.3"
+fundsp = { version = "0.23", default-features = false, features = ["std"] }
+timestretch = "0.15"
+rustfft = "6"
+log = "0.4"
+rusqlite = { version = "0.31", features = ["bundled"] }
+tokio-util = "0.7"
 futures = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "blocking", "rustls-tls-native-roots"] }
+urlencoding = "2"
+regex = "1"
+md5 = "0.8"
+rspotify = { version = "0.16.1", default-features = false, features = ["client-reqwest", "reqwest-rustls-tls"] }
+librespot-core = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
+librespot-playback = { version = "0.8", default-features = false, features = ["rustls-tls-native-roots"] }
+sha2 = "0.10"
+walkdir = "2"
+quick-xml = "0.38"
+lofty = "0.24"
+lru = "0.12"
+hex = "0.4"
+fastrand = "2"
+getrandom = "0.2"
+zbus = { version = "4", features = ["tokio"], optional = true }
+zvariant = { version = "4", optional = true }
+pulseaudio = { version = "0.3", optional = true }
+rustc-hash = { version = "2", optional = true }
+
+[build-dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+
+[dev-dependencies]
+bincode = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "time", "macros"] }
 
 [package.metadata.deb]
 name = "gtm"
@@ -64,3 +113,7 @@ assets = [
      { source = "deb-assets/completions/gtmd.ps1", dest = "/usr/share/powershell/Modules/gtmd.ps1" },
      { source = "deb-assets/completions/gtmd.elv", dest = "/usr/share/elvish/lib/gtmd.elv" },
 ]
+
+[[bin]]
+name = "gtm"
+path = "src/main.rs"

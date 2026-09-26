@@ -1,6 +1,9 @@
 // Copyright (c) 2026
 // Author: prjctimg <prjctimg@outlook.com>
-// Deezer search for enriching unreliable track metadata
+// Deezer public-metadata search, used for enriching unreliable track metadata
+// and as a cover-art fallback. This is NOT a streaming provider: the ARL
+// streaming backend (Blowfish CDN) was removed with the Deezer provider; the
+// public `api.deezer.com` search/artist endpoints need no credentials.
 //
 // This is free software released under the GPL-3.0 license.
 
@@ -353,7 +356,7 @@ mod tests {
     }
 
     #[test]
-    fn test_best_match_accepts_plausible_hit() {
+    fn best_match_hit() {
         let results = vec![json!({
             "id": 1,
             "title": "Beautiful (feat. Camila Cabello)",
@@ -374,7 +377,7 @@ mod tests {
     }
 
     #[test]
-    fn test_best_match_rejects_unrelated() {
+    fn best_match_reject() {
         let results = vec![json!({
             "id": 2,
             "title": "Something Completely Different",
@@ -386,12 +389,12 @@ mod tests {
     }
 
     #[test]
-    fn test_best_match_empty_results() {
+    fn best_match_empty() {
         assert!(best_match(&[], "Bazzi", "Beautiful", 0.0).is_none());
     }
 
     #[test]
-    fn test_build_query_does_not_pre_encode() {
+    fn build_query_raw() {
         assert_eq!(
             build_query("Bazzi", "Beautiful feat. Camila"),
             "artist:\"Bazzi\" track:\"Beautiful feat. Camila\""
